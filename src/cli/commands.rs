@@ -99,8 +99,10 @@ fn handle_switch(mgr: &ConfigManager, target: Option<String>, mode: SwitchMode) 
 
     let config = switch_profile(mgr, provider_id, profile_id, mode, None)?;
     println!("Switched to: {} / {}", config.provider_name, config.profile_name);
-    println!("  Reasoning: {}", config.reasoning_model);
-    println!("  Task:      {}", config.task_model);
+    println!("  Opus:      {}", config.opus);
+    println!("  Sonnet:    {}", config.sonnet);
+    println!("  Haiku:     {}", config.haiku);
+    println!("  Subagent:  {}", config.subagent);
     println!("  Mode:      {:?}", mode);
     Ok(())
 }
@@ -114,7 +116,7 @@ fn handle_list(mgr: &ConfigManager, providers_only: bool, _profiles_only: bool) 
         if !providers_only {
             for pr in &p.profiles {
                 let active = if pr.default { " (default)" } else { "" };
-                println!("  ├─ {} ({}) [{}]{}", pr.name, pr.id, pr.reasoning_model, active);
+                println!("  ├─ {} ({}) [opus={}]{}", pr.name, pr.id, pr.opus, active);
             }
         }
         println!();
@@ -147,10 +149,12 @@ fn handle_add(mgr: &ConfigManager, what: &str, parent_provider: Option<&str>) ->
             use dialoguer::Input;
             let id: String = Input::new().with_prompt("Profile ID").interact_text()?;
             let name: String = Input::new().with_prompt("Name").interact_text()?;
-            let reasoning: String = Input::new().with_prompt("Reasoning model").interact_text()?;
-            let task: String = Input::new().with_prompt("Task model").interact_text()?;
+            let opus: String = Input::new().with_prompt("Opus model").interact_text()?;
+            let sonnet: String = Input::new().with_prompt("Sonnet model").interact_text()?;
+            let haiku: String = Input::new().with_prompt("Haiku model").interact_text()?;
+            let subagent: String = Input::new().with_prompt("Subagent model").interact_text()?;
             let pr = crate::core::models::Profile {
-                id, name, reasoning_model: reasoning, task_model: task,
+                id, name, opus, sonnet, haiku, subagent,
                 default: false,
                 source: crate::core::models::Source::User,
             };
@@ -170,7 +174,7 @@ fn handle_edit(mgr: &ConfigManager, target: &str) -> Result<()> {
         if let Some((p, pr)) = mgr.find_profile(provider_id, profile_id)? {
             println!("Provider: {} ({})", p.name, p.id);
             println!("Profile:  {} ({})", pr.name, pr.id);
-            println!("  reasoning={} task={}", pr.reasoning_model, pr.task_model);
+            println!("  opus={} sonnet={} haiku={} subagent={}", pr.opus, pr.sonnet, pr.haiku, pr.subagent);
         }
     } else {
         for p in &providers {

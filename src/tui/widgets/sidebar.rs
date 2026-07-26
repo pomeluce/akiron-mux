@@ -9,23 +9,23 @@ use ratatui::{
     Frame,
 };
 
-pub fn render_sidebar(f: &mut Frame, area: Rect, active_tab: Tab, is_proxy: bool) {
-    let tabs = [
+pub fn render_sidebar(f: &mut Frame, area: Rect, active_tab: Tab, proxy_mode: Option<bool>) {
+    let tabs = vec![
         (Tab::Providers, lang::current().tab_providers),
         (Tab::Usage, lang::current().tab_usage),
         (Tab::History, lang::current().tab_history),
         (Tab::Settings, lang::current().tab_settings),
     ];
 
-    let (mode_value, mode_color) = if is_proxy {
-        ("proxy", theme::current().green)
-    } else {
-        ("local", theme::current().yellow)
+    let (mode_value, mode_color) = match proxy_mode {
+        Some(true) => ("proxy", theme::current().green),
+        Some(false) => ("local", theme::current().yellow),
+        None => ("—", theme::current().dim),
     };
 
     let tab_lines = (tabs.len() * 2) as u16;
     let header_lines = 3u16; // title + 2 blank lines
-    let footer_lines = 1u16; // mode
+    let footer_lines = if proxy_mode.is_some() { 1u16 } else { 0u16 };
     let inner_h = area.height.saturating_sub(2); // border
     let avail = inner_h.saturating_sub(header_lines + footer_lines);
     let pad_bottom = avail.saturating_sub(tab_lines);
@@ -61,14 +61,16 @@ pub fn render_sidebar(f: &mut Frame, area: Rect, active_tab: Tab, is_proxy: bool
         lines.push(Line::from(""));
     }
 
-    let prefix = lang::current().mode_prefix;
-    let mdw = prefix.chars().map(|c| if c > '\u{7e}' { 2 } else { 1 }).sum::<usize>() + mode_value.chars().map(|c| if c > '\u{7e}' { 2 } else { 1 }).sum::<usize>();
-    let mpad = " ".repeat(inner_w.saturating_sub(mdw) / 2);
-    lines.push(Line::from(vec![
-        Span::styled(mpad, Style::default()),
-        Span::styled(prefix, Style::default().fg(theme::current().dim)),
-        Span::styled(mode_value, Style::default().fg(mode_color)),
-    ]));
+    if proxy_mode.is_some() {
+        let prefix = lang::current().mode_prefix;
+        let mdw = prefix.chars().map(|c| if c > '\u{7e}' { 2 } else { 1 }).sum::<usize>() + mode_value.chars().map(|c| if c > '\u{7e}' { 2 } else { 1 }).sum::<usize>();
+        let mpad = " ".repeat(inner_w.saturating_sub(mdw) / 2);
+        lines.push(Line::from(vec![
+            Span::styled(mpad, Style::default()),
+            Span::styled(prefix, Style::default().fg(theme::current().dim)),
+            Span::styled(mode_value, Style::default().fg(mode_color)),
+        ]));
+    }
 
     let p = Paragraph::new(lines).block(
         Block::bordered()

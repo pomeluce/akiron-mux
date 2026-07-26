@@ -35,7 +35,7 @@
         {
           packages.default = rustPlatform.buildRustPackage {
             pname = "ccswitch";
-            version = "1.8.1";
+            version = "1.9.0";
             src = ./.;
             cargoLock = {
               lockFile = ./Cargo.lock;
@@ -150,11 +150,19 @@
                                   options = {
                                     id = lib.mkOption { type = lib.types.str; };
                                     name = lib.mkOption { type = lib.types.str; };
-                                    reasoning_model = lib.mkOption {
+                                    opus = lib.mkOption {
                                       type = lib.types.str;
                                       default = "";
                                     };
-                                    task_model = lib.mkOption {
+                                    sonnet = lib.mkOption {
+                                      type = lib.types.str;
+                                      default = "";
+                                    };
+                                    haiku = lib.mkOption {
+                                      type = lib.types.str;
+                                      default = "";
+                                    };
+                                    subagent = lib.mkOption {
                                       type = lib.types.str;
                                       default = "";
                                     };

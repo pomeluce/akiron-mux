@@ -1,6 +1,6 @@
 use crate::core::config::ConfigManager;
 use crate::core::env::resolve_api_key;
-use crate::core::models::{ActiveConfig, SwitchMode};
+use crate::core::models::{ActiveConfig, AppType, Provider, SwitchMode};
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::path::Path;
@@ -27,8 +27,10 @@ pub fn switch_profile(mgr: &ConfigManager, provider_id: &str, profile_id: &str, 
         profile_name: profile.name.clone(),
         base_url: base_url.clone(),
         auth_token: auth_token.clone(),
-        reasoning_model: profile.reasoning_model.clone(),
-        task_model: profile.task_model.clone(),
+        opus: profile.opus.clone(),
+        sonnet: profile.sonnet.clone(),
+        haiku: profile.haiku.clone(),
+        subagent: profile.subagent.clone(),
     };
 
     match mode {
@@ -57,8 +59,8 @@ fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Pa
         settings_path.display(),
         config.base_url,
         if config.auth_token.is_empty() { "(empty)" } else { "(set)" },
-        config.reasoning_model,
-        config.task_model,
+        config.opus,
+        config.haiku,
     );
 
     let mut existing: serde_json::Value = if settings_path.exists() {
@@ -84,12 +86,11 @@ fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Pa
         SwitchMode::Local => {
             // Local: write model vars + auth token for Claude Code
             env["ANTHROPIC_AUTH_TOKEN"] = json!(config.auth_token);
-            env["ANTHROPIC_MODEL"] = json!(config.reasoning_model);
-            env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = json!(config.reasoning_model);
-            env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = json!(config.reasoning_model);
-            let task_model = config.task_model.replace("[1m]", "");
-            env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = json!(&task_model);
-            env["CLAUDE_CODE_SUBAGENT_MODEL"] = json!(&task_model);
+            env["ANTHROPIC_MODEL"] = json!(config.sonnet);
+            env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = json!(config.opus);
+            env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = json!(config.sonnet);
+            env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = json!(config.haiku.replace("[1m]", ""));
+            env["CLAUDE_CODE_SUBAGENT_MODEL"] = json!(config.subagent.replace("[1m]", ""));
         }
         SwitchMode::Proxy => {
             // Proxy: set dummy auth token (Claude Code requires it to skip login),
@@ -100,11 +101,13 @@ fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Pa
                 "ANTHROPIC_DEFAULT_OPUS_MODEL",
                 "ANTHROPIC_DEFAULT_SONNET_MODEL",
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-                "CLAUDE_CODE_SUBAGENT_MODEL",
             ];
             for k in &model_keys {
                 env.as_object_mut().and_then(|o| o.remove(*k));
             }
+            // Use a stable marker so the proxy can distinguish subagent calls
+            // from ordinary Opus/Sonnet/Haiku requests.
+            env["CLAUDE_CODE_SUBAGENT_MODEL"] = json!("ccswitch-subagent");
         }
     }
 
@@ -117,5 +120,159 @@ fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Pa
 
     std::fs::write(&settings_path, serde_json::to_string_pretty(&existing)?)?;
     tracing::debug!("write_settings_json: wrote to {}", settings_path.display());
+    Ok(())
+}
+
+/// Switch Codex to a provider and update ~/.codex/config.toml + auth.json.
+/// Existing unrelated settings and provider definitions are preserved.
+pub fn switch_codex_provider(
+    mgr: &ConfigManager,
+    provider_id: &str,
+    config_path: Option<&Path>,
+    auth_path: Option<&Path>,
+) -> Result<Provider> {
+    let provider = mgr
+        .find_provider_for(AppType::Codex, provider_id)?
+        .with_context(|| format!("Codex provider not found: {}", provider_id))?;
+    let auth_token = resolve_api_key(&provider.api_key);
+    if auth_token.is_empty() {
+        anyhow::bail!(
+            "API key unavailable for '{}'. Set {} or use a literal key.",
+            provider.id,
+            provider.api_key.strip_prefix("env:").unwrap_or("OPENAI_API_KEY")
+        );
+    }
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let codex_dir = Path::new(&home).join(".codex");
+    let config_path = config_path.map(Path::to_path_buf).unwrap_or_else(|| codex_dir.join("config.toml"));
+    let auth_path = auth_path.map(Path::to_path_buf).unwrap_or_else(|| codex_dir.join("auth.json"));
+
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Some(parent) = auth_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut config: toml_edit::DocumentMut = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        content.parse().context("Failed to parse Codex config.toml")?
+    } else {
+        toml_edit::DocumentMut::new()
+    };
+    config["model_provider"] = toml_edit::value(&provider.id);
+    if !config.as_table().get("model_providers").is_some_and(toml_edit::Item::is_table) {
+        config
+            .as_table_mut()
+            .insert("model_providers", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    let providers = config["model_providers"].as_table_mut().expect("table created above");
+    if providers.iter().all(|(_, item)| item.is_table()) {
+        providers.set_implicit(true);
+    }
+    if !providers.get(&provider.id).is_some_and(toml_edit::Item::is_table) {
+        providers.insert(&provider.id, toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    let provider_table = providers
+        .get_mut(&provider.id)
+        .and_then(toml_edit::Item::as_table_mut)
+        .expect("provider table created above");
+    provider_table.insert("name", toml_edit::value(&provider.name));
+    provider_table.insert("base_url", toml_edit::value(&provider.api_url));
+    provider_table.insert("wire_api", toml_edit::value("responses"));
+    provider_table.insert("requires_openai_auth", toml_edit::value(true));
+
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    if !config.as_table().get("ccswitch").is_some_and(toml_edit::Item::is_table) {
+        config
+            .as_table_mut()
+            .insert("ccswitch", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    let ccswitch = config["ccswitch"].as_table_mut().expect("table created above");
+    if !ccswitch.get("last_switch").is_some_and(toml_edit::Item::is_table) {
+        ccswitch.insert("last_switch", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    let last_switch = ccswitch
+        .get_mut("last_switch")
+        .and_then(toml_edit::Item::as_table_mut)
+        .expect("last_switch table created above");
+    last_switch.insert("source", toml_edit::value(&provider.id));
+    last_switch.insert("at", toml_edit::value(now));
+    if ccswitch.iter().all(|(key, item)| key == "last_switch" && item.is_table()) {
+        ccswitch.set_implicit(true);
+    }
+    std::fs::write(&config_path, config.to_string())?;
+
+    let mut auth: serde_json::Value = if auth_path.exists() {
+        let content = std::fs::read_to_string(&auth_path)?;
+        serde_json::from_str(&content).context("Failed to parse Codex auth.json")?
+    } else {
+        json!({})
+    };
+    if !auth.is_object() {
+        anyhow::bail!("Codex auth.json root must be an object");
+    }
+    auth["OPENAI_API_KEY"] = json!(auth_token);
+    std::fs::write(&auth_path, serde_json::to_string_pretty(&auth)?)?;
+
+    mgr.set_setting(AppType::Codex.active_provider_key(), &provider.id)?;
+    Ok(provider)
+}
+
+/// Remove a Codex provider definition from config.toml while preserving all
+/// unrelated settings, comments, and other providers.
+pub fn remove_codex_provider(
+    mgr: &ConfigManager,
+    provider_id: &str,
+    config_path: Option<&Path>,
+) -> Result<()> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let config_path = config_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| Path::new(&home).join(".codex/config.toml"));
+    if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        let mut config: toml_edit::DocumentMut = content
+            .parse()
+            .context("Failed to parse Codex config.toml")?;
+        if let Some(providers) = config
+            .as_table_mut()
+            .get_mut("model_providers")
+            .and_then(toml_edit::Item::as_table_mut)
+        {
+            providers.remove(provider_id);
+        }
+        let is_selected = config
+            .as_table()
+            .get("model_provider")
+            .and_then(toml_edit::Item::as_str)
+            == Some(provider_id);
+        if is_selected {
+            config.as_table_mut().remove("model_provider");
+        }
+        let last_source_matches = config
+            .as_table()
+            .get("ccswitch")
+            .and_then(toml_edit::Item::as_table)
+            .and_then(|table| table.get("last_switch"))
+            .and_then(toml_edit::Item::as_table)
+            .and_then(|table| table.get("source"))
+            .and_then(toml_edit::Item::as_str)
+            == Some(provider_id);
+        if last_source_matches {
+            if let Some(ccswitch) = config
+                .as_table_mut()
+                .get_mut("ccswitch")
+                .and_then(toml_edit::Item::as_table_mut)
+            {
+                ccswitch.remove("last_switch");
+            }
+        }
+        std::fs::write(config_path, config.to_string())?;
+    }
+    if mgr.get_setting(AppType::Codex.active_provider_key()).as_deref() == Some(provider_id) {
+        mgr.set_setting(AppType::Codex.active_provider_key(), "")?;
+    }
     Ok(())
 }

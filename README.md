@@ -2,13 +2,15 @@
 
 Claude Code 模型配置管理器 — Rust TUI + CLI 工具。
 
-管理多个 API 供应商的模型配置，支持一键切换、代理转发、会话历史浏览。本地模式直接修改 `settings.json`，代理模式通过本地 HTTP 代理自动路由。
+管理 Claude Code 与 Codex 的多个 API 供应商配置，支持一键切换、代理转发、会话历史浏览。Claude Code 支持本地/代理模式，Codex 直接维护自身配置文件。
 
 ## 功能
 
-- **模型管理**：按供应商组织模型配置（DeepSeek, OpenRouter, Z.AI 等），两层导航
+- **Claude 四模型配置**：每个 Profile 独立配置 Opus、Sonnet、Haiku、Subagent
+- **双应用顶栏**：顶栏显示 `Claude | Codex`，Space 切换当前应用上下文
+- **Codex Provider 管理**：Codex 只配置 Provider，无需 Profile，删除时同步清理 Codex config.toml
 - **一键切换**：本地模式直接写入 `~/.claude/settings.json`，代理模式更新 SQLite
-- **会话历史**：自动扫描 Claude Code 本地会话文件，支持搜索、过滤
+- **会话历史**：分别扫描 Claude Code 与 Codex 本地会话文件，支持搜索、过滤
 - **代理服务**：本地 HTTP 代理（端口 15721），自动模型名转换，支持 systemd / launchd / 计划任务后台运行
 - **Token 用量**：按模型统计 Token 消耗，带缓存避免每帧查询
 - **多语言**：内置中文 / English 切换，设置持久化
@@ -47,8 +49,10 @@ Claude Code 模型配置管理器 — Rust TUI + CLI 工具。
                   profiles = [
                     {
                       id = "v4"; name = "V4";
-                      reasoning_model = "deepseek-v4-pro[1m]";
-                      task_model = "deepseek-v4-flash";
+                      opus = "deepseek-v4-pro[1m]";
+                      sonnet = "deepseek-v4-pro[1m]";
+                      haiku = "deepseek-v4-flash";
+                      subagent = "deepseek-v4-flash";
                       default = true;
                     }
                   ];
@@ -219,12 +223,14 @@ ccs man                          # 输出 roff 格式 man page
 - `~/.config/ccswitch/ccswitch.db` — SQLite 数据库（模型配置、用量、会话）
 - `~/.config/ccswitch/defaults.toml` — 系统默认配置（Home Manager / NixOS 生成）
 - `~/.local/share/ccswitch/ccs.log` — TUI 运行日志
+- `~/.codex/config.toml` — Codex Provider 配置
+- `~/.codex/auth.json` — Codex API Key
 
 ### 首次启动
 
 首次启动 `ccs` 时会先显示终端进度条导入 Claude Code 历史会话数据（从 `~/.claude/projects/` 扫描 JSONL 文件）。导入完成后自动进入 TUI。后续启动跳过导入直接进入。
 
-用量数据在进入 TUI 后通过后台异步扫描，首次扫描后在用量标签页右侧面板显示进度条。后续启动使用文件修改时间增量扫描，仅扫描有变更的文件。
+用量数据在进入 TUI 后通过后台异步扫描。Claude 数据来自 `~/.claude/projects`，Codex 数据来自 `~/.codex/sessions`；会话与用量面板约每秒检测变化并实时刷新。Codex rename 后的会话标题从 `~/.codex/session_index.jsonl` 同步。
 
 ### defaults.toml
 
@@ -240,8 +246,10 @@ api_key = "env:DEEPSEEK_API_KEY"
 [[providers.profiles]]
 id = "v4"
 name = "V4"
-reasoning_model = "deepseek-v4-pro[1m]"
-task_model = "deepseek-v4-flash"
+opus = "deepseek-v4-pro[1m]"
+sonnet = "deepseek-v4-pro[1m]"
+haiku = "deepseek-v4-flash"
+subagent = "deepseek-v4-flash"
 default = true
 
 [[providers]]
@@ -253,31 +261,39 @@ api_key = "env:OPENROUTER_API_KEY"
 [[providers.profiles]]
 id = "claude"
 name = "Claude"
-reasoning_model = "anthropic/claude-opus-4"
-task_model = "anthropic/claude-haiku-4"
+opus = "anthropic/claude-opus-4"
+sonnet = "anthropic/claude-sonnet-4"
+haiku = "anthropic/claude-haiku-4"
+subagent = "anthropic/claude-haiku-4"
+
+[[codex_providers]]
+id = "codex-proxy"
+name = "Codex Proxy"
+api_url = "https://api.example.com/v1"
+api_key = "env:OPENAI_API_KEY"
 ```
 
 ### API Key 格式
 
-| 格式           | 说明                          |
-| -------------- | ----------------------------- |
-| `env:VAR_NAME` | 从环境变量读取，推荐          |
-| `sk-xxx...`    | 直接文本（明文存储，不安全）  |
-| 空值           | fallback 到 `$CLAUDE_API_KEY` |
+| 格式           | 说明                                             |
+| -------------- | ------------------------------------------------ |
+| `env:VAR_NAME` | 从进程环境或 `~/.config/ccswitch/env` 读取，推荐 |
+| `sk-xxx...`    | 直接文本（明文存储，不安全）                     |
+| 空值           | fallback 到 `$CLAUDE_API_KEY`                    |
 
 ## TUI 快捷键
 
 ### 全局
 
-| 键                  | 功能                |
-| ------------------- | ------------------- |
-| `Tab` / `Shift+Tab` | 切换侧边栏标签页    |
-| `Space`             | 切换 Claude / Codex |
-| `Q` / `q`           | 退出                |
+| 键                  | 功能             |
+| ------------------- | ---------------- | ---------- |
+| `Tab` / `Shift+Tab` | 切换侧边栏标签页 |
+| `Space`             | 切换顶栏 `Claude | Codex` Tab |
+| `Q` / `q`           | 退出             |
 
 ### 模型标签页
 
-两层导航：左侧 Provider 列表 → 右侧 Profile 列表
+Claude Code 使用两层导航：左侧 Provider 列表 → 右侧 Profile 列表。Codex 只显示 Provider 列表，`Enter` 直接切换。
 
 | 键          | 功能                              |
 | ----------- | --------------------------------- |
@@ -290,13 +306,13 @@ task_model = "anthropic/claude-haiku-4"
 
 ### 会话标签页
 
-| 键          | 功能                                   |
-| ----------- | -------------------------------------- |
-| `J/K` `↑/↓` | 上下导航（循环滚动）                   |
-| `Enter`     | 打开会话（弹窗确认，启动 Claude Code） |
-| `D`         | 删除会话（弹窗确认）                   |
-| `/`         | 搜索（分词匹配标题 + 项目名）          |
-| `Esc`       | 退出搜索 / 关闭弹窗                    |
+| 键          | 功能                                          |
+| ----------- | --------------------------------------------- |
+| `J/K` `↑/↓` | 上下导航（循环滚动）                          |
+| `Enter`     | 打开会话（根据顶栏启动 Claude Code 或 Codex） |
+| `D`         | 删除会话（弹窗确认）                          |
+| `/`         | 搜索（分词匹配标题 + 项目名）                 |
+| `Esc`       | 退出搜索 / 关闭弹窗                           |
 
 ### 用量标签页
 
@@ -318,7 +334,7 @@ task_model = "anthropic/claude-haiku-4"
 | `J/K` `↑/↓` | 选择设置项 |
 | `H/L` `←/→` | 切换选项值 |
 
-支持切换主题（7 种）、模式（local / proxy）、语言（中文 / English）。切换模式会立即生效（自动重写 `settings.json`）。
+设置面板由 Claude 与 Codex 共用，支持切换主题（7 种）、模式（local / proxy）、语言（中文 / English）。模式设置只对 Claude 生效；Codex 不区分 local/proxy。
 
 ## 写入映射
 
@@ -330,11 +346,11 @@ task_model = "anthropic/claude-haiku-4"
 | -------------------------------- | ----------------------- |
 | `ANTHROPIC_AUTH_TOKEN`           | 解析后的 API key        |
 | `ANTHROPIC_BASE_URL`             | 上游 API 地址           |
-| `ANTHROPIC_MODEL`                | `reasoning_model`       |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL`   | `reasoning_model`       |
-| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `reasoning_model`       |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL`  | `task_model`（去 [1m]） |
-| `CLAUDE_CODE_SUBAGENT_MODEL`     | `task_model`（去 [1m]） |
+| `ANTHROPIC_MODEL`                | `sonnet`                |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL`   | `opus`                  |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `sonnet`                |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL`  | `haiku`（去 `[1m]`）    |
+| `CLAUDE_CODE_SUBAGENT_MODEL`     | `subagent`（去 `[1m]`） |
 
 ### Proxy 模式
 
@@ -343,7 +359,33 @@ task_model = "anthropic/claude-haiku-4"
 | `ANTHROPIC_AUTH_TOKEN` | `ccswitch-proxy`（占位符） |
 | `ANTHROPIC_BASE_URL`   | `http://127.0.0.1:15721`   |
 
-模型变量不在 settings.json 中设置，由 proxy server 透明处理。
+Opus/Sonnet/Haiku 变量不在 settings.json 中设置，由 proxy server 透明处理；Subagent 使用内部标记以便代理识别并映射。
+
+### Codex Provider 切换
+
+Codex 不使用 Profile，也不区分 local/proxy。切换 Provider 时保留配置文件中的其他设置和已有 Provider，并写入：
+
+```toml
+model_provider = "codex-proxy"
+
+[model_providers.codex-proxy]
+name = "Codex Proxy"
+base_url = "https://api.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[ccswitch.last_switch]
+source = "codex-proxy"
+at = "2026-01-01 12:00:00"
+```
+
+同时更新 `~/.codex/auth.json`：
+
+```json
+{
+  "OPENAI_API_KEY": "解析后的 provider API key"
+}
+```
 
 ## 模式
 
@@ -357,7 +399,7 @@ task_model = "anthropic/claude-haiku-4"
 2. 代理监听 `127.0.0.1:15721`
 3. `settings.json` 的 `ANTHROPIC_BASE_URL` 指向代理，Claude Code 所有请求经过代理
 4. 代理自动进行模型名转换：
-   - 请求体：`claude-opus-4-8` → `reasoning_model`，其他 → `task_model`，去除 `[1m]`
+   - 请求体：Opus/Sonnet/Haiku/Subagent 分别映射到对应 Profile 字段，并去除 `[1m]`
    - 响应流：`message.model` 还原为原始名称，注入 `ccs_model` / `ccs_proxy` 标记
 5. 切换 profile 无需重启代理，代理每次请求从 DB 读取最新配置
 6. 自动记录 Token 用量到 SQLite

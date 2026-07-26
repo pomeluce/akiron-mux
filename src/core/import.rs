@@ -55,6 +55,16 @@ fn claude_projects_dir() -> PathBuf {
     PathBuf::from(home).join(".claude").join("projects")
 }
 
+fn codex_sessions_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".codex").join("sessions")
+}
+
+fn codex_session_index_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".codex").join("session_index.jsonl")
+}
+
 enum TitleField {
     Custom(String),
     Ai(String),
@@ -156,7 +166,7 @@ pub fn import_claude_sessions_with_progress(db: &Db, on_progress: impl Fn(usize,
     let file_index: HashMap<String, i64> = {
         let mut stmt = db
             .conn()
-            .prepare("SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type IN ('session','both')")?;
+            .prepare("SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type = 'session'")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         rows.filter_map(|r| r.ok()).collect()
     };
@@ -192,8 +202,11 @@ pub fn import_claude_sessions_with_progress(db: &Db, on_progress: impl Fn(usize,
                     imported += 1;
                 }
                 db.conn().execute(
-                    "INSERT OR REPLACE INTO session_log_sync (file_path, file_mtime, scan_type, last_synced_at)
-                     VALUES (?1, ?2, 'session', ?3)",
+                    "INSERT INTO session_log_sync (file_path, file_mtime, scan_type, last_synced_at)
+                     VALUES (?1, ?2, 'session', ?3)
+                     ON CONFLICT(file_path, scan_type) DO UPDATE SET
+                        file_mtime=excluded.file_mtime,
+                        last_synced_at=excluded.last_synced_at",
                     rusqlite::params![file_path_str, current_mtime, now_iso],
                 )?;
             }
@@ -215,6 +228,172 @@ pub fn import_claude_sessions_with_progress(db: &Db, on_progress: impl Fn(usize,
 
 pub fn import_claude_sessions(db: &Db) -> Result<usize, anyhow::Error> {
     import_claude_sessions_with_progress(db, |_, _, _| {})
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexLine {
+    timestamp: Option<String>,
+    #[serde(rename = "type")]
+    line_type: String,
+    #[serde(default)]
+    payload: serde_json::Value,
+}
+
+/// Incrementally import Codex session transcripts from ~/.codex/sessions.
+pub fn import_codex_sessions(db: &Db) -> Result<usize, anyhow::Error> {
+    let sessions_dir = codex_sessions_dir();
+    let session_index = load_codex_session_index(&codex_session_index_path());
+    if !sessions_dir.exists() {
+        apply_codex_session_index(db, &session_index)?;
+        return Ok(0);
+    }
+    let file_index: HashMap<String, i64> = {
+        let mut stmt = db.conn().prepare(
+            "SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type = 'session'",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+        rows.filter_map(|row| row.ok()).collect()
+    };
+
+    let mut imported = 0usize;
+    let now_iso = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    for path in collect_jsonl_files(&sessions_dir) {
+        let path_text = path.to_string_lossy().to_string();
+        let mtime = file_mtime_secs(&path);
+        if file_index.get(&path_text) == Some(&mtime) {
+            continue;
+        }
+        if let Some(record) = parse_codex_session_file(&path)? {
+            db.insert_session(&record, "codex")?;
+            db.conn().execute(
+                "INSERT INTO session_log_sync (file_path, file_mtime, scan_type, last_synced_at)
+                 VALUES (?1, ?2, 'session', ?3)
+                 ON CONFLICT(file_path, scan_type) DO UPDATE SET
+                    file_mtime=excluded.file_mtime,
+                    last_synced_at=excluded.last_synced_at",
+                rusqlite::params![path_text, mtime, now_iso],
+            )?;
+            imported += 1;
+        }
+    }
+    apply_codex_session_index(db, &session_index)?;
+    Ok(imported)
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexSessionIndexEntry {
+    id: String,
+    thread_name: String,
+    #[allow(dead_code)]
+    updated_at: Option<String>,
+}
+
+fn load_codex_session_index(path: &std::path::Path) -> HashMap<String, String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return HashMap::new(),
+    };
+    content.lines().filter_map(|line| {
+        let entry: CodexSessionIndexEntry = serde_json::from_str(line).ok()?;
+        let title = entry.thread_name.trim();
+        if entry.id.is_empty() || title.is_empty() {
+            return None;
+        }
+        Some((entry.id, truncate_title(title)))
+    }).collect()
+}
+
+fn apply_codex_session_index(db: &Db, index: &HashMap<String, String>) -> Result<(), rusqlite::Error> {
+    for (id, title) in index {
+        db.conn().execute(
+            "UPDATE session_history SET title = ?1 WHERE id = ?2 AND app_type = 'codex'",
+            rusqlite::params![title, id],
+        )?;
+    }
+    Ok(())
+}
+
+fn parse_codex_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, anyhow::Error> {
+    let metadata = std::fs::metadata(path)?;
+    let content = std::fs::read_to_string(path)?;
+    let mut session_id = String::new();
+    let mut cwd = String::new();
+    let mut provider = String::new();
+    let mut start_time = String::new();
+    let mut end_time = String::new();
+    let mut title: Option<String> = None;
+    let mut message_count = 0i64;
+
+    for raw in content.lines() {
+        let line: CodexLine = match serde_json::from_str(raw) {
+            Ok(line) => line,
+            Err(_) => continue,
+        };
+        if let Some(timestamp) = line.timestamp.as_deref() {
+            let normalized = chrono::DateTime::parse_from_rfc3339(timestamp)
+                .map(|dt| dt.with_timezone(&chrono::Utc).format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|_| timestamp.to_string());
+            if start_time.is_empty() {
+                start_time = normalized.clone();
+            }
+            end_time = normalized;
+        }
+        match line.line_type.as_str() {
+            "session_meta" => {
+                session_id = line.payload.get("id")
+                    .or_else(|| line.payload.get("session_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                cwd = line.payload.get("cwd").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+                provider = line.payload.get("model_provider").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+                if let Some(timestamp) = line.payload.get("timestamp").and_then(serde_json::Value::as_str) {
+                    start_time = chrono::DateTime::parse_from_rfc3339(timestamp)
+                        .map(|dt| dt.with_timezone(&chrono::Utc).format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|_| timestamp.to_string());
+                }
+            }
+            "event_msg" => {
+                let event_type = line.payload.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+                if matches!(event_type, "user_message" | "agent_message") {
+                    message_count += 1;
+                }
+                if title.is_none() && event_type == "user_message" {
+                    title = line.payload.get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .map(truncate_title);
+                }
+            }
+            _ => {}
+        }
+    }
+    if session_id.is_empty() {
+        return Ok(None);
+    }
+    let project_name = std::path::Path::new(&cwd)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Codex session".into());
+    let title = title.unwrap_or(project_name);
+    let file_mtime = metadata.modified().ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| ts_to_iso(duration.as_millis() as i64))
+        .unwrap_or_default();
+    Ok(Some(SessionRecord {
+        id: session_id,
+        project_path: cwd.clone(),
+        profile_id: if provider.is_empty() { None } else { Some(provider) },
+        mode: "direct".into(),
+        start_time,
+        end_time: if end_time.is_empty() { None } else { Some(end_time) },
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        message_count,
+        search_text: format!("{} {}", title, cwd).to_lowercase(),
+        title: Some(title),
+        size_bytes: metadata.len() as i64,
+        file_mtime,
+    }))
 }
 
 fn file_mtime_secs(path: &PathBuf) -> i64 {
@@ -445,7 +624,11 @@ struct UsageData {
 /// Background-thread function: collect changed files, parse them, send batches via channel.
 pub fn parse_files_in_background(app_type: String, ctx: ScanContext, batch_size: usize, tx: std::sync::mpsc::Sender<ScanEvent>) {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let projects_dir = PathBuf::from(&home).join(".claude/projects");
+    let projects_dir = if app_type == "codex" {
+        PathBuf::from(&home).join(".codex/sessions")
+    } else {
+        PathBuf::from(&home).join(".claude/projects")
+    };
     let mut changed_files: Vec<(PathBuf, String)> = Vec::new();
     if projects_dir.exists() {
         collect_changed_files(&projects_dir, &mut changed_files, &ctx.file_index);
@@ -461,8 +644,12 @@ pub fn parse_files_in_background(app_type: String, ctx: ScanContext, batch_size:
     let mut total_records = 0usize;
     let mut last_report = 0usize;
 
-    for (idx, (path, sid)) in changed_files.iter().enumerate() {
-        let records = parse_single_file(path, &known_set);
+    for (idx, (path, fallback_sid)) in changed_files.iter().enumerate() {
+        let (sid, records) = if app_type == "codex" {
+            parse_codex_usage_file(path, fallback_sid, &known_set)
+        } else {
+            (fallback_sid.clone(), parse_claude_usage_file(path, &known_set))
+        };
         let n = records.len();
         total_records += n;
 
@@ -487,7 +674,7 @@ pub fn parse_files_in_background(app_type: String, ctx: ScanContext, batch_size:
     let _ = tx.send(ScanEvent::Done {});
 }
 
-fn parse_single_file(path: &PathBuf, known_msg_ids: &std::collections::HashSet<&str>) -> Vec<UsageRecord> {
+fn parse_claude_usage_file(path: &PathBuf, known_msg_ids: &std::collections::HashSet<&str>) -> Vec<UsageRecord> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
@@ -532,6 +719,73 @@ fn parse_single_file(path: &PathBuf, known_msg_ids: &std::collections::HashSet<&
         .collect()
 }
 
+fn parse_codex_usage_file(
+    path: &PathBuf,
+    fallback_sid: &str,
+    known_msg_ids: &std::collections::HashSet<&str>,
+) -> (String, Vec<UsageRecord>) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return (fallback_sid.to_string(), vec![]),
+    };
+    let mut sid = fallback_sid.to_string();
+    let mut model = "unknown".to_string();
+    let mut records = Vec::new();
+    for (index, raw) in content.lines().enumerate() {
+        let line: CodexLine = match serde_json::from_str(raw) {
+            Ok(line) => line,
+            Err(_) => continue,
+        };
+        match line.line_type.as_str() {
+            "session_meta" => {
+                if let Some(id) = line.payload.get("id")
+                    .or_else(|| line.payload.get("session_id"))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    sid = id.to_string();
+                }
+            }
+            "turn_context" => {
+                if let Some(value) = line.payload.get("model").and_then(serde_json::Value::as_str) {
+                    model = value.to_string();
+                }
+            }
+            "event_msg" if line.payload.get("type").and_then(serde_json::Value::as_str) == Some("token_count") => {
+                let Some(usage) = line.payload.get("info").and_then(|info| info.get("last_token_usage")) else { continue };
+                let timestamp = line.timestamp.as_deref().unwrap_or("");
+                let msg_id = format!("codex:{}:{}:{}", sid, timestamp, index);
+                if known_msg_ids.contains(msg_id.as_str()) {
+                    continue;
+                }
+                let input = usage.get("input_tokens").and_then(serde_json::Value::as_i64).unwrap_or(0);
+                let cached = usage.get("cached_input_tokens").and_then(serde_json::Value::as_i64).unwrap_or(0);
+                let output = usage.get("output_tokens").and_then(serde_json::Value::as_i64).unwrap_or(0);
+                records.push(UsageRecord {
+                    msg_id,
+                    model: model.clone(),
+                    date: normalize_usage_timestamp(timestamp),
+                    input: input.saturating_sub(cached),
+                    output,
+                    cr: cached,
+                    cc: 0,
+                });
+            }
+            _ => {}
+        }
+    }
+    (sid, records)
+}
+
+fn normalize_usage_timestamp(timestamp: &str) -> String {
+    if timestamp.len() >= 19 {
+        format!("{} {}", &timestamp[..10], &timestamp[11..19])
+    } else if timestamp.len() >= 10 {
+        format!("{} 00:00:00", &timestamp[..10])
+    } else {
+        "today".to_string()
+    }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────
 
 pub fn collect_changed_files(dir: &PathBuf, out: &mut Vec<(PathBuf, String)>, file_index: &HashMap<String, i64>) {
@@ -560,5 +814,52 @@ pub fn file_mtime(path: &PathBuf) -> Option<i64> {
     let meta = std::fs::metadata(path).ok()?;
     let dur = meta.modified().ok()?;
     let secs = dur.duration_since(std::time::UNIX_EPOCH).ok()?;
-    Some(secs.as_secs() as i64)
+    i64::try_from(secs.as_nanos()).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_codex_session_and_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-test-session-1.jsonl");
+        std::fs::write(&path, concat!(
+            r#"{"timestamp":"2026-07-26T12:00:00Z","type":"session_meta","payload":{"id":"session-1","cwd":"/tmp/project","model_provider":"provider-1","timestamp":"2026-07-26T12:00:00Z"}}"#, "\n",
+            r#"{"timestamp":"2026-07-26T12:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"Implement the feature"}}"#, "\n",
+            r#"{"timestamp":"2026-07-26T12:00:02Z","type":"turn_context","payload":{"model":"gpt-test"}}"#, "\n",
+            r#"{"timestamp":"2026-07-26T12:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":120}}}}"#, "\n",
+            r#"{"timestamp":"2026-07-26T12:00:04Z","type":"event_msg","payload":{"type":"agent_message","message":"Done"}}"#, "\n",
+        )).unwrap();
+
+        let session = parse_codex_session_file(&path).unwrap().unwrap();
+        assert_eq!(session.id, "session-1");
+        assert_eq!(session.profile_id.as_deref(), Some("provider-1"));
+        assert_eq!(session.mode, "direct");
+        assert_eq!(session.title.as_deref(), Some("Implement the feature"));
+        assert_eq!(session.message_count, 2);
+
+        let known = std::collections::HashSet::new();
+        let (sid, records) = parse_codex_usage_file(&path, "fallback", &known);
+        assert_eq!(sid, "session-1");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].model, "gpt-test");
+        assert_eq!(records[0].input, 60);
+        assert_eq!(records[0].cr, 40);
+        assert_eq!(records[0].output, 20);
+
+        let index_path = dir.path().join("session_index.jsonl");
+        std::fs::write(
+            &index_path,
+            r#"{"id":"session-1","thread_name":"Renamed session","updated_at":"2026-07-26T13:00:00Z"}"#,
+        ).unwrap();
+        let index = load_codex_session_index(&index_path);
+        assert_eq!(index.get("session-1").map(String::as_str), Some("Renamed session"));
+        let db = Db::open(&dir.path().join("ccswitch.db")).unwrap();
+        db.insert_session(&session, "codex").unwrap();
+        apply_codex_session_index(&db, &index).unwrap();
+        let stored = db.query_sessions("codex", None, None, 10).unwrap();
+        assert_eq!(stored[0].title.as_deref(), Some("Renamed session"));
+    }
 }

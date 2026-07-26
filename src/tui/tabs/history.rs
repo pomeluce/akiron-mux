@@ -6,6 +6,7 @@ use super::super::widgets::session_detail::{render_empty_detail, render_session_
 use super::super::widgets::shared::{format_size, relative_time, render_confirm_popup as shared_confirm, render_search_box as shared_search, truncate};
 use super::TabContent;
 use crate::core::config::ConfigManager;
+use crate::core::models::AppType;
 use crate::db::sessions::SessionRecord;
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -39,16 +40,17 @@ pub struct HistoryTab {
     /// Cached token count for the selected session
     cached_tokens: Option<(i64, i64)>,
     cached_tokens_sid: String,
+    app: AppType,
     mgr: Arc<ConfigManager>,
 }
 
 impl HistoryTab {
-    pub fn new(mgr: Arc<ConfigManager>) -> Self {
+    pub fn new(mgr: Arc<ConfigManager>, app: AppType) -> Self {
         // Session import is handled before TUI launch (in main.rs with progress bar).
         // Just load whatever is already in the DB.
         let all = mgr
             .db()
-            .query_sessions("claude", None, None, 200)
+            .query_sessions(app.as_str(), None, None, 200)
             .unwrap_or_default()
             .into_iter()
             .filter(|s| s.size_bytes > 0)
@@ -73,8 +75,39 @@ impl HistoryTab {
             cached_prof_name: String::new(),
             cached_tokens: None,
             cached_tokens_sid: String::new(),
+            app,
             mgr,
         }
+    }
+
+    pub fn set_app(&mut self, app: AppType) {
+        self.app = app;
+        self.search_query.clear();
+        self.is_searching = false;
+        self.confirm_action = None;
+        self.cached_tokens = None;
+        self.cached_tokens_sid.clear();
+        self.cached_prov_name.clear();
+        self.cached_prof_name.clear();
+        let import_result = match app {
+            AppType::Claude => crate::core::import::import_claude_sessions(self.mgr.db()),
+            AppType::Codex => crate::core::import::import_codex_sessions(self.mgr.db()),
+        };
+        if let Err(e) = import_result {
+            tracing::warn!("Failed to import {} sessions: {}", app.as_str(), e);
+        }
+        self.reload_current();
+        self.state.select(if self.sessions.is_empty() { None } else { Some(0) });
+    }
+
+    pub fn reload_current(&mut self) {
+        self.all_sessions = self.mgr.db()
+            .query_sessions(self.app.as_str(), None, None, 200)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|session| session.size_bytes > 0)
+            .collect();
+        self.refresh();
     }
 
     pub fn refresh(&mut self) {
@@ -100,7 +133,7 @@ impl HistoryTab {
         if let Some(idx) = self.state.selected() {
             if idx < self.sessions.len() {
                 if let Some(session) = self.sessions.get(idx) {
-                    if let Err(e) = self.mgr.db().delete_session(&session.id) {
+                    if let Err(e) = self.mgr.db().delete_session(&session.id, self.app.as_str()) {
                         tracing::warn!("Failed to delete session from database: {}", e);
                     }
                     self.all_sessions.retain(|s| s.id != session.id);
@@ -219,14 +252,18 @@ impl TabContent for HistoryTab {
                 if self.cached_tokens_sid != s.id {
                     self.cached_tokens = self.mgr.db().query_session_tokens(&s.id).ok();
                     self.cached_tokens_sid = s.id.clone();
-                    let prov = self.mgr.get_setting("active_provider").unwrap_or_default();
-                    let prof = self.mgr.get_setting("active_profile").unwrap_or_default();
+                    let prov = self.mgr.get_setting(self.app.active_provider_key()).unwrap_or_default();
+                    let prof = if self.app == AppType::Claude {
+                        self.mgr.get_setting("active_profile").unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
                     self.cached_prov_name = prov;
                     self.cached_prof_name = prof;
                 }
                 let prov_name = if self.cached_prov_name.is_empty() { None } else { Some(self.cached_prov_name.as_str()) };
                 let prof_name = if self.cached_prof_name.is_empty() { None } else { Some(self.cached_prof_name.as_str()) };
-                render_session_detail(f, right_chunks[0], s, self.cached_tokens, prov_name, prof_name);
+                render_session_detail(f, right_chunks[0], s, self.cached_tokens, prov_name, prof_name, self.app);
             } else {
                 render_empty_detail(f, right_chunks[0], "No session selected");
             }

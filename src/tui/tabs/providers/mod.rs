@@ -6,7 +6,7 @@ use super::super::theme;
 use super::super::widgets::shared::{render_confirm_popup as shared_confirm, render_message_popup as shared_msg};
 use super::TabContent;
 use crate::core::config::ConfigManager;
-use crate::core::models::{Profile, Provider};
+use crate::core::models::{AppType, Profile, Provider};
 use crossterm::event::KeyCode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -33,6 +33,7 @@ pub enum ProviderAction {
 
 pub struct ProvidersTab {
     mgr: Arc<ConfigManager>,
+    app: AppType,
     // Provider list
     providers: Vec<Provider>,
     provider_state: ListState,
@@ -58,23 +59,26 @@ pub struct ProvidersTab {
 }
 
 impl ProvidersTab {
-    pub fn new(mgr: Arc<ConfigManager>) -> Self {
+    pub fn new(mgr: Arc<ConfigManager>, app: AppType) -> Self {
         crate::core::sync::sync_active_from_settings(&mgr);
+        crate::core::sync::sync_codex_active_from_config(&mgr);
 
-        let mut providers = mgr.list_providers().unwrap_or_default();
+        let mut providers = mgr.list_providers_for(app).unwrap_or_default();
         providers.sort_by(|a, b| match (a.source.can_delete(), b.source.can_delete()) {
             (false, true) => Ordering::Less,
             (true, false) => Ordering::Greater,
             _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         });
-        let active_provider = mgr.get_setting("active_provider").unwrap_or_default();
-        let active_profile = mgr.get_setting("active_profile").unwrap_or_default();
+        let active_provider = mgr.get_setting(app.active_provider_key()).unwrap_or_default();
+        let active_profile = if app == AppType::Claude {
+            mgr.get_setting("active_profile").unwrap_or_default()
+        } else {
+            String::new()
+        };
 
         let selected_provider_idx = providers.iter()
             .position(|p| p.id == active_provider)
             .unwrap_or(0);
-        let active_provider = providers.get(selected_provider_idx)
-            .map(|p| p.id.clone()).unwrap_or_default();
 
         let profiles = if let Some(p) = providers.get(selected_provider_idx) {
             p.profiles.clone()
@@ -93,6 +97,7 @@ impl ProvidersTab {
 
         ProvidersTab {
             mgr,
+            app,
             providers,
             provider_state,
             selected_provider_idx,
@@ -109,6 +114,29 @@ impl ProvidersTab {
             message: None,
             edit_form: None,
             provider_form: None,
+        }
+    }
+
+    pub fn switch_app(&mut self, app: AppType) {
+        self.app = app;
+        self.panel = Panel::ProviderList;
+        self.confirm_action = None;
+        self.message = None;
+        self.edit_form = None;
+        self.provider_form = None;
+        self.selected_provider_idx = 0;
+        self.selected_profile_idx = 0;
+        self.active_provider = self.mgr.get_setting(app.active_provider_key()).unwrap_or_default();
+        self.active_profile = if app == AppType::Claude {
+            self.mgr.get_setting("active_profile").unwrap_or_default()
+        } else {
+            String::new()
+        };
+        self.refresh_providers();
+        if let Some(index) = self.providers.iter().position(|p| p.id == self.active_provider) {
+            self.selected_provider_idx = index;
+            self.provider_state.select(Some(index));
+            self.load_profiles();
         }
     }
 
@@ -147,7 +175,7 @@ impl ProvidersTab {
             profiles: vec![],
             source: crate::core::models::Source::User,
         };
-        if let Err(e) = self.mgr.db().insert_provider(&pr, "claude") {
+        if let Err(e) = self.mgr.db().insert_provider(&pr, self.app.as_str()) {
             self.message = Some(format!("Failed to save provider: {}", e));
             return;
         }
@@ -160,16 +188,26 @@ impl ProvidersTab {
             self.message = Some(lang::current().msg_cannot_delete_sys_provider.into());
             return;
         }
-        if let Err(e) = self.mgr.db().delete_provider(&prov.id, "claude") {
+        let provider_id = prov.id.clone();
+        if self.app == AppType::Codex {
+            if let Err(e) = crate::core::switcher::remove_codex_provider(&self.mgr, &provider_id, None) {
+                self.message = Some(format!("Failed to update Codex config.toml: {}", e));
+                return;
+            }
+        }
+        if let Err(e) = self.mgr.db().delete_provider(&provider_id, self.app.as_str()) {
             self.message = Some(format!("Failed to delete: {}", e));
             return;
+        }
+        if self.active_provider == provider_id {
+            self.active_provider.clear();
         }
         self.refresh_providers();
     }
 
     /// Full refresh: re-fetch providers from DB (expensive, call on mutations or Enter)
     fn refresh_providers(&mut self) {
-        let mut providers = self.mgr.list_providers().unwrap_or_default();
+        let mut providers = self.mgr.list_providers_for(self.app).unwrap_or_default();
         providers.sort_by(|a, b| match (a.source.can_delete(), b.source.can_delete()) {
             (false, true) => Ordering::Less,
             (true, false) => Ordering::Greater,
@@ -184,8 +222,12 @@ impl ProvidersTab {
 
     /// Lightweight: load profiles for selected provider from cached data (no DB call)
     fn load_profiles(&mut self) {
-        self.profiles = if let Some(p) = self.providers.get(self.selected_provider_idx) {
-            p.profiles.clone()
+        self.profiles = if self.app == AppType::Claude {
+            if let Some(p) = self.providers.get(self.selected_provider_idx) {
+                p.profiles.clone()
+            } else {
+                vec![]
+            }
         } else {
             vec![]
         };
@@ -193,8 +235,6 @@ impl ProvidersTab {
             self.selected_profile_idx = 0;
         }
         self.profile_state.select(if self.profiles.is_empty() { None } else { Some(self.selected_profile_idx) });
-        self.active_provider = self.providers.get(self.selected_provider_idx)
-            .map(|p| p.id.clone()).unwrap_or_default();
     }
 
     fn selected_profile(&self) -> Option<&Profile> {
@@ -206,13 +246,14 @@ impl ProvidersTab {
     }
 
     fn do_add_profile(&mut self) {
+        if self.app == AppType::Codex { return; }
         let prov_id = self.selected_provider().map(|p| p.id.clone()).unwrap_or_default();
         if prov_id.is_empty() {
             return;
         }
         self.edit_form = Some(EditForm {
-            fields: [String::new(), String::new(), String::new(), String::new()],
-            cursors: [0, 0, 0, 0],
+            fields: std::array::from_fn(|_| String::new()),
+            cursors: [0; 6],
             focused: 0, is_edit: false,
             prov_id,
                     });
@@ -220,8 +261,15 @@ impl ProvidersTab {
 
     fn do_edit(&mut self) {
         let Some(prof) = self.selected_profile() else { return };
-        let fields = [prof.id.clone(), prof.name.clone(), prof.reasoning_model.clone(), prof.task_model.clone()];
-        let cursors = [fields[0].len(), fields[1].len(), fields[2].len(), fields[3].len()];
+        let fields = [
+            prof.id.clone(),
+            prof.name.clone(),
+            prof.opus.clone(),
+            prof.sonnet.clone(),
+            prof.haiku.clone(),
+            prof.subagent.clone(),
+        ];
+        let cursors = std::array::from_fn(|index| fields[index].len());
         let prov_id = self.selected_provider().map(|p| p.id.clone()).unwrap_or_default();
         self.edit_form = Some(EditForm {
             fields, cursors, focused: 0, is_edit: true, prov_id,
@@ -237,7 +285,8 @@ impl ProvidersTab {
         };
         let pr = Profile {
             id: prof_id, name: form.fields[1].clone(),
-            reasoning_model: form.fields[2].clone(), task_model: form.fields[3].clone(),
+            opus: form.fields[2].clone(), sonnet: form.fields[3].clone(),
+            haiku: form.fields[4].clone(), subagent: form.fields[5].clone(),
             default: false, source: crate::core::models::Source::User,
         };
         if let Err(e) = self.mgr.db().insert_profile(&form.prov_id, &pr) {
@@ -253,9 +302,16 @@ impl ProvidersTab {
             Some(p) => p.id.clone(),
             None => return,
         };
-        let prof_id = {
-            let Some(prof) = self.selected_profile() else { return };
-            prof.id.clone()
+        if self.app == AppType::Codex {
+            match crate::core::switcher::switch_codex_provider(&self.mgr, &prov_id, None, None) {
+                Ok(_) => self.active_provider = prov_id,
+                Err(e) => self.message = Some(format!("Error: {}", e)),
+            }
+            return;
+        }
+        let prof_id = match self.selected_profile() {
+            Some(profile) => profile.id.clone(),
+            None => return,
         };
         let mode = if self.mgr.get_setting("proxy_mode").map(|v| v == "true").unwrap_or(false) {
             crate::core::models::SwitchMode::Proxy
@@ -328,15 +384,18 @@ impl TabContent for ProvidersTab {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .areas(area);
+        let provider_area = if self.app == AppType::Codex { area } else { left };
 
         // ── Left: Provider list ──
         let provider_items: Vec<ListItem> = self.providers.iter().enumerate().map(|(i, p)| {
             let is_sel = self.selected_provider_idx == i;
             let arrow = if is_sel { "❯ " } else { "  " };
             let tc = if is_sel { theme::current().cyan } else { theme::current().fg };
+            let active = self.app == AppType::Codex && self.active_provider == p.id;
             ListItem::new(vec![
                 Line::from(vec![
                     Span::styled(format!("{}{}", arrow, p.name), Style::default().fg(tc)),
+                    if active { Span::styled(" ●", Style::default().fg(theme::current().green)) } else { Span::raw("") },
                 ]),
                 Line::from(vec![
                     Span::styled("  ", Style::default()),
@@ -344,7 +403,14 @@ impl TabContent for ProvidersTab {
                     Span::styled(" \u{b7} ", Style::default().fg(theme::current().dim)),
                     Span::styled(source_label(p.source), Style::default().fg(theme::current().comment)),
                     Span::styled(" \u{b7} ", Style::default().fg(theme::current().dim)),
-                    Span::styled(format!("{} {}", p.profiles.len(), lang::current().profiles_count), Style::default().fg(theme::current().comment)),
+                    Span::styled(
+                        if self.app == AppType::Codex {
+                            p.api_url.clone()
+                        } else {
+                            format!("{} {}", p.profiles.len(), lang::current().profiles_count)
+                        },
+                        Style::default().fg(theme::current().comment),
+                    ),
                 ]),
                 Line::from(""),
             ])
@@ -359,7 +425,14 @@ impl TabContent for ProvidersTab {
                     Style::default().fg(theme::current().dim)
                 }))
             .highlight_style(Style::default());
-        f.render_stateful_widget(prov_list, left, &mut self.provider_state);
+        f.render_stateful_widget(prov_list, provider_area, &mut self.provider_state);
+
+        if self.app == AppType::Codex {
+            if self.confirm_action.is_some() { self.render_confirm_popup(f, area); }
+            if self.message.is_some() { self.render_message_popup(f, area); }
+            if self.provider_form.is_some() { self.render_provider_form(f, area); }
+            return;
+        }
 
         // ── Right: Profile list ──
         let profile_items: Vec<ListItem> = self.profiles.iter().enumerate().map(|(i, pr)| {
@@ -376,9 +449,13 @@ impl TabContent for ProvidersTab {
                     Span::styled("     ", Style::default()),
                     Span::styled(&pr.id, Style::default().fg(theme::current().comment)),
                     Span::styled(" \u{b7} ", Style::default().fg(theme::current().dim)),
-                    Span::styled(&pr.reasoning_model, Style::default().fg(theme::current().comment)),
+                    Span::styled(format!("O:{}  S:{}", pr.opus, pr.sonnet), Style::default().fg(theme::current().comment)),
                     Span::styled(" \u{b7} ", Style::default().fg(theme::current().dim)),
                     Span::styled(source_label(pr.source), Style::default().fg(theme::current().comment)),
+                ]),
+                Line::from(vec![
+                    Span::styled("     ", Style::default()),
+                    Span::styled(format!("H:{}  A:{}", pr.haiku, pr.subagent), Style::default().fg(theme::current().comment)),
                 ]),
                 Line::from(""),
             ])
@@ -478,6 +555,16 @@ impl TabContent for ProvidersTab {
     }
 
     fn shortcut_groups(&self) -> Vec<Vec<(String, Color)>> {
+        if self.app == AppType::Codex {
+            return vec![
+                vec![(" J/K ".into(), theme::current().comment), (lang::current().sc_nav.into(), theme::current().comment)],
+                vec![(" ⏎  ".into(), theme::current().comment), (lang::current().sc_switch.into(), theme::current().comment)],
+                vec![(" A ".into(), theme::current().comment), (lang::current().sc_add.into(), theme::current().comment)],
+                vec![(" E ".into(), theme::current().comment), (lang::current().sc_edit.into(), theme::current().comment)],
+                vec![(" D ".into(), theme::current().comment), (lang::current().sc_delete.into(), theme::current().comment)],
+                vec![(" Q ".into(), theme::current().comment), (lang::current().sc_quit.into(), theme::current().comment)],
+            ];
+        }
         match self.panel {
             Panel::ProviderList => vec![
                 vec![(" J/K ".into(), theme::current().comment), (lang::current().sc_nav.into(), theme::current().comment)],
@@ -500,10 +587,12 @@ impl TabContent for ProvidersTab {
     }
 
     fn shortcut_lines(&self, available_width: u16) -> usize {
-        let widths: &[usize] = match self.panel {
+        let widths: &[usize] = if self.app == AppType::Codex {
+            &[8, 10, 7, 7, 7, 7]
+        } else { match self.panel {
             Panel::ProviderList => &[8, 12, 7, 7, 7, 7],
             Panel::ProfileList => &[8, 10, 7, 8, 7, 9, 7],
-        };
+        }};
         let sep = 2usize;
         let w = available_width.saturating_sub(2).max(10) as usize;
         let mut lines = 1usize;
@@ -540,9 +629,16 @@ impl ProvidersTab {
                 }
             }
             KeyCode::Enter => {
-                self.panel = Panel::ProfileList;
-                self.refresh_providers();
-                self.profile_state.select(Some(self.selected_profile_idx));
+                if self.app == AppType::Codex {
+                    if !self.providers.is_empty() {
+                        self.confirm_action = Some(ProviderAction::Switch);
+                        self.confirm_button = 0;
+                    }
+                } else {
+                    self.panel = Panel::ProfileList;
+                    self.refresh_providers();
+                    self.profile_state.select(Some(self.selected_profile_idx));
+                }
             }
             KeyCode::Char('a') | KeyCode::Char('A') => self.do_add_provider(),
             KeyCode::Char('e') | KeyCode::Char('E') => self.do_edit_provider(),

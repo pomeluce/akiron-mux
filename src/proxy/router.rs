@@ -22,8 +22,10 @@ pub struct ProxyState {
 struct UpstreamInfo {
     api_url: String,
     auth_token: String,
-    reasoning_model: String,
-    task_model: String,
+    opus_model: String,
+    sonnet_model: String,
+    haiku_model: String,
+    subagent_model: String,
 }
 
 /// Handle all incoming Anthropic-compatible API requests.
@@ -81,8 +83,10 @@ pub async fn proxy_handler(
     // ── Transform request body: replace Claude model → actual upstream model ──
     let (transformed_body, original_model, actual_model) = match transform::transform_request_body(
         &body_bytes,
-        &upstream.reasoning_model,
-        &upstream.task_model,
+        &upstream.opus_model,
+        &upstream.sonnet_model,
+        &upstream.haiku_model,
+        &upstream.subagent_model,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -209,8 +213,10 @@ fn get_active_upstream(mgr: &ConfigManager) -> anyhow::Result<UpstreamInfo> {
     Ok(UpstreamInfo {
         api_url: provider.api_url,
         auth_token: token,
-        reasoning_model: profile.reasoning_model.clone(),
-        task_model: profile.task_model.clone(),
+        opus_model: profile.opus.clone(),
+        sonnet_model: profile.sonnet.clone(),
+        haiku_model: profile.haiku.clone(),
+        subagent_model: profile.subagent.clone(),
     })
 }
 

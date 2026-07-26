@@ -33,13 +33,17 @@ impl Db {
     }
 
     /// Delete a session record, its usage logs, and the on-disk JSONL file.
-    pub fn delete_session(&self, id: &str) -> Result<(), rusqlite::Error> {
+    pub fn delete_session(&self, id: &str, app_type: &str) -> Result<(), rusqlite::Error> {
         self.conn().execute("DELETE FROM usage_logs WHERE session_id = ?1", params![id])?;
         self.conn().execute("DELETE FROM session_history WHERE id = ?1", params![id])?;
 
         // Delete the actual JSONL file from disk
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        let projects_dir = std::path::PathBuf::from(&home).join(".claude/projects");
+        let projects_dir = if app_type == "codex" {
+            std::path::PathBuf::from(&home).join(".codex/sessions")
+        } else {
+            std::path::PathBuf::from(&home).join(".claude/projects")
+        };
         let file_name = format!("{}.jsonl", id);
         if let Some(file_path) = Self::find_session_file(&projects_dir, &file_name) {
             if let Err(e) = std::fs::remove_file(&file_path) {
@@ -70,7 +74,9 @@ impl Db {
                 if let Some(found) = Self::find_session_file_impl(&path, file_name, depth - 1) {
                     return Some(found);
                 }
-            } else if path.file_name().map_or(false, |n| n == file_name) {
+            } else if path.file_name().map_or(false, |name| {
+                name == file_name || name.to_string_lossy().ends_with(file_name)
+            }) {
                 return Some(path);
             }
         }

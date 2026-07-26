@@ -11,16 +11,23 @@ use ratatui::{
 };
 
 pub struct EditForm {
-    pub fields: [String; 4],
-    pub cursors: [usize; 4],
+    pub fields: [String; 6],
+    pub cursors: [usize; 6],
     pub focused: usize,
     pub prov_id: String,
     pub is_edit: bool,
 }
 
-pub fn edit_labels() -> [&'static str; 4] {
+pub fn edit_labels() -> [&'static str; 6] {
     let l = lang::current();
-    [l.label_profile_id, l.label_profile_name, l.label_reasoning, l.label_task_model]
+    [
+        l.label_profile_id,
+        l.label_profile_name,
+        l.label_opus,
+        l.label_sonnet,
+        l.label_haiku,
+        l.label_subagent,
+    ]
 }
 
 impl EditForm {
@@ -32,10 +39,10 @@ impl EditForm {
         let cur = &mut self.cursors[self.focused];
         match code {
             KeyCode::Tab => {
-                self.focused = (self.focused + 1) % 4;
+                self.focused = (self.focused + 1) % 6;
             }
             KeyCode::BackTab => {
-                self.focused = if self.focused == 0 { 3 } else { self.focused - 1 };
+                self.focused = if self.focused == 0 { 5 } else { self.focused - 1 };
             }
             KeyCode::Left => {
                 *cur = cur.saturating_sub(1);
@@ -70,7 +77,7 @@ impl EditForm {
 }
 
 pub fn render_edit_form(form: &EditForm, f: &mut Frame, area: Rect) {
-    let popup = centered_rect(60, 22, area);
+    let popup = centered_rect(65, 26, area);
     let inner_w = popup.width.saturating_sub(2) as usize;
     let pad_w = (inner_w.saturating_sub(40)) / 2;
     let pad = " ".repeat(pad_w);

@@ -1,4 +1,5 @@
 use ccswitch::core::config::ConfigManager;
+use ccswitch::core::models::AppType;
 use ccswitch::db::Db;
 use std::fs;
 use tempfile::tempdir;
@@ -19,8 +20,10 @@ api_key = "env:TEST_KEY"
 [[providers.profiles]]
 id = "test-profile"
 name = "Test Profile"
-reasoning_model = "model-reasoning"
-task_model = "model-task"
+opus = "model-opus"
+sonnet = "model-sonnet"
+haiku = "model-haiku"
+subagent = "model-subagent"
 default = true
 "#,
     )
@@ -33,6 +36,26 @@ default = true
     assert_eq!(providers[0].source, ccswitch::core::models::Source::System);
     assert_eq!(providers[0].profiles.len(), 1);
     assert_eq!(providers[0].profiles[0].name, "Test Profile");
+}
+
+#[test]
+fn test_codex_defaults_load_without_profiles() {
+    let dir = tempdir().unwrap();
+    let defaults_path = dir.path().join("defaults.toml");
+    fs::write(&defaults_path, r#"
+version = 1
+[[codex_providers]]
+id = "codex-proxy"
+name = "Codex Proxy"
+api_url = "https://codex.example.com/v1"
+api_key = "env:OPENAI_API_KEY"
+"#).unwrap();
+
+    let mgr = ConfigManager::new(&dir.path().join("ccswitch.db"), Some(&defaults_path)).unwrap();
+    let providers = mgr.list_providers_for(AppType::Codex).unwrap();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].id, "codex-proxy");
+    assert!(providers[0].profiles.is_empty());
 }
 
 #[test]
@@ -51,8 +74,10 @@ api_key = "env:SYS_KEY"
 [[providers.profiles]]
 id = "prof1"
 name = "System Profile"
-reasoning_model = "sys-reasoning"
-task_model = "sys-task"
+opus = "sys-opus"
+sonnet = "sys-sonnet"
+haiku = "sys-haiku"
+subagent = "sys-subagent"
 "#,
     )
     .unwrap();

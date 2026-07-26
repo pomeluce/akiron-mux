@@ -14,3 +14,10 @@ sonnet = "deepseek-v4-pro[1m]"
 haiku = "deepseek-v4-flash"
 subagent = "deepseek-v4-flash"
 default = true
+
+# Codex providers do not use profiles. They can also be added from the TUI.
+[[codex_providers]]
+id = "openai-api"
+name = "OpenAI API"
+api_url = "https://api.openai.com/v1"
+api_key = "env:OPENAI_API_KEY"

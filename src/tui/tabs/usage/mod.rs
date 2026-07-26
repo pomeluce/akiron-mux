@@ -6,6 +6,7 @@ use super::super::theme;
 use super::super::widgets::shared::{format_tokens, render_search_box as shared_search};
 use super::TabContent;
 use crate::core::config::ConfigManager;
+use crate::core::models::AppType;
 use crate::db::usage::{ScanContext, ScanEvent, UsageSummary};
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -34,6 +35,7 @@ pub struct UsageTab {
     pub is_searching: bool,
     chart_scroll: usize,
     app_type: String,
+    scan_app: String,
     /// Cached daily usage to avoid per-frame DB queries
     cached_daily: Option<(String, Vec<(String, i64, i64, i64, i64)>)>,
     /// Background scan receiver + state
@@ -41,25 +43,32 @@ pub struct UsageTab {
     scan_state: ScanState,
     /// Handle for graceful shutdown of the background scan thread
     scan_handle: Option<std::thread::JoinHandle<()>>,
+    /// A file change arrived while a scan was running.
+    rescan_pending: bool,
 }
 
 impl UsageTab {
-    pub fn new(mgr: Arc<ConfigManager>) -> Self {
+    pub fn new(mgr: Arc<ConfigManager>, app: AppType) -> Self {
         let scan_state;
         let scan_rx;
         let scan_handle;
+        let app_type = app.as_str().to_string();
 
         // Check if this is first launch (no usage data yet)
         let is_first_launch = {
             let db = mgr.db();
-            let count: i64 = db.conn().query_row("SELECT COUNT(*) FROM usage_logs", [], |r| r.get(0)).unwrap_or(0);
+            let count: i64 = db.conn().query_row(
+                "SELECT COUNT(*) FROM usage_logs WHERE app_type = ?1",
+                [&app_type],
+                |r| r.get(0),
+            ).unwrap_or(0);
             count == 0
         };
 
         // Prepare scan context on main thread (DB access only, fast) then spawn background parser
         {
             let (tx, rx) = mpsc::channel();
-            let ctx = match mgr.db().prepare_scan_context("claude") {
+            let ctx = match mgr.db().prepare_scan_context(&app_type) {
                 Ok(c) => {
                     tracing::info!("Scan prep: {} known msg IDs, {} files in index", c.known_msg_ids.len(), c.file_index.len());
                     c
@@ -73,8 +82,9 @@ impl UsageTab {
                 }
             };
             // Always spawn background thread — it does its own file collection
+            let scan_target = app_type.clone();
             let handle = std::thread::spawn(move || {
-                crate::core::import::parse_files_in_background("claude".into(), ctx, 10, tx);
+                crate::core::import::parse_files_in_background(scan_target, ctx, 10, tx);
             });
             scan_rx = Some(rx);
             scan_handle = Some(handle);
@@ -89,7 +99,7 @@ impl UsageTab {
             }
         }
 
-        let summaries = mgr.db().query_usage("claude", "all").unwrap_or_default();
+        let summaries = mgr.db().query_usage(&app_type, "all").unwrap_or_default();
         let mut state = ListState::default();
         if !summaries.is_empty() {
             state.select(Some(0));
@@ -103,11 +113,26 @@ impl UsageTab {
             search_query: String::new(),
             is_searching: false,
             chart_scroll: 0,
-            app_type: "claude".to_string(),
+            scan_app: app_type.clone(),
+            app_type,
             cached_daily: None,
             scan_rx,
             scan_state,
             scan_handle,
+            rescan_pending: false,
+        }
+    }
+
+    pub fn set_app(&mut self, app: AppType) {
+        self.app_type = app.as_str().to_string();
+        self.cached_daily = None;
+        self.selected_index = 0;
+        self.summaries = self.mgr.db().query_usage(&self.app_type, &self.range).unwrap_or_default();
+        self.state.select(if self.summaries.is_empty() { None } else { Some(0) });
+        if self.scan_handle.is_none() {
+            self.trigger_incremental_scan();
+        } else {
+            self.rescan_pending = true;
         }
     }
 
@@ -119,9 +144,11 @@ impl UsageTab {
     /// Trigger an incremental scan (called by file watcher when changes detected)
     pub fn trigger_incremental_scan(&mut self) {
         if self.scan_handle.is_some() {
-            return; // Already running
+            self.rescan_pending = true;
+            return;
         }
-        let ctx = match self.mgr.db().prepare_scan_context("claude") {
+        let scan_app = self.app_type.clone();
+        let ctx = match self.mgr.db().prepare_scan_context(&scan_app) {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("Failed to prepare incremental scan: {}", e);
@@ -129,11 +156,14 @@ impl UsageTab {
             }
         };
         let (tx, rx) = mpsc::channel();
+        let worker_app = scan_app.clone();
         let handle = std::thread::spawn(move || {
-            crate::core::import::parse_files_in_background("claude".into(), ctx, 10, tx);
+            crate::core::import::parse_files_in_background(worker_app, ctx, 10, tx);
         });
         self.scan_rx = Some(rx);
         self.scan_handle = Some(handle);
+        self.scan_app = scan_app;
+        self.rescan_pending = false;
         // Keep Idle — silent background scan, no progress bar in UI
     }
 
@@ -166,9 +196,9 @@ impl UsageTab {
         let mut done = false;
         loop {
             match rx.try_recv() {
-                Ok(ScanEvent::Batch { sid, file_path, records, .. }) => {
+                Ok(ScanEvent::Batch { app_type, sid, file_path, records }) => {
                     if !records.is_empty() {
-                        if let Err(e) = self.mgr.db().insert_usage_batch("claude", &sid, &file_path, &records) {
+                        if let Err(e) = self.mgr.db().insert_usage_batch(&app_type, &sid, &file_path, &records) {
                             tracing::error!("Failed to insert usage batch: {}", e);
                         }
                     }
@@ -192,6 +222,7 @@ impl UsageTab {
         }
 
         if done {
+            let completed_app = self.scan_app.clone();
             tracing::info!("Usage scan complete");
             self.scan_state = ScanState::Idle;
             self.scan_rx = None;
@@ -203,14 +234,15 @@ impl UsageTab {
             if !self.summaries.is_empty() && self.state.selected().is_none() {
                 self.state.select(Some(0));
             }
+            if self.rescan_pending || completed_app != self.app_type {
+                self.trigger_incremental_scan();
+            }
         }
     }
 }
 
 impl TabContent for UsageTab {
     fn render(&mut self, f: &mut Frame, area: Rect) {
-        if self.app_type != "claude" { self.cached_daily = None; }
-        self.app_type = "claude".to_string();
         let main = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -447,4 +479,3 @@ impl UsageTab {
         scan::render_scan_progress(f, area, files_done, files_total, records);
     }
 }
-

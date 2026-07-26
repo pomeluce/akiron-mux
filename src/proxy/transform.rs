@@ -7,8 +7,10 @@ use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 /// return the original model name so it can be restored in the response.
 pub fn transform_request_body(
     body_bytes: &[u8],
-    reasoning_model: &str,
-    task_model: &str,
+    opus_model: &str,
+    sonnet_model: &str,
+    haiku_model: &str,
+    subagent_model: &str,
 ) -> Result<(Vec<u8>, String, String), String> {
     let mut json: Value =
         serde_json::from_slice(body_bytes).map_err(|e| format!("JSON parse: {}", e))?;
@@ -20,13 +22,18 @@ pub fn transform_request_body(
     }
 
     // Determine which model to use:
-    // - opus/sonnet → reasoning_model
-    // - everything else (haiku, subagent) → task_model
+    // Map each Claude Code model class to its configured upstream model.
     let lower = original_model.to_lowercase();
-    let actual_model = if lower.contains("opus") || lower.contains("sonnet") {
-        reasoning_model
+    let actual_model = if lower.contains("ccswitch-subagent") {
+        subagent_model
+    } else if lower.contains("opus") {
+        opus_model
+    } else if lower.contains("sonnet") {
+        sonnet_model
+    } else if lower.contains("haiku") {
+        haiku_model
     } else {
-        task_model
+        sonnet_model
     };
 
     // Strip [1m] suffix for the actual API request (CCSwitch convention)
@@ -151,4 +158,33 @@ pub fn transform_response_stream(
     });
 
     axum::body::Body::from_stream(ReceiverStream::new(rx))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transform_request_body;
+
+    #[test]
+    fn maps_all_claude_model_classes() {
+        let cases = [
+            ("claude-opus-4", "upstream-opus"),
+            ("claude-sonnet-4", "upstream-sonnet"),
+            ("claude-haiku-4", "upstream-haiku"),
+            ("ccswitch-subagent", "upstream-subagent"),
+        ];
+        for (requested, expected) in cases {
+            let body = format!(r#"{{"model":"{}"}}"#, requested);
+            let (transformed, original, actual) = transform_request_body(
+                body.as_bytes(),
+                "upstream-opus",
+                "upstream-sonnet",
+                "upstream-haiku",
+                "upstream-subagent",
+            ).unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&transformed).unwrap();
+            assert_eq!(original, requested);
+            assert_eq!(actual, expected);
+            assert_eq!(parsed["model"], expected);
+        }
+    }
 }

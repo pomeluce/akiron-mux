@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
-/// Polls ~/.claude/projects/ for JSONL file changes every `interval` seconds.
+/// Polls Claude and Codex session directories for JSONL file changes.
 /// Sends `true` via the channel when file modifications are detected.
 /// The main thread should run incremental imports on receipt.
 pub fn spawn_polling_thread(interval_secs: u64) -> mpsc::Receiver<bool> {
@@ -71,15 +71,29 @@ impl FileWatcher {
     }
 }
 
-/// Recursively collect all .jsonl files under ~/.claude/projects/ with their mtimes
+/// Recursively collect Claude and Codex JSONL files with their mtimes.
 fn collect_jsonl_mtimes() -> HashMap<PathBuf, i64> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let projects_dir = PathBuf::from(&home).join(".claude/projects");
     let mut map = HashMap::new();
-    if projects_dir.exists() {
-        walk_dir(&projects_dir, &mut map);
+    for dir in [
+        PathBuf::from(&home).join(".claude/projects"),
+        PathBuf::from(&home).join(".codex/sessions"),
+    ] {
+        if dir.exists() {
+            walk_dir(&dir, &mut map);
+        }
+    }
+    let codex_index = PathBuf::from(&home).join(".codex/session_index.jsonl");
+    if let Some(mtime) = file_mtime(&codex_index) {
+        map.insert(codex_index, mtime);
     }
     map
+}
+
+fn file_mtime(path: &PathBuf) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    i64::try_from(duration.as_nanos()).ok()
 }
 
 fn walk_dir(dir: &PathBuf, out: &mut HashMap<PathBuf, i64>) {
@@ -89,12 +103,7 @@ fn walk_dir(dir: &PathBuf, out: &mut HashMap<PathBuf, i64>) {
             if path.is_dir() {
                 walk_dir(&path, out);
             } else if path.extension().map_or(false, |e| e == "jsonl") {
-                let mtime = std::fs::metadata(&path)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
+                let mtime = file_mtime(&path).unwrap_or(0);
                 out.insert(path, mtime);
             }
         }

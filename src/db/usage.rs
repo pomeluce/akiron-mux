@@ -173,7 +173,7 @@ impl Db {
         // Load stored file index from session_log_sync
         let file_index: std::collections::HashMap<String, i64> = {
             let mut stmt = self.conn().prepare(
-                "SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type IN ('usage','both')",
+                "SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type = 'usage'",
             )?;
             let rows = stmt.query_map([], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
@@ -224,8 +224,11 @@ impl Db {
                     .to_string();
                 let file_path_str = file_path.to_string_lossy().to_string();
                 self.conn().execute(
-                    "INSERT OR REPLACE INTO session_log_sync (file_path, file_mtime, scan_type, last_synced_at)
-                     VALUES (?1, ?2, 'usage', ?3)",
+                    "INSERT INTO session_log_sync (file_path, file_mtime, scan_type, last_synced_at)
+                     VALUES (?1, ?2, 'usage', ?3)
+                     ON CONFLICT(file_path, scan_type) DO UPDATE SET
+                        file_mtime=excluded.file_mtime,
+                        last_synced_at=excluded.last_synced_at",
                     params![file_path_str, mtime, now_iso],
                 )?;
             }
@@ -242,4 +245,3 @@ impl Db {
 fn file_mtime(path: &PathBuf) -> Option<i64> {
     crate::core::import::file_mtime(path)
 }
-

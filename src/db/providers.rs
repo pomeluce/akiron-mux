@@ -37,11 +37,14 @@ impl Db {
     }
 
     pub fn delete_provider(&self, id: &str, app_type: &str) -> Result<(), rusqlite::Error> {
-        // Cascade-delete profiles for this provider
-        self.conn().execute(
-            "DELETE FROM profiles WHERE provider_id = ?1",
-            params![id],
-        )?;
+        // Profiles belong to Claude providers only. A Codex provider may reuse
+        // the same id and must not delete Claude profiles.
+        if app_type == "claude" {
+            self.conn().execute(
+                "DELETE FROM profiles WHERE provider_id = ?1",
+                params![id],
+            )?;
+        }
         self.conn().execute(
             "DELETE FROM providers WHERE id = ?1 AND app_type = ?2",
             params![id, app_type],
@@ -77,9 +80,15 @@ impl Db {
             // Sync profiles: INSERT OR IGNORE for system ones
             for pr in &p.profiles {
                 self.conn().execute(
-                    "INSERT OR IGNORE INTO profiles (id, name, provider_id, reasoning_model, task_model, is_default, source)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'system')",
-                    params![pr.id, pr.name, p.id, pr.reasoning_model, pr.task_model, pr.default as i32],
+                    "INSERT INTO profiles (id, name, provider_id, opus_model, sonnet_model, haiku_model, subagent_model, is_default, source)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'system')
+                     ON CONFLICT(id) DO UPDATE SET
+                        name=excluded.name, provider_id=excluded.provider_id,
+                        opus_model=excluded.opus_model, sonnet_model=excluded.sonnet_model,
+                        haiku_model=excluded.haiku_model, subagent_model=excluded.subagent_model,
+                        is_default=excluded.is_default
+                     WHERE profiles.source='system'",
+                    params![pr.id, pr.name, p.id, pr.opus, pr.sonnet, pr.haiku, pr.subagent, pr.default as i32],
                 )?;
             }
         }
@@ -111,36 +120,39 @@ impl Db {
     }
 }
 
-// ── Profiles (shared between claude/codex) ──
+// ── Claude profiles ──
 
 impl Db {
     pub fn insert_profile(&self, provider_id: &str, p: &Profile) -> Result<(), rusqlite::Error> {
         let source_str: &str = p.source.as_str();
         self.conn().execute(
-            "INSERT INTO profiles (id, name, provider_id, reasoning_model, task_model, is_default, source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO profiles (id, name, provider_id, opus_model, sonnet_model, haiku_model, subagent_model, is_default, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name, provider_id=excluded.provider_id,
-                reasoning_model=excluded.reasoning_model, task_model=excluded.task_model,
+                opus_model=excluded.opus_model, sonnet_model=excluded.sonnet_model,
+                haiku_model=excluded.haiku_model, subagent_model=excluded.subagent_model,
                 is_default=excluded.is_default, source=excluded.source",
-            params![p.id, p.name, provider_id, p.reasoning_model, p.task_model, p.default as i32, source_str],
+            params![p.id, p.name, provider_id, p.opus, p.sonnet, p.haiku, p.subagent, p.default as i32, source_str],
         )?;
         Ok(())
     }
 
     pub fn get_profiles(&self, provider_id: &str) -> Result<Vec<Profile>, rusqlite::Error> {
         let mut stmt = self.conn().prepare(
-            "SELECT id, name, reasoning_model, task_model, is_default, source
+            "SELECT id, name, opus_model, sonnet_model, haiku_model, subagent_model, is_default, source
              FROM profiles WHERE provider_id = ?1 ORDER BY name",
         )?;
         let rows = stmt.query_map(params![provider_id], |row| {
-            let source_str: String = row.get(5)?;
+            let source_str: String = row.get(7)?;
             Ok(Profile {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                reasoning_model: row.get(2)?,
-                task_model: row.get(3)?,
-                default: row.get::<_, i32>(4)? != 0,
+                opus: row.get(2)?,
+                sonnet: row.get(3)?,
+                haiku: row.get(4)?,
+                subagent: row.get(5)?,
+                default: row.get::<_, i32>(6)? != 0,
                 source: source_str.parse().unwrap_or(Source::User),
             })
         })?;

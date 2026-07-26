@@ -4,7 +4,9 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{backend::CrosstermBackend, Frame, Terminal};
 
 use crate::core::config::ConfigManager;
+use crate::core::models::AppType;
 
+use super::theme;
 use super::tabs::{history::HistoryTab, providers::ProvidersTab, settings::SettingsTab, usage::UsageTab, Tab, TabContent};
 
 pub struct App {
@@ -14,22 +16,30 @@ pub struct App {
     pub usage_tab: UsageTab,
     pub history_tab: HistoryTab,
     pub settings_tab: SettingsTab,
+    pub current_app: AppType,
     pub should_quit: bool,
     /// cached proxy_mode to avoid per-frame DB query
     proxy_mode: bool,
-    /// 30s polling channel — receives true when JSONL files change
+    /// Near-real-time polling channel — receives true when session files change
     poll_rx: Option<mpsc::Receiver<bool>>,
 }
 
 impl App {
     pub fn new(db_path: &std::path::Path, defaults_path: Option<&std::path::Path>) -> anyhow::Result<Self> {
         let mgr = Arc::new(ConfigManager::new(db_path, defaults_path)?);
+        if let Err(e) = crate::core::import::import_codex_sessions(mgr.db()) {
+            tracing::warn!("Failed to import Codex sessions: {}", e);
+        }
+        let current_app = mgr
+            .get_setting("active_app")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_default();
         let proxy_mode = mgr.get_setting("proxy_mode").map(|v| v == "true").unwrap_or(false);
-        let providers_tab = ProvidersTab::new(mgr.clone());
-        let usage_tab = UsageTab::new(mgr.clone());
-        let history_tab = HistoryTab::new(mgr.clone());
+        let providers_tab = ProvidersTab::new(mgr.clone(), current_app);
+        let usage_tab = UsageTab::new(mgr.clone(), current_app);
+        let history_tab = HistoryTab::new(mgr.clone(), current_app);
         let settings_tab = SettingsTab::new(mgr.clone());
-        let poll_rx = Some(super::file_watcher::spawn_polling_thread(30));
+        let poll_rx = Some(super::file_watcher::spawn_polling_thread(1));
 
         Ok(App {
             mgr,
@@ -38,6 +48,7 @@ impl App {
             usage_tab,
             history_tab,
             settings_tab,
+            current_app,
             should_quit: false,
             proxy_mode,
             poll_rx,
@@ -73,12 +84,21 @@ impl App {
                 ratatui::restore();
                 if let Some(ref project) = self.history_tab.launch_project.take() {
                     let sid = self.history_tab.launch_session_id.take().unwrap_or_default();
-                    println!("\n  Launching Claude Code session {} in {}\n", sid, project);
-                    let mut cmd = std::process::Command::new("claude");
+                    println!("\n  Launching {} session {} in {}\n", self.current_app.display_name(), sid, project);
+                    let mut cmd = if self.current_app == AppType::Codex {
+                        let mut command = std::process::Command::new("codex");
+                        if !sid.is_empty() {
+                            command.args(["resume", &sid]);
+                        }
+                        command
+                    } else {
+                        let mut command = std::process::Command::new("claude");
+                        if !sid.is_empty() {
+                            command.args(["--resume", &sid]);
+                        }
+                        command
+                    };
                     cmd.current_dir(project);
-                    if !sid.is_empty() {
-                        cmd.args(["--resume", &sid]);
-                    }
                     if let Err(e) = cmd.status() {
                         eprintln!("Failed to launch Claude: {}", e);
                     }
@@ -96,20 +116,15 @@ impl App {
             match rx.try_recv() {
                 Ok(true) => {
                     tracing::info!("File watcher: changes detected, running incremental imports");
-                    if let Err(e) = crate::core::import::import_claude_sessions(self.mgr.db()) {
-                        tracing::warn!("Polling session import failed: {}", e);
-                    } else {
-                        let sessions = self
-                            .mgr
-                            .db()
-                            .query_sessions("claude", None, None, 200)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter(|s| s.size_bytes > 0)
-                            .collect::<Vec<_>>();
-                        self.history_tab.all_sessions = sessions;
-                        self.history_tab.refresh();
+                    for result in [
+                        crate::core::import::import_claude_sessions(self.mgr.db()),
+                        crate::core::import::import_codex_sessions(self.mgr.db()),
+                    ] {
+                        if let Err(e) = result {
+                            tracing::warn!("Polling session import failed: {}", e);
+                        }
                     }
+                    self.history_tab.reload_current();
                     if !self.usage_tab.is_scanning() {
                         self.usage_tab.trigger_incremental_scan();
                     }
@@ -137,8 +152,19 @@ impl App {
         match code {
             KeyCode::Tab => { self.next_tab(); }
             KeyCode::BackTab => { self.prev_tab(); }
+            KeyCode::Char(' ') => self.toggle_app(),
             KeyCode::Char('q') | KeyCode::Char('Q') => self.should_quit = true,
             _ => {}
+        }
+    }
+
+    fn toggle_app(&mut self) {
+        self.current_app = self.current_app.toggle();
+        self.providers_tab.switch_app(self.current_app);
+        self.usage_tab.set_app(self.current_app);
+        self.history_tab.set_app(self.current_app);
+        if let Err(e) = self.mgr.set_setting("active_app", self.current_app.as_str()) {
+            tracing::warn!("Failed to persist active app: {}", e);
         }
     }
 
@@ -175,7 +201,7 @@ impl App {
             Tab::Usage => self.usage_tab.shortcut_lines(main_width),
             Tab::History => self.history_tab.shortcut_lines(main_width),
             Tab::Settings => self.settings_tab.shortcut_lines(main_width),
-        };
+        } + 1;
 
         // Level 1: sidebar | main
         let [sidebar_area, main_area] = Layout::default()
@@ -194,8 +220,13 @@ impl App {
             .areas(main_area);
 
         let is_proxy = self.proxy_mode;
-        render_sidebar(f, sidebar_area, self.active_tab, is_proxy);
-        render_app_bar(f, app_bar_area);
+        render_sidebar(
+            f,
+            sidebar_area,
+            self.active_tab,
+            if self.current_app == AppType::Claude { Some(is_proxy) } else { None },
+        );
+        render_app_bar(f, app_bar_area, self.current_app);
 
         match self.active_tab {
             Tab::Providers => self.providers_tab.render(f, content_area),
@@ -204,12 +235,13 @@ impl App {
             Tab::Settings => self.settings_tab.render(f, content_area),
         }
 
-        let groups = match self.active_tab {
+        let mut groups = match self.active_tab {
             Tab::Providers => self.providers_tab.shortcut_groups(),
             Tab::Usage => self.usage_tab.shortcut_groups(),
             Tab::History => self.history_tab.shortcut_groups(),
             Tab::Settings => self.settings_tab.shortcut_groups(),
         };
+        groups.push(vec![(" Space ".into(), theme::current().comment), ("Claude/Codex".into(), theme::current().comment)]);
         render_shortcut_bar(f, sc_area, &groups);
     }
 }

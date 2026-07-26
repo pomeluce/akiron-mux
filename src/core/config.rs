@@ -1,4 +1,4 @@
-use crate::core::models::{Profile, Provider, Source};
+use crate::core::models::{AppType, Profile, Provider, Source};
 use crate::db::Db;
 use anyhow::Context;
 use serde::Deserialize;
@@ -51,6 +51,8 @@ struct DefaultsFile {
     version: u32,
     #[serde(default)]
     providers: Vec<ProviderToml>,
+    #[serde(default)]
+    codex_providers: Vec<ProviderToml>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,17 +69,53 @@ struct ProviderToml {
 struct ProfileToml {
     id: String,
     name: String,
-    #[serde(alias = "opus")]
-    reasoning_model: String,
-    #[serde(default, alias = "haiku")]
-    task_model: String,
+    #[serde(default, alias = "reasoning_model")]
+    opus: String,
+    #[serde(default)]
+    sonnet: String,
+    #[serde(default, alias = "task_model")]
+    haiku: String,
+    #[serde(default)]
+    subagent: String,
     #[serde(default)]
     default: bool,
 }
 
 pub struct ConfigManager {
     db: Db,
-    system_providers: Vec<Provider>,
+    system_claude_providers: Vec<Provider>,
+    system_codex_providers: Vec<Provider>,
+}
+
+fn into_provider(p: ProviderToml, include_profiles: bool) -> Provider {
+    Provider {
+        id: p.id,
+        name: p.name,
+        api_url: p.api_url,
+        api_key: p.api_key,
+        profiles: if include_profiles {
+            p.profiles
+                .into_iter()
+                .map(|pr| {
+                    let sonnet = if pr.sonnet.is_empty() { pr.opus.clone() } else { pr.sonnet };
+                    let subagent = if pr.subagent.is_empty() { pr.haiku.clone() } else { pr.subagent };
+                    Profile {
+                        id: pr.id,
+                        name: pr.name,
+                        opus: pr.opus,
+                        sonnet,
+                        haiku: pr.haiku,
+                        subagent,
+                        default: pr.default,
+                        source: Source::System,
+                    }
+                })
+                .collect()
+        } else {
+            vec![]
+        },
+        source: Source::System,
+    }
 }
 
 impl ConfigManager {
@@ -87,27 +125,25 @@ impl ConfigManager {
 
         let default_path = default_config_path();
         let defaults_path = defaults_path.unwrap_or_else(|| &default_path);
-        let system_providers = if defaults_path.exists() {
+        let (system_claude_providers, system_codex_providers) = if defaults_path.exists() {
             let content = std::fs::read_to_string(defaults_path)?;
             let defaults: DefaultsFile = toml::from_str(&content)?;
-            defaults.providers.into_iter().map(|p| Provider {
-                id: p.id, name: p.name, api_url: p.api_url, api_key: p.api_key,
-                profiles: p.profiles.into_iter().map(|pr| Profile {
-                    id: pr.id, name: pr.name,
-                    reasoning_model: pr.reasoning_model, task_model: pr.task_model,
-                    default: pr.default, source: Source::System,
-                }).collect(),
-                source: Source::System,
-            }).collect()
-        } else { vec![] };
+            (
+                defaults.providers.into_iter().map(|p| into_provider(p, true)).collect(),
+                defaults.codex_providers.into_iter().map(|p| into_provider(p, false)).collect(),
+            )
+        } else { (vec![], vec![]) };
 
         // Sync TOML providers/profiles to DB (source='system').
         // Always call — even when empty, to demote stale system providers.
-        if let Err(e) = db.sync_system_providers("claude", &system_providers) {
+        if let Err(e) = db.sync_system_providers("claude", &system_claude_providers) {
             tracing::warn!("Failed to sync system providers to DB: {}", e);
         }
+        if let Err(e) = db.sync_system_providers("codex", &system_codex_providers) {
+            tracing::warn!("Failed to sync Codex system providers to DB: {}", e);
+        }
 
-        Ok(ConfigManager { db, system_providers })
+        Ok(ConfigManager { db, system_claude_providers, system_codex_providers })
     }
 
     pub(crate) fn db(&self) -> &Db { &self.db }
@@ -115,9 +151,15 @@ impl ConfigManager {
     pub fn set_setting(&self, key: &str, value: &str) -> Result<(), rusqlite::Error> { self.db.set_setting(key, value) }
 
     pub fn list_providers(&self) -> Result<Vec<Provider>, anyhow::Error> {
-        const APP: &str = "claude";
-        let db_providers = self.db.get_providers(APP)?;
-        let mut result = self.system_providers.clone();
+        self.list_providers_for(AppType::Claude)
+    }
+
+    pub fn list_providers_for(&self, app: AppType) -> Result<Vec<Provider>, anyhow::Error> {
+        let db_providers = self.db.get_providers(app.as_str())?;
+        let mut result = match app {
+            AppType::Claude => self.system_claude_providers.clone(),
+            AppType::Codex => self.system_codex_providers.clone(),
+        };
 
         for dp in &db_providers {
             if let Some(existing) = result.iter_mut().find(|p| p.id == dp.id) {
@@ -128,6 +170,13 @@ impl ConfigManager {
             } else {
                 result.push(dp.clone());
             }
+        }
+
+        if app == AppType::Codex {
+            for provider in &mut result {
+                provider.profiles.clear();
+            }
+            return Ok(result);
         }
 
         for provider in &mut result {
@@ -152,5 +201,12 @@ impl ConfigManager {
             }
         }
         Ok(None)
+    }
+
+    pub fn find_provider_for(&self, app: AppType, provider_id: &str) -> Result<Option<Provider>, anyhow::Error> {
+        Ok(self
+            .list_providers_for(app)?
+            .into_iter()
+            .find(|provider| provider.id == provider_id))
     }
 }

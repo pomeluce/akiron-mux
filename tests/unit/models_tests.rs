@@ -28,7 +28,10 @@ default = true
 "#;
     let p: Profile = toml::from_str(toml_str).unwrap();
     assert_eq!(p.id, "v4");
-    assert_eq!(p.reasoning_model, "deepseek-v4-pro[1m]");
+    assert_eq!(p.opus, "deepseek-v4-pro[1m]");
+    assert_eq!(p.sonnet, "deepseek-v4-pro[1m]");
+    assert_eq!(p.haiku, "deepseek-v4-flash");
+    assert_eq!(p.subagent, "deepseek-v4-flash");
     assert!(p.default);
 }
 

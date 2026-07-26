@@ -1,5 +1,6 @@
 use super::shared::{format_size, format_tokens};
 use crate::db::sessions::SessionRecord;
+use crate::core::models::AppType;
 use crate::tui::lang;
 use crate::tui::theme;
 use ratatui::{
@@ -11,7 +12,7 @@ use ratatui::{
 };
 
 /// Render a session detail panel in the given area.
-pub fn render_session_detail(f: &mut Frame, area: Rect, session: &SessionRecord, tokens: Option<(i64, i64)>, active_provider: Option<&str>, active_profile: Option<&str>) {
+pub fn render_session_detail(f: &mut Frame, area: Rect, session: &SessionRecord, tokens: Option<(i64, i64)>, active_provider: Option<&str>, active_profile: Option<&str>, app: AppType) {
     let home = std::env::var("HOME").unwrap_or_default();
     let path_short = session.project_path.replace(&home, "~");
     let max_w = (area.width as usize).saturating_sub(4).max(20);
@@ -36,11 +37,11 @@ pub fn render_session_detail(f: &mut Frame, area: Rect, session: &SessionRecord,
     lines.push(Line::from(""));
 
     // Profile: provider_id · profile_id
-    let pid = active_provider.unwrap_or("-");
-    let pfid = session.profile_id.as_deref().or(active_profile).unwrap_or("-");
-    let profile_text = format!("{} \u{b7} {}", pid, pfid);
+    let pid = session.profile_id.as_deref().or(active_provider).unwrap_or("-");
+    let pfid = active_profile.unwrap_or("-");
+    let profile_text = if app == AppType::Codex { pid.to_string() } else { format!("{} \u{b7} {}", active_provider.unwrap_or("-"), pfid) };
     lines.extend(line_with_wrap(
-        lang::current().detail_profile,
+        if app == AppType::Codex { lang::current().detail_provider } else { lang::current().detail_profile },
         &profile_text,
         max_w,
         theme::current().purple,
@@ -48,15 +49,16 @@ pub fn render_session_detail(f: &mut Frame, area: Rect, session: &SessionRecord,
     ));
     lines.push(Line::from(""));
 
-    // Mode
-    lines.extend(line_with_wrap(
-        lang::current().detail_mode,
-        &session.mode,
-        max_w,
-        theme::current().purple,
-        theme::current().green,
-    ));
-    lines.push(Line::from(""));
+    if app == AppType::Claude {
+        lines.extend(line_with_wrap(
+            lang::current().detail_mode,
+            &session.mode,
+            max_w,
+            theme::current().purple,
+            theme::current().green,
+        ));
+        lines.push(Line::from(""));
+    }
 
     // Tokens
     let token_text = if let Some((p, c)) = tokens {

@@ -1,4 +1,5 @@
 use crate::core::config::ConfigManager;
+use crate::core::models::AppType;
 
 /// Sync active provider/profile from Claude Code's settings.json (last_switch.source).
 /// Called on app startup to align CCSwitch's active selection with the last switch.
@@ -57,5 +58,39 @@ pub fn sync_active_from_settings(mgr: &ConfigManager) {
         if let Err(e) = mgr.set_setting("proxy_mode", &is_proxy.to_string()) {
             tracing::warn!("sync: failed to save proxy_mode: {}", e);
         }
+    }
+}
+
+/// Sync the active Codex provider from ~/.codex/config.toml.
+pub fn sync_codex_active_from_config(mgr: &ConfigManager) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let config_path = std::path::PathBuf::from(&home).join(".codex/config.toml");
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(content) => content,
+        Err(_) => return,
+    };
+    let parsed: toml::Value = match toml::from_str(&content) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!("Failed to parse Codex config.toml for sync: {}", e);
+            return;
+        }
+    };
+    let provider_id = parsed
+        .get("ccswitch")
+        .and_then(|value| value.get("last_switch"))
+        .and_then(|value| value.get("source"))
+        .and_then(toml::Value::as_str)
+        .or_else(|| parsed.get("model_provider").and_then(toml::Value::as_str));
+    let Some(provider_id) = provider_id else { return };
+
+    match mgr.find_provider_for(AppType::Codex, provider_id) {
+        Ok(Some(_)) => {
+            if let Err(e) = mgr.set_setting(AppType::Codex.active_provider_key(), provider_id) {
+                tracing::warn!("Failed to sync active Codex provider: {}", e);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("Failed to list Codex providers for sync: {}", e),
     }
 }

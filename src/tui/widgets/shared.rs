@@ -1,10 +1,10 @@
 use crate::tui::lang;
 use super::super::theme;
 use ratatui::{
-    layout::Rect,
+    layout::{Alignment, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Clear, Paragraph},
+    widgets::{Block, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -129,13 +129,21 @@ pub fn render_confirm_popup(
 
 /// Render a simple message/notice popup with OK button
 pub fn render_message_popup(f: &mut Frame, area: Rect, msg: &str) {
-    let popup = centered_rect(44, 5, area);
+    let popup_width = area.width.saturating_sub(4).min(80).max(20).min(area.width);
+    let text_width = popup_width.saturating_sub(4).max(1) as usize;
+    let message_lines = msg.lines().map(|line| {
+        let width = display_width(line).max(1);
+        width.div_ceil(text_width)
+    }).sum::<usize>().max(1);
+    let popup_height = (message_lines as u16 + 4).min(area.height).max(5.min(area.height));
+    let popup = centered_rect(popup_width, popup_height, area);
     let p = Paragraph::new(vec![
-        Line::from(""),
-        Line::from(msg).centered(),
+        Line::from(msg),
         Line::from(""),
         Line::from(Span::styled(lang::current().confirm_ok, Style::default().fg(Color::Black).bg(theme::current().cyan))).centered(),
     ])
+    .alignment(Alignment::Center)
+    .wrap(Wrap { trim: true })
     .block(
         Block::bordered()
             .border_set(ratatui::symbols::border::ROUNDED)

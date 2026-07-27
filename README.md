@@ -34,10 +34,8 @@ Claude Code 模型配置管理器 — Rust TUI + CLI 工具。
         {
           programs.ccswitch = {
             enable = true;
-            envVars = {
-              DEEPSEEK_API_KEY = "sk-xxx";
-            };
-            # 或直接传文件路径: envVars = "/path/to/env";
+            # 由 sops-nix/agenix 等部署到 Nix store 外；内容如 OPENAI_API_KEY=sk-xxx
+            envVars = "%h/.config/ccswitch/env";
             defaults = {
               version = 1;
               providers = [
@@ -58,6 +56,14 @@ Claude Code 模型配置管理器 — Rust TUI + CLI 工具。
                   ];
                 }
               ];
+              codex_providers = [
+                {
+                  id = "openai-api";
+                  name = "OpenAI API";
+                  api_url = "https://api.openai.com/v1";
+                  api_key = "env:OPENAI_API_KEY";
+                }
+              ];
             };
           };
         }
@@ -70,7 +76,9 @@ Claude Code 模型配置管理器 — Rust TUI + CLI 工具。
 Home Manager 会自动：
 
 - 将 `defaults` 写入 `~/.config/ccswitch/defaults.toml`
-- 安装并启用 `ccs-proxy` systemd user service（通过 `envVars` 传入环境文件路径）
+- 安装并启用 `ccs-proxy` systemd user service（通过 `envVars` 传入 Nix store 外的环境文件路径）
+
+注意：`defaults` 会进入 Nix store，`api_key` 应只写 `env:VAR_NAME` 引用，不要写明文密钥。
 
 #### NixOS 全局安装
 
@@ -90,6 +98,14 @@ Home Manager 会自动：
             defaults = {
               version = 1;
               providers = [ ... ];
+              codex_providers = [
+                {
+                  id = "openai-api";
+                  name = "OpenAI API";
+                  api_url = "https://api.openai.com/v1";
+                  api_key = "env:OPENAI_API_KEY";
+                }
+              ];
             };
           };
         }
@@ -279,14 +295,14 @@ api_key = "env:OPENAI_API_KEY"
 | -------------- | ------------------------------------------------ |
 | `env:VAR_NAME` | 从进程环境或 `~/.config/ccswitch/env` 读取，推荐 |
 | `sk-xxx...`    | 直接文本（明文存储，不安全）                     |
-| 空值           | fallback 到 `$CLAUDE_API_KEY`                    |
+| 空值           | Claude 使用 `$CLAUDE_API_KEY`；Codex 使用 `$OPENAI_API_KEY` |
 
 ## TUI 快捷键
 
 ### 全局
 
 | 键                  | 功能             |
-| ------------------- | ---------------- | ---------- |
+| ------------------- | ---------------- |
 | `Tab` / `Shift+Tab` | 切换侧边栏标签页 |
 | `Space`             | 切换顶栏 `Claude | Codex` Tab |
 | `Q` / `q`           | 退出             |

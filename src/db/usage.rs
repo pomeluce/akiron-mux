@@ -13,6 +13,8 @@ pub struct UsageSummary {
     pub request_count: i64,
 }
 
+pub type DailyUsage = (String, i64, i64, i64, i64);
+
 /// Progress event sent from the background scan thread to the TUI
 #[derive(Debug, Clone)]
 pub enum ScanEvent {
@@ -50,51 +52,18 @@ pub struct UsageRecord {
 /// Scan context prepared on main thread (DB queries only, fast).
 #[derive(Debug, Clone)]
 pub struct ScanContext {
-    pub known_msg_ids: Vec<String>,
     pub file_index: std::collections::HashMap<String, i64>, // file_path → mtime
 }
 
 impl Db {
-    pub fn insert_usage_log(
+    pub fn query_usage(
         &self,
         app_type: &str,
-        model: &str,
-        provider_id: &str,
-        profile_id: &str,
-        session_id: Option<&str>,
-        prompt_tokens: i64,
-        completion_tokens: i64,
-        cache_read_tokens: i64,
-        cache_creation_tokens: i64,
-        data_source: &str,
-    ) -> Result<(), rusqlite::Error> {
-        let total = prompt_tokens + completion_tokens + cache_read_tokens + cache_creation_tokens;
-        self.conn().execute(
-            "INSERT INTO usage_logs (app_type, model, provider_id, profile_id, session_id,
-             prompt_tokens, completion_tokens, cache_read_tokens, cache_creation_tokens,
-             total_tokens, data_source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                app_type,
-                model,
-                provider_id,
-                profile_id,
-                session_id,
-                prompt_tokens,
-                completion_tokens,
-                cache_read_tokens,
-                cache_creation_tokens,
-                total,
-                data_source
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn query_usage(&self, app_type: &str, range: &str) -> Result<Vec<UsageSummary>, rusqlite::Error> {
+        range: &str,
+    ) -> Result<Vec<UsageSummary>, rusqlite::Error> {
         let date_filter = match range {
             "day" => "date(timestamp) = date('now')",
-            "week" => "date(timestamp) >= date('now', '-7 days')",
+            "week" => "date(timestamp) >= date('now', '-6 days')",
             "month" => "date(timestamp) >= date('now', '-30 days')",
             _ => "1=1",
         };
@@ -122,7 +91,7 @@ impl Db {
         &self,
         app_type: &str,
         model: &str,
-    ) -> Result<Vec<(String, i64, i64, i64, i64)>, rusqlite::Error> {
+    ) -> Result<Vec<DailyUsage>, rusqlite::Error> {
         let sql = "SELECT date(timestamp) as day,
                           SUM(prompt_tokens), SUM(completion_tokens),
                           SUM(cache_read_tokens), SUM(cache_creation_tokens)
@@ -144,47 +113,41 @@ impl Db {
     }
 
     /// Query token usage for a specific session (by session ID)
-    pub fn query_session_tokens(&self, session_id: &str) -> Result<(i64, i64), rusqlite::Error> {
+    pub fn query_session_tokens(
+        &self,
+        app_type: &str,
+        session_id: &str,
+    ) -> Result<(i64, i64), rusqlite::Error> {
         let mut stmt = self.conn().prepare(
             "SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0)
-             FROM usage_logs WHERE session_id = ?1",
+             FROM usage_logs WHERE app_type = ?1 AND session_id = ?2",
         )?;
-        stmt.query_row(params![session_id], |row| Ok((row.get(0)?, row.get(1)?)))
+        stmt.query_row(params![app_type, session_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
     }
 
-    /// Prepare scan context: load known message IDs and file sync index from session_log_sync.
+    /// Prepare scan context: load the file sync index from session_log_sync.
     /// Called from main thread. Fast — no filesystem walk.
-    pub fn prepare_scan_context(&self, app_type: &str) -> Result<ScanContext, anyhow::Error> {
+    pub fn prepare_scan_context(&self) -> Result<ScanContext, anyhow::Error> {
         // Cleanup synthetic entries
-        if let Err(e) = self.conn()
-            .execute("DELETE FROM usage_logs WHERE model = '<synthetic>'", []) {
+        if let Err(e) = self
+            .conn()
+            .execute("DELETE FROM usage_logs WHERE model = '<synthetic>'", [])
+        {
             tracing::warn!("synthetic cleanup failed: {}", e);
         }
-
-        // Pre-load existing message IDs for dedup
-        let known_msg_ids: Vec<String> = {
-            let mut stmt = self.conn().prepare(
-                "SELECT message_id FROM usage_logs WHERE message_id IS NOT NULL AND message_id != '' AND app_type = ?1",
-            )?;
-            let rows = stmt.query_map(params![app_type], |r| r.get::<_, String>(0))?;
-            rows.filter_map(|r| r.ok()).collect()
-        };
 
         // Load stored file index from session_log_sync
         let file_index: std::collections::HashMap<String, i64> = {
             let mut stmt = self.conn().prepare(
                 "SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type = 'usage'",
             )?;
-            let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            })?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
             rows.filter_map(|r| r.ok()).collect()
         };
 
-        Ok(ScanContext {
-            known_msg_ids,
-            file_index,
-        })
+        Ok(ScanContext { file_index })
     }
 
     /// Insert a batch of parsed records into usage_logs (single transaction for speed).
@@ -198,8 +161,12 @@ impl Db {
         let mut imported = 0usize;
         let result: Result<usize, anyhow::Error> = (|| {
             self.conn().execute("BEGIN", [])?;
+            self.conn().execute(
+                "DELETE FROM usage_logs WHERE app_type = ?1 AND session_id = ?2 AND data_source = 'import'",
+                params![app_type, sid],
+            )?;
             for r in records {
-                self.conn().execute(
+                let inserted = self.conn().execute(
                     "INSERT OR IGNORE INTO usage_logs (app_type, model, provider_id, profile_id, session_id, message_id,
                      prompt_tokens, completion_tokens, cache_read_tokens, cache_creation_tokens, total_tokens, timestamp, data_source)
                      VALUES (?1, ?2, '', '', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'import')",
@@ -212,16 +179,17 @@ impl Db {
                         r.output,
                         r.cr,
                         r.cc,
-                        r.input + r.output + r.cr + r.cc,
+                        r.input
+                            .saturating_add(r.output)
+                            .saturating_add(r.cr)
+                            .saturating_add(r.cc),
                         r.date
                     ],
                 )?;
-                imported += 1;
+                imported += inserted;
             }
             if let Some(mtime) = file_mtime(file_path) {
-                let now_iso = chrono::Local::now()
-                    .format("%Y-%m-%d %H:%M:%S")
-                    .to_string();
+                let now_iso = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
                 let file_path_str = file_path.to_string_lossy().to_string();
                 self.conn().execute(
                     "INSERT INTO session_log_sync (file_path, file_mtime, scan_type, last_synced_at)

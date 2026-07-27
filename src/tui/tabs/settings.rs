@@ -1,22 +1,22 @@
 use super::super::lang;
 use super::super::theme::{self, THEMES};
-use super::super::widgets::shared::{display_width, pad_label};
+use super::super::widgets::shared::display_width;
 use super::TabContent;
-use crate::core::config::ConfigManager;
+use crate::core::config::{self, ConfigManager};
 use crossterm::event::KeyCode;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph},
     Frame,
 };
-use std::sync::Arc;
+use std::rc::Rc;
 
 const MODES: &[&str] = &["local", "proxy"];
 
 pub struct SettingsTab {
-    mgr: Arc<ConfigManager>,
+    mgr: Rc<ConfigManager>,
     selected: usize,
     theme_idx: usize,
     mode_idx: usize,
@@ -24,7 +24,7 @@ pub struct SettingsTab {
 }
 
 impl SettingsTab {
-    pub fn new(mgr: Arc<ConfigManager>) -> Self {
+    pub fn new(mgr: Rc<ConfigManager>) -> Self {
         // Restore theme from DB
         let saved_theme = mgr.get_setting("theme").unwrap_or_default();
         if !saved_theme.is_empty() {
@@ -39,10 +39,21 @@ impl SettingsTab {
             0
         } else {
             lang::set_lang(&saved_lang);
-            lang::LANGS.iter().position(|(n, _)| *n == saved_lang).unwrap_or(0)
+            lang::LANGS
+                .iter()
+                .position(|(n, _)| *n == saved_lang)
+                .unwrap_or(0)
         };
 
-        let mode_idx = if mgr.get_setting("proxy_mode").map(|v| v == "true").unwrap_or(false) { 1 } else { 0 };
+        let mode_idx = if mgr
+            .get_setting("proxy_mode")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+        {
+            1
+        } else {
+            0
+        };
         SettingsTab {
             mgr,
             selected: 0,
@@ -56,9 +67,19 @@ impl SettingsTab {
         let l = lang::current();
         vec![
             (l.setting_theme, THEMES[self.theme_idx].to_string()),
-            (l.setting_mode, MODES[self.mode_idx].to_string()),
             (l.setting_language, lang::current_lang().to_string()),
+            (l.setting_mode, MODES[self.mode_idx].to_string()),
         ]
+    }
+
+    pub fn status_text(&self) -> String {
+        format!(
+            "{} · {} · {} · {}",
+            lang::pick("Shared settings", "共享设置"),
+            THEMES[self.theme_idx],
+            lang::current_lang(),
+            MODES[self.mode_idx]
+        )
     }
 
     fn cycle_theme(&mut self, forward: bool) {
@@ -98,9 +119,9 @@ impl SettingsTab {
             self.mgr.get_setting("active_provider"),
             self.mgr.get_setting("active_profile"),
         ) {
-            if let Err(e) = crate::core::switcher::switch_profile(
-                &self.mgr, &prov_id, &prof_id, mode, None,
-            ) {
+            if let Err(e) =
+                crate::core::switcher::switch_profile(&self.mgr, &prov_id, &prof_id, mode, None)
+            {
                 tracing::warn!("Failed to apply mode switch: {}", e);
             }
         }
@@ -125,50 +146,59 @@ impl SettingsTab {
 
 impl TabContent for SettingsTab {
     fn render(&mut self, f: &mut Frame, area: Rect) {
-        let l = lang::current();
         let items = self.items();
+        let refresh_label = lang::pick("Session Refresh", "会话刷新");
+        let database_label = lang::pick("Database", "数据库");
+        let max_label_dw = items
+            .iter()
+            .map(|(label, _)| display_width(label))
+            .chain([display_width(refresh_label), display_width(database_label)])
+            .max()
+            .unwrap_or(0);
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(7),
+                Constraint::Length(5),
+                Constraint::Min(5),
+            ])
+            .split(area);
 
-        // Calculate max label display-width for : alignment
-        let max_label_dw = items.iter().map(|(label, _)| display_width(label)).max().unwrap_or(0);
+        let appearance = vec![
+            setting_line(0, self.selected, items[0].0, &items[0].1, max_label_dw),
+            Line::from(""),
+            setting_line(1, self.selected, items[1].0, &items[1].1, max_label_dw),
+        ];
+        f.render_widget(
+            section(
+                format!(
+                    "{} · {}",
+                    lang::pick("Appearance", "外观"),
+                    lang::current().settings_title
+                ),
+                appearance,
+            ),
+            sections[0],
+        );
 
-        // Calculate max value display-width (including < > brackets)
-        let max_value_dw = items.iter().map(|(_, v)| display_width(v) + 2).max().unwrap_or(0);
+        let claude = vec![setting_line(
+            2,
+            self.selected,
+            items[2].0,
+            &items[2].1,
+            max_label_dw,
+        )];
+        f.render_widget(section("Claude".into(), claude), sections[1]);
 
-        // Content width = label: + value<>, pad_w centres this in the inner area
-        let inner_w = area.width.saturating_sub(2) as usize;
-        let content_w = max_label_dw + 3 + max_value_dw;
-        let pad_w = inner_w.saturating_sub(content_w) / 2;
-        let pad = " ".repeat(pad_w);
-
-        let mut lines: Vec<Line> = vec![Line::from(""), Line::from("")];
-        for (i, (label, value)) in items.iter().enumerate() {
-            let is_sel = i == self.selected;
-            let label_color = if is_sel { theme::current().cyan } else { theme::current().fg };
-            let value_style = if is_sel {
-                Style::default().fg(theme::current().purple)
-            } else {
-                Style::default().fg(theme::current().dim)
-            };
-
-            lines.push(Line::from(vec![
-                Span::styled(pad.clone(), Style::default()),
-                Span::styled(pad_label(label, max_label_dw), Style::default().fg(label_color)),
-                Span::styled(format!("<{}>", value), value_style),
-                Span::styled(pad.clone(), Style::default()),
-            ]));
-
-            if i < items.len() - 1 {
-                lines.push(Line::from(""));
-            }
-        }
-
-        let block = Block::bordered()
-            .border_set(ratatui::symbols::border::ROUNDED)
-            .title(l.settings_title)
-            .border_style(Style::default().fg(theme::current().dim));
-
-        let p = Paragraph::new(lines).block(block);
-        f.render_widget(p, area);
+        let database = shorten_home(&config::db_path().display().to_string());
+        let data = vec![
+            readonly_line(refresh_label, lang::pick("Real-time", "实时"), max_label_dw),
+            readonly_line(database_label, &database, max_label_dw),
+        ];
+        f.render_widget(
+            section(lang::pick("Data", "数据").into(), data),
+            sections[2],
+        );
     }
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
@@ -183,14 +213,14 @@ impl TabContent for SettingsTab {
             }
             KeyCode::Char('l') | KeyCode::Right => match self.selected {
                 0 => self.cycle_theme(true),
-                1 => self.cycle_mode(true),
-                2 => self.cycle_lang(true),
+                1 => self.cycle_lang(true),
+                2 => self.cycle_mode(true),
                 _ => {}
             },
             KeyCode::Char('h') | KeyCode::Left => match self.selected {
                 0 => self.cycle_theme(false),
-                1 => self.cycle_mode(false),
-                2 => self.cycle_lang(false),
+                1 => self.cycle_lang(false),
+                2 => self.cycle_mode(false),
                 _ => {}
             },
             _ => return false,
@@ -201,28 +231,86 @@ impl TabContent for SettingsTab {
     fn shortcut_groups(&self) -> Vec<Vec<(String, Color)>> {
         let l = lang::current();
         vec![
-            vec![(" J/K ".into(), theme::current().comment), (l.sc_nav.into(), theme::current().comment)],
-            vec![(" H/L ".into(), theme::current().comment), (l.sc_toggle.into(), theme::current().comment)],
-            vec![(" Q ".into(), theme::current().comment), (l.sc_quit.into(), theme::current().comment)],
+            vec![
+                (" J/K ".into(), theme::current().comment),
+                (l.sc_nav.into(), theme::current().comment),
+            ],
+            vec![
+                (" H/L ".into(), theme::current().comment),
+                (l.sc_toggle.into(), theme::current().comment),
+            ],
+            vec![
+                (" Q ".into(), theme::current().comment),
+                (l.sc_quit.into(), theme::current().comment),
+            ],
         ]
     }
+}
 
-    fn shortcut_lines(&self, available_width: u16) -> usize {
-        let widths = [9usize, 10, 8];
-        let sep = 2usize;
-        let w = available_width.saturating_sub(2).max(10) as usize;
-        let mut lines = 1usize;
-        let mut cur = 0usize;
-        for gw in &widths {
-            if cur + gw > w && cur > 0 {
-                lines += 1;
-                cur = 0;
-            }
-            if cur > 0 {
-                cur += sep;
-            }
-            cur += gw;
-        }
-        lines
+fn section<'a>(title: String, lines: Vec<Line<'a>>) -> Paragraph<'a> {
+    Paragraph::new(lines).block(
+        Block::bordered()
+            .border_set(ratatui::symbols::border::ROUNDED)
+            .title(title)
+            .border_style(Style::default().fg(theme::current().dim)),
+    )
+}
+
+fn setting_line<'a>(
+    index: usize,
+    selected: usize,
+    label: &'a str,
+    value: &'a str,
+    width: usize,
+) -> Line<'a> {
+    let active = index == selected;
+    Line::from(vec![
+        Span::styled(
+            if active { "› " } else { "  " },
+            Style::default().fg(theme::current().cyan),
+        ),
+        Span::styled(
+            settings_label(label, width),
+            Style::default().fg(if active {
+                theme::current().cyan
+            } else {
+                theme::current().fg
+            }),
+        ),
+        Span::styled(
+            format!("<{}>", value),
+            Style::default().fg(if active {
+                theme::current().purple
+            } else {
+                theme::current().dim
+            }),
+        ),
+    ])
+}
+
+fn readonly_line<'a>(label: &'a str, value: &'a str, width: usize) -> Line<'a> {
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            settings_label(label, width),
+            Style::default().fg(theme::current().fg),
+        ),
+        Span::styled(value, Style::default().fg(theme::current().comment)),
+    ])
+}
+
+fn settings_label(label: &str, width: usize) -> String {
+    let label_width = display_width(label);
+    if label_width >= width {
+        format!("{}: ", label)
+    } else {
+        format!("{}{}: ", label, " ".repeat(width - label_width))
     }
+}
+
+fn shorten_home(path: &str) -> String {
+    std::env::var("HOME")
+        .ok()
+        .map(|home| path.replacen(&home, "~", 1))
+        .unwrap_or_else(|| path.to_string())
 }

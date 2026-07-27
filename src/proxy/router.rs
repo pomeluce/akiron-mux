@@ -4,13 +4,17 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use bytes::{Bytes, BytesMut};
 use reqwest::Client;
+use tokio_stream::StreamExt;
 
 use crate::core::config::ConfigManager;
 use crate::core::env::resolve_api_key;
+use crate::core::models::validate_provider;
 
-use super::metrics::record_metrics;
 use super::transform;
+
+const MAX_UPSTREAM_ERROR_BODY: usize = 1024 * 1024;
 
 /// Shared proxy state, held behind an Arc<Mutex<>> because `rusqlite::Connection`
 /// uses internal `RefCell` and is therefore not `Sync`.
@@ -33,21 +37,19 @@ struct UpstreamInfo {
 /// Reads the active provider/profile from SQLite, replaces the Authorization
 /// header, transforms the model name in both request and response bodies,
 /// and streams the response back.
-pub async fn proxy_handler(
-    State(state): State<Arc<ProxyState>>,
-    req: Request<Body>,
-) -> Response {
+pub async fn proxy_handler(State(state): State<Arc<ProxyState>>, req: Request<Body>) -> Response {
     // ── Extract request data we need BEFORE consuming the body ──────
     let method = req.method().clone();
     let original_headers = req.headers().clone();
-    let path = req
+    let request_path = req.uri().path().to_string();
+    let path_and_query = req
         .uri()
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/")
         .to_string();
 
-    tracing::info!("Proxy: {} {}", method, path);
+    tracing::info!("Proxy: {} {}", method, request_path);
 
     // Resolve the active upstream target, auth token, and model mapping
     let upstream = {
@@ -55,7 +57,10 @@ pub async fn proxy_handler(
             Ok(g) => g,
             Err(e) => {
                 tracing::error!("Mutex poisoned: {}", e);
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal error".to_string(),
+                )
                     .into_response();
             }
         };
@@ -69,7 +74,12 @@ pub async fn proxy_handler(
     };
 
     // Build upstream URL preserving path + query
-    let upstream_url = format!("{}{}", upstream.api_url.trim_end_matches('/'), path);
+    let upstream_url = format!(
+        "{}{}",
+        upstream.api_url.trim_end_matches('/'),
+        path_and_query
+    );
+    let upstream_log_url = format!("{}{}", upstream.api_url.trim_end_matches('/'), request_path);
 
     // Read entire request body
     let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await {
@@ -80,6 +90,7 @@ pub async fn proxy_handler(
         }
     };
 
+    let is_v1_messages = request_path == "/v1/messages";
     // ── Transform request body: replace Claude model → actual upstream model ──
     let (transformed_body, original_model, actual_model) = match transform::transform_request_body(
         &body_bytes,
@@ -90,13 +101,15 @@ pub async fn proxy_handler(
     ) {
         Ok(v) => v,
         Err(e) => {
-            // If we can't parse the body, forward it as-is (e.g. non-JSON health checks)
-            tracing::debug!("Body transform skipped: {}", e);
+            if is_v1_messages {
+                tracing::warn!("Invalid /v1/messages request body: {}", e);
+                return (StatusCode::BAD_REQUEST, "Invalid messages request body").into_response();
+            }
+            tracing::debug!("Body transform skipped for non-message request: {}", e);
             (body_bytes.to_vec(), String::new(), String::new())
         }
     };
 
-    let is_v1_messages = path.starts_with("/v1/messages");
     if is_v1_messages && !original_model.is_empty() {
         tracing::info!(
             "Model transform: original={} → actual={}",
@@ -106,14 +119,24 @@ pub async fn proxy_handler(
     }
 
     // Build upstream request
-    let headers = prepare_upstream_headers(&original_headers, &upstream.auth_token);
+    let headers = match prepare_upstream_headers(&original_headers, &upstream.auth_token) {
+        Ok(headers) => headers,
+        Err(error) => {
+            tracing::error!("Invalid upstream authentication header: {}", error);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Invalid upstream authentication configuration",
+            )
+                .into_response();
+        }
+    };
     let body_len = transformed_body.len();
     tracing::info!(
         "Upstream request: {} {} body_len={} auth_set={}",
         method,
-        upstream_url,
+        upstream_log_url,
         body_len,
-        upstream.auth_token.len() > 0,
+        !upstream.auth_token.is_empty(),
     );
 
     let upstream_req = state
@@ -125,9 +148,12 @@ pub async fn proxy_handler(
 
     let upstream_req = match upstream_req {
         Ok(r) => r,
-        Err(e) => {
-            tracing::error!("Failed to build upstream request: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build upstream request")
+        Err(_) => {
+            tracing::error!("Failed to build upstream request for {}", request_path);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to build upstream request",
+            )
                 .into_response();
         }
     };
@@ -145,29 +171,23 @@ pub async fn proxy_handler(
                 "Upstream response: status={} content-type={} upstream_url={}",
                 status,
                 content_type,
-                upstream_url,
+                upstream_log_url,
             );
 
             if !status.is_success() {
-                let body_text = resp.text().await.unwrap_or_else(|_| "(unreadable)".into());
+                let (body, truncated) = read_limited_response_body(resp, MAX_UPSTREAM_ERROR_BODY)
+                    .await
+                    .unwrap_or_else(|_| (Bytes::from_static(b"(unreadable)"), false));
                 tracing::error!(
-                    "Upstream error: status={} body={}",
+                    "Upstream error: status={} body_len={} truncated={}",
                     status,
-                    &body_text[..body_text.len().min(500)],
+                    body.len(),
+                    truncated,
                 );
-                return (status, body_text).into_response();
-            }
-
-            // Record metrics from response headers (best-effort, non-blocking)
-            match state.mgr.lock() {
-                Ok(mgr) => {
-                    if let Err(e) = record_metrics(&mgr, &status, &response_headers) {
-                        tracing::warn!("Failed to record metrics: {}", e);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Mutex poisoned during metrics recording: {}", e);
-                }
+                let mut response = Response::new(Body::from(body));
+                *response.status_mut() = status;
+                *response.headers_mut() = sanitize_response_headers(response_headers);
+                return response;
             }
 
             // ── Transform SSE response stream ──
@@ -183,14 +203,39 @@ pub async fn proxy_handler(
 
             let mut response = Response::new(body);
             *response.status_mut() = status;
-            *response.headers_mut() = response_headers;
+            *response.headers_mut() = sanitize_response_headers(response_headers);
             response
         }
-        Err(e) => {
-            tracing::error!("Upstream request failed: {} upstream_url={}", e, upstream_url);
-            (StatusCode::BAD_GATEWAY, format!("Upstream error: {}", e)).into_response()
+        Err(error) => {
+            tracing::error!(
+                "Upstream request failed for {} (timeout={}, connect={})",
+                upstream_log_url,
+                error.is_timeout(),
+                error.is_connect(),
+            );
+            (StatusCode::BAD_GATEWAY, "Upstream request failed").into_response()
         }
     }
+}
+
+async fn read_limited_response_body(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<(Bytes, bool), reqwest::Error> {
+    let mut stream = response.bytes_stream();
+    let mut body = BytesMut::new();
+    let mut truncated = false;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        let remaining = limit.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body.freeze(), truncated))
 }
 
 /// Look up the active provider and profile from the database and return
@@ -210,6 +255,10 @@ fn get_active_upstream(mgr: &ConfigManager) -> anyhow::Result<UpstreamInfo> {
         .ok_or_else(|| anyhow::anyhow!("Profile {}/{} not found", provider_id, profile_id))?;
 
     let token = resolve_api_key(&provider.api_key);
+    if token.is_empty() {
+        anyhow::bail!("API key unavailable for provider '{}'", provider.id);
+    }
+    validate_provider(&provider)?;
     Ok(UpstreamInfo {
         api_url: provider.api_url,
         auth_token: token,
@@ -222,20 +271,95 @@ fn get_active_upstream(mgr: &ConfigManager) -> anyhow::Result<UpstreamInfo> {
 
 /// Clone the original headers, replace Authorization with the real upstream
 /// token, and strip hop-by-hop / client-side headers that must not be forwarded.
-fn prepare_upstream_headers(original: &HeaderMap, new_token: &str) -> HeaderMap {
+fn prepare_upstream_headers(original: &HeaderMap, new_token: &str) -> anyhow::Result<HeaderMap> {
     let mut headers = original.clone();
-    // Replace auth header with real upstream API key
-    if let Ok(hv) = HeaderValue::from_str(&format!("Bearer {}", new_token)) {
-        headers.insert("Authorization", hv);
+    let connection_tokens = headers
+        .get("connection")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(',')
+                .map(|token| token.trim().to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for name in [
+        "authorization",
+        "x-api-key",
+        "host",
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "content-length",
+    ] {
+        headers.remove(name);
     }
-    // Strip hop-by-hop / body-dependent headers — reqwest will set the correct values
-    headers.remove("host");
-    headers.remove("Host");
-    headers.remove("connection");
-    headers.remove("Connection");
-    headers.remove("transfer-encoding");
-    headers.remove("Transfer-Encoding");
-    headers.remove("content-length");
-    headers.remove("Content-Length");
+    for name in connection_tokens {
+        headers.remove(name);
+    }
+    let bearer = HeaderValue::from_str(&format!("Bearer {}", new_token))?;
+    let api_key = HeaderValue::from_str(new_token)?;
+    headers.insert("authorization", bearer);
+    headers.insert("x-api-key", api_key);
+    Ok(headers)
+}
+
+fn sanitize_response_headers(mut headers: HeaderMap) -> HeaderMap {
+    let connection_tokens = headers
+        .get("connection")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(',')
+                .map(|token| token.trim().to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for name in [
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "content-length",
+    ] {
+        headers.remove(name);
+    }
+    for name in connection_tokens {
+        headers.remove(name);
+    }
     headers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_upstream_headers;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn replaces_auth_and_removes_hop_by_hop_headers() {
+        let mut input = HeaderMap::new();
+        input.insert("authorization", HeaderValue::from_static("Bearer dummy"));
+        input.insert("x-api-key", HeaderValue::from_static("dummy"));
+        input.insert(
+            "connection",
+            HeaderValue::from_static("keep-alive, x-remove-me"),
+        );
+        input.insert("x-remove-me", HeaderValue::from_static("value"));
+        input.insert("content-length", HeaderValue::from_static("10"));
+        let headers = prepare_upstream_headers(&input, "real-key").unwrap();
+        assert_eq!(headers["authorization"], "Bearer real-key");
+        assert_eq!(headers["x-api-key"], "real-key");
+        assert!(!headers.contains_key("connection"));
+        assert!(!headers.contains_key("x-remove-me"));
+        assert!(!headers.contains_key("content-length"));
+    }
 }

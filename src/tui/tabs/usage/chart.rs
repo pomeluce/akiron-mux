@@ -40,7 +40,11 @@ pub fn render_daily_chart(
     if daily.is_empty() {
         let p = Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled(lang::current().no_usage_7d, Style::default().fg(theme::current().comment))).centered(),
+            Line::from(Span::styled(
+                lang::current().no_usage_7d,
+                Style::default().fg(theme::current().comment),
+            ))
+            .centered(),
             Line::from(""),
         ])
         .block(
@@ -67,7 +71,14 @@ pub fn render_daily_chart(
             if total == 0 {
                 None
             } else {
-                Some((d.format("%m-%d").to_string(), in_tok, out_tok, cr_tok, cc_tok, date_str == today_date))
+                Some((
+                    d.format("%m-%d").to_string(),
+                    in_tok,
+                    out_tok,
+                    cr_tok,
+                    cc_tok,
+                    date_str == today_date,
+                ))
             }
         })
         .collect();
@@ -75,7 +86,11 @@ pub fn render_daily_chart(
     if days.is_empty() {
         let p = Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled(lang::current().no_usage_7d, Style::default().fg(theme::current().comment))).centered(),
+            Line::from(Span::styled(
+                lang::current().no_usage_7d,
+                Style::default().fg(theme::current().comment),
+            ))
+            .centered(),
             Line::from(""),
         ])
         .block(
@@ -88,24 +103,41 @@ pub fn render_daily_chart(
         return;
     }
 
-    let max_val = days.iter().map(|(_, i, o, cr, cc, _)| i + o + cr + cc).max().unwrap_or(1).max(1);
+    let max_val = days
+        .iter()
+        .map(|(_, i, o, cr, cc, _)| i + o + cr + cc)
+        .max()
+        .unwrap_or(1)
+        .max(1);
     let lines: Vec<Line> = days
         .iter()
         .flat_map(|(date, in_tok, out_tok, cr_tok, cc_tok, is_today)| {
             let total = in_tok + out_tok + cr_tok + cc_tok;
-            let w = if max_val > 0 { (total as f64 / max_val as f64 * 30.0) as usize } else { 0 };
+            let w = if max_val > 0 {
+                (total as f64 / max_val as f64 * 30.0) as usize
+            } else {
+                0
+            };
             let w = if total > 0 { w.max(1) } else { 0 };
             let bar_max = (area.width as usize).saturating_sub(24);
             let bar = "\u{2500}".repeat(w.min(bar_max));
-            let color = if *is_today { theme::current().orange } else { theme::current().purple };
+            let color = if *is_today {
+                theme::current().orange
+            } else {
+                theme::current().purple
+            };
             let indent = "  ";
             let detail_lines: Vec<Line> = if total > 0 {
                 let text = format!(
                     "{}: {}  {}: {}  {}: {}  {}: {}",
-                    lang::current().chart_input, format_tokens(*in_tok),
-                    lang::current().chart_output, format_tokens(*out_tok),
-                    lang::current().chart_cache_read, format_tokens(*cr_tok),
-                    lang::current().chart_cache_create, format_tokens(*cc_tok)
+                    lang::current().chart_input,
+                    format_tokens(*in_tok),
+                    lang::current().chart_output,
+                    format_tokens(*out_tok),
+                    lang::current().chart_cache_read,
+                    format_tokens(*cr_tok),
+                    lang::current().chart_cache_create,
+                    format_tokens(*cc_tok)
                 );
                 let max_w = (area.width as usize).saturating_sub(4).max(20);
                 let (first, rest) = split_dw(&text, max_w);
@@ -114,7 +146,10 @@ pub fn render_daily_chart(
                     Span::styled(first, Style::default().fg(theme::current().comment)),
                 ])];
                 for line in rest {
-                    result.push(Line::from(Span::styled(format!("{}{}", indent, line), Style::default().fg(theme::current().comment))));
+                    result.push(Line::from(Span::styled(
+                        format!("{}{}", indent, line),
+                        Style::default().fg(theme::current().comment),
+                    )));
                 }
                 result
             } else {
@@ -122,11 +157,18 @@ pub fn render_daily_chart(
             };
             let mut day_lines = vec![Line::from(vec![
                 Span::styled("  ", Style::default()),
-                Span::styled(format!("{}  ", date), Style::default().fg(theme::current().comment)),
+                Span::styled(
+                    format!("{}  ", date),
+                    Style::default().fg(theme::current().comment),
+                ),
                 Span::styled(bar, Style::default().fg(color)),
                 Span::styled(
                     format!(" {}", format_tokens(total)),
-                    Style::default().fg(if *is_today { theme::current().orange } else { theme::current().dim }),
+                    Style::default().fg(if *is_today {
+                        theme::current().orange
+                    } else {
+                        theme::current().dim
+                    }),
                 ),
             ])];
             day_lines.extend(detail_lines);
@@ -138,7 +180,11 @@ pub fn render_daily_chart(
     let visible = (area.height as usize).saturating_sub(2);
     let max_scroll = lines.len().saturating_sub(visible);
     *chart_scroll = (*chart_scroll).min(max_scroll);
-    let lines: Vec<Line> = lines.into_iter().skip(*chart_scroll).take(visible).collect();
+    let lines: Vec<Line> = lines
+        .into_iter()
+        .skip(*chart_scroll)
+        .take(visible)
+        .collect();
 
     let p = Paragraph::new(lines).block(
         Block::bordered()
@@ -149,7 +195,13 @@ pub fn render_daily_chart(
     f.render_widget(p, area);
 }
 
-fn dw(c: char) -> usize { if c > '\u{7e}' { 2 } else { 1 } }
+fn dw(c: char) -> usize {
+    if c > '\u{7e}' {
+        2
+    } else {
+        1
+    }
+}
 
 fn split_dw(text: &str, max_w: usize) -> (String, Vec<String>) {
     let mut first = String::new();
@@ -159,14 +211,21 @@ fn split_dw(text: &str, max_w: usize) -> (String, Vec<String>) {
     for c in text.chars() {
         let cw = dw(c);
         if cur_w + cw > max_w && !cur.is_empty() {
-            if first.is_empty() { first = cur; }
-            else { rest.push(cur); }
+            if first.is_empty() {
+                first = cur;
+            } else {
+                rest.push(cur);
+            }
             cur = String::new();
             cur_w = 0;
         }
         cur.push(c);
         cur_w += cw;
     }
-    if first.is_empty() { first = cur; } else { rest.push(cur); }
+    if first.is_empty() {
+        first = cur;
+    } else {
+        rest.push(cur);
+    }
     (first, rest)
 }

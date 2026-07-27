@@ -1,6 +1,6 @@
 use super::shared::{format_size, format_tokens};
-use crate::db::sessions::SessionRecord;
 use crate::core::models::AppType;
+use crate::db::sessions::SessionRecord;
 use crate::tui::lang;
 use crate::tui::theme;
 use ratatui::{
@@ -12,7 +12,15 @@ use ratatui::{
 };
 
 /// Render a session detail panel in the given area.
-pub fn render_session_detail(f: &mut Frame, area: Rect, session: &SessionRecord, tokens: Option<(i64, i64)>, active_provider: Option<&str>, active_profile: Option<&str>, app: AppType) {
+pub fn render_session_detail(
+    f: &mut Frame,
+    area: Rect,
+    session: &SessionRecord,
+    tokens: Option<(i64, i64)>,
+    active_provider: Option<&str>,
+    active_profile: Option<&str>,
+    app: AppType,
+) {
     let home = std::env::var("HOME").unwrap_or_default();
     let path_short = session.project_path.replace(&home, "~");
     let max_w = (area.width as usize).saturating_sub(4).max(20);
@@ -22,7 +30,10 @@ pub fn render_session_detail(f: &mut Frame, area: Rect, session: &SessionRecord,
     // Title
     lines.push(Line::from(vec![
         Span::styled("  ", Style::default()),
-        Span::styled(session.title.as_deref().unwrap_or(&session.id), Style::default().fg(theme::current().cyan)),
+        Span::styled(
+            session.title.as_deref().unwrap_or(&session.id),
+            Style::default().fg(theme::current().cyan),
+        ),
     ]));
     lines.push(Line::from(""));
 
@@ -37,11 +48,23 @@ pub fn render_session_detail(f: &mut Frame, area: Rect, session: &SessionRecord,
     lines.push(Line::from(""));
 
     // Profile: provider_id · profile_id
-    let pid = session.profile_id.as_deref().or(active_provider).unwrap_or("-");
+    let pid = session
+        .profile_id
+        .as_deref()
+        .or(active_provider)
+        .unwrap_or("-");
     let pfid = active_profile.unwrap_or("-");
-    let profile_text = if app == AppType::Codex { pid.to_string() } else { format!("{} \u{b7} {}", active_provider.unwrap_or("-"), pfid) };
+    let profile_text = if app == AppType::Codex {
+        pid.to_string()
+    } else {
+        format!("{} \u{b7} {}", active_provider.unwrap_or("-"), pfid)
+    };
     lines.extend(line_with_wrap(
-        if app == AppType::Codex { lang::current().detail_provider } else { lang::current().detail_profile },
+        if app == AppType::Codex {
+            lang::current().detail_provider
+        } else {
+            lang::current().detail_profile
+        },
         &profile_text,
         max_w,
         theme::current().purple,
@@ -62,9 +85,17 @@ pub fn render_session_detail(f: &mut Frame, area: Rect, session: &SessionRecord,
 
     // Tokens
     let token_text = if let Some((p, c)) = tokens {
-        format!("{} prompt / {} completion", format_tokens(p), format_tokens(c))
+        format!(
+            "{} prompt / {} completion",
+            format_tokens(p),
+            format_tokens(c)
+        )
     } else {
-        format!("{} prompt / {} completion", format_tokens(session.prompt_tokens), format_tokens(session.completion_tokens))
+        format!(
+            "{} prompt / {} completion",
+            format_tokens(session.prompt_tokens),
+            format_tokens(session.completion_tokens)
+        )
     };
     lines.extend(line_with_wrap(
         lang::current().detail_tokens,
@@ -119,7 +150,11 @@ pub fn render_session_detail(f: &mut Frame, area: Rect, session: &SessionRecord,
 pub fn render_empty_detail(f: &mut Frame, area: Rect, hint: &str) {
     let p = Paragraph::new(vec![
         Line::from(""),
-        Line::from(Span::styled(hint, Style::default().fg(theme::current().comment))).centered(),
+        Line::from(Span::styled(
+            hint,
+            Style::default().fg(theme::current().comment),
+        ))
+        .centered(),
     ])
     .block(
         Block::bordered()
@@ -131,8 +166,17 @@ pub fn render_empty_detail(f: &mut Frame, area: Rect, hint: &str) {
 }
 
 /// Build labeled lines with left pad + fixed-width label: "  Label:  value"
-fn line_with_wrap(label: &str, value: &str, max_w: usize, label_color: ratatui::style::Color, value_color: ratatui::style::Color) -> Vec<Line<'static>> {
-    let dw = label.chars().map(|c| if c > '\u{7e}' { 2 } else { 1 }).sum::<usize>();
+fn line_with_wrap(
+    label: &str,
+    value: &str,
+    max_w: usize,
+    label_color: ratatui::style::Color,
+    value_color: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    let dw = label
+        .chars()
+        .map(|c| if c > '\u{7e}' { 2 } else { 1 })
+        .sum::<usize>();
     let prefix = if dw >= 8 {
         format!("  {}:  ", label)
     } else {

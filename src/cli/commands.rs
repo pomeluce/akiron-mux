@@ -1,16 +1,21 @@
-use std::path::PathBuf;
-use anyhow::{Context, Result};
-use clap::CommandFactory;
 use crate::cli::args::{CliArgs, Commands, ProxyAction, ServiceAction};
 use crate::core::config::ConfigManager;
 use crate::core::models::SwitchMode;
 use crate::core::switcher::switch_profile;
+use anyhow::{Context, Result};
+use clap::CommandFactory;
+use std::path::PathBuf;
 
 fn mask_key(key: &str) -> String {
-    if key.starts_with("env:") || key.len() <= 8 {
+    let chars = key.chars().collect::<Vec<_>>();
+    if key.starts_with("env:") || chars.len() <= 8 {
         key.to_string()
     } else {
-        format!("{}...{}", &key[..4], &key[key.len()-4..])
+        format!(
+            "{}...{}",
+            chars[..4].iter().collect::<String>(),
+            chars[chars.len() - 4..].iter().collect::<String>()
+        )
     }
 }
 
@@ -43,11 +48,22 @@ pub fn run_cli(args: CliArgs) -> Result<()> {
     let mgr = ConfigManager::new(&db_path, defaults_path)?;
 
     match command {
-        Commands::Switch { target, local: _, proxy } => {
-            let mode = if proxy { SwitchMode::Proxy } else { SwitchMode::Local };
+        Commands::Switch {
+            target,
+            local: _,
+            proxy,
+        } => {
+            let mode = if proxy {
+                SwitchMode::Proxy
+            } else {
+                SwitchMode::Local
+            };
             handle_switch(&mgr, target, mode)?;
         }
-        Commands::List { providers, profiles } => {
+        Commands::List {
+            providers,
+            profiles,
+        } => {
             handle_list(&mgr, providers, profiles)?;
         }
         Commands::Add { what, provider } => {
@@ -90,7 +106,7 @@ fn handle_switch(mgr: &ConfigManager, target: Option<String>, mode: SwitchMode) 
             }
             anyhow::bail!("No target specified and no default profile found. Use 'ccs switch <provider>/<profile>'.");
         },
-        |t| Ok(t),
+        Ok,
     )?;
 
     let (provider_id, profile_id) = target
@@ -98,7 +114,10 @@ fn handle_switch(mgr: &ConfigManager, target: Option<String>, mode: SwitchMode) 
         .with_context(|| format!("Invalid target '{}'. Use provider_id/profile_id", target))?;
 
     let config = switch_profile(mgr, provider_id, profile_id, mode, None)?;
-    println!("Switched to: {} / {}", config.provider_name, config.profile_name);
+    println!(
+        "Switched to: {} / {}",
+        config.provider_name, config.profile_name
+    );
     println!("  Opus:      {}", config.opus);
     println!("  Sonnet:    {}", config.sonnet);
     println!("  Haiku:     {}", config.haiku);
@@ -107,19 +126,42 @@ fn handle_switch(mgr: &ConfigManager, target: Option<String>, mode: SwitchMode) 
     Ok(())
 }
 
-fn handle_list(mgr: &ConfigManager, providers_only: bool, _profiles_only: bool) -> Result<()> {
+fn handle_list(mgr: &ConfigManager, providers_only: bool, profiles_only: bool) -> Result<()> {
+    if providers_only && profiles_only {
+        anyhow::bail!("--providers and --profiles cannot be used together");
+    }
     let providers = mgr.list_providers()?;
     for p in &providers {
-        let source_icon = if p.source.can_delete() { "👤" } else { "🔒" };
-        let default_marker = if p.profiles.iter().any(|pr| pr.default) { " ★" } else { "" };
-        println!("{} {} ({}) [{}]{}", source_icon, p.name, p.id, p.api_url, default_marker);
+        if !profiles_only {
+            let source_icon = if p.source.can_delete() {
+                "👤"
+            } else {
+                "🔒"
+            };
+            let default_marker = if p.profiles.iter().any(|pr| pr.default) {
+                " ★"
+            } else {
+                ""
+            };
+            println!(
+                "{} {} ({}) [{}]{}",
+                source_icon, p.name, p.id, p.api_url, default_marker
+            );
+        }
         if !providers_only {
             for pr in &p.profiles {
                 let active = if pr.default { " (default)" } else { "" };
-                println!("  ├─ {} ({}) [opus={}]{}", pr.name, pr.id, pr.opus, active);
+                let prefix = if profiles_only {
+                    format!("{}/{}", p.id, pr.id)
+                } else {
+                    pr.id.clone()
+                };
+                println!("  ├─ {} ({}) [opus={}]{}", pr.name, prefix, pr.opus, active);
             }
         }
-        println!();
+        if !profiles_only {
+            println!();
+        }
     }
     Ok(())
 }
@@ -131,12 +173,25 @@ fn handle_add(mgr: &ConfigManager, what: &str, parent_provider: Option<&str>) ->
             let id: String = Input::new().with_prompt("Provider ID").interact_text()?;
             let name: String = Input::new().with_prompt("Name").interact_text()?;
             let api_url: String = Input::new().with_prompt("API URL").interact_text()?;
-            let api_key: String = Password::new().with_prompt("API Key (or env:VAR)").interact()?;
+            let api_key: String = Password::new()
+                .with_prompt("API Key (or env:VAR)")
+                .interact()?;
             let p = crate::core::models::Provider {
-                id, name, api_url, api_key,
+                id,
+                name,
+                api_url,
+                api_key,
                 profiles: vec![],
                 source: crate::core::models::Source::User,
             };
+            crate::core::models::validate_provider(&p)?;
+            if mgr
+                .list_providers()?
+                .iter()
+                .any(|provider| provider.id == p.id)
+            {
+                anyhow::bail!("Provider '{}' already exists", p.id);
+            }
             mgr.db().insert_provider(&p, "claude")?;
             println!("Provider added.");
         }
@@ -144,8 +199,15 @@ fn handle_add(mgr: &ConfigManager, what: &str, parent_provider: Option<&str>) ->
             let provider_id = parent_provider.context("Usage: ccs add profile <provider_id>")?;
             // Ensure provider exists
             let providers = mgr.list_providers()?;
-            let provider = providers.iter().find(|p| p.id == provider_id)
-                .with_context(|| format!("Provider '{}' not found. Create it first: ccs add provider", provider_id))?;
+            let provider = providers
+                .iter()
+                .find(|p| p.id == provider_id)
+                .with_context(|| {
+                    format!(
+                        "Provider '{}' not found. Create it first: ccs add provider",
+                        provider_id
+                    )
+                })?;
             use dialoguer::Input;
             let id: String = Input::new().with_prompt("Profile ID").interact_text()?;
             let name: String = Input::new().with_prompt("Name").interact_text()?;
@@ -154,10 +216,19 @@ fn handle_add(mgr: &ConfigManager, what: &str, parent_provider: Option<&str>) ->
             let haiku: String = Input::new().with_prompt("Haiku model").interact_text()?;
             let subagent: String = Input::new().with_prompt("Subagent model").interact_text()?;
             let pr = crate::core::models::Profile {
-                id, name, opus, sonnet, haiku, subagent,
+                id,
+                name,
+                opus,
+                sonnet,
+                haiku,
+                subagent,
                 default: false,
                 source: crate::core::models::Source::User,
             };
+            crate::core::models::validate_profile(&pr)?;
+            if provider.profiles.iter().any(|profile| profile.id == pr.id) {
+                anyhow::bail!("Profile '{}/{}' already exists", provider_id, pr.id);
+            }
             mgr.db().insert_profile(provider_id, &pr)?;
             println!("Profile added to provider '{}'.", provider.name);
         }
@@ -167,45 +238,68 @@ fn handle_add(mgr: &ConfigManager, what: &str, parent_provider: Option<&str>) ->
 }
 
 fn handle_edit(mgr: &ConfigManager, target: &str) -> Result<()> {
-    println!("Editing {} (interactive edit — launch TUI for full edit, or use add/remove)", target);
+    println!(
+        "Editing {} (interactive edit — launch TUI for full edit, or use add/remove)",
+        target
+    );
     // For CLI: just print current state; TUI provides full edit
     let providers = mgr.list_providers()?;
+    let mut found = false;
     if let Some((provider_id, profile_id)) = target.split_once('/') {
         if let Some((p, pr)) = mgr.find_profile(provider_id, profile_id)? {
+            found = true;
             println!("Provider: {} ({})", p.name, p.id);
             println!("Profile:  {} ({})", pr.name, pr.id);
-            println!("  opus={} sonnet={} haiku={} subagent={}", pr.opus, pr.sonnet, pr.haiku, pr.subagent);
+            println!(
+                "  opus={} sonnet={} haiku={} subagent={}",
+                pr.opus, pr.sonnet, pr.haiku, pr.subagent
+            );
         }
     } else {
         for p in &providers {
             if p.id == target {
+                found = true;
                 println!("Provider: {} ({})", p.name, p.id);
                 let masked_key = mask_key(&p.api_key);
                 println!("  URL: {}  Key: {}", p.api_url, masked_key);
             }
         }
     }
+    if !found {
+        anyhow::bail!("Configuration '{}' not found", target);
+    }
     Ok(())
 }
 
 fn handle_remove(mgr: &ConfigManager, target: &str) -> Result<()> {
     if let Some((provider_id, profile_id)) = target.split_once('/') {
-        // Check if it's a system profile
-        if let Some((_, pr)) = mgr.find_profile(provider_id, profile_id)? {
-            if !pr.source.can_delete() {
-                anyhow::bail!("Cannot delete system default profile '{}'", target);
-            }
+        let (_, profile) = mgr
+            .find_profile(provider_id, profile_id)?
+            .with_context(|| format!("Profile '{}' not found", target))?;
+        if !profile.source.can_delete() {
+            anyhow::bail!("Cannot delete system default profile '{}'", target);
         }
-        mgr.db().delete_profile(profile_id)?;
+        mgr.db().delete_profile(provider_id, profile_id)?;
+        if mgr.get_setting("active_provider").as_deref() == Some(provider_id)
+            && mgr.get_setting("active_profile").as_deref() == Some(profile_id)
+        {
+            mgr.set_setting("active_profile", "")?;
+        }
         println!("Removed profile: {}", target);
     } else {
         let providers = mgr.list_providers()?;
-        for p in &providers {
-            if p.id == target && !p.source.can_delete() {
-                anyhow::bail!("Cannot delete system default provider '{}'", target);
-            }
+        let provider = providers
+            .iter()
+            .find(|provider| provider.id == target)
+            .with_context(|| format!("Provider '{}' not found", target))?;
+        if !provider.source.can_delete() {
+            anyhow::bail!("Cannot delete system default provider '{}'", target);
         }
         mgr.db().delete_provider(target, "claude")?;
+        if mgr.get_setting("active_provider").as_deref() == Some(target) {
+            mgr.set_setting("active_provider", "")?;
+            mgr.set_setting("active_profile", "")?;
+        }
         println!("Removed provider: {}", target);
     }
     Ok(())
@@ -244,19 +338,36 @@ fn handle_proxy(action: ProxyAction) -> Result<()> {
 }
 
 fn handle_usage(mgr: &ConfigManager, range: &str, profile: Option<&str>) -> Result<()> {
+    if !matches!(range, "day" | "week" | "month" | "all") {
+        anyhow::bail!("Invalid range '{}'. Use day, week, month, or all.", range);
+    }
     let summaries = mgr.db().query_usage("claude", range)?;
-    let total_tokens: i64 = summaries.iter().map(|s| s.total_prompt + s.total_completion).sum();
+    let filtered: Vec<_> = summaries
+        .iter()
+        .filter(|summary| profile.map_or(true, |filter| summary.model.contains(filter)))
+        .collect();
+    let total_tokens: i64 = filtered
+        .iter()
+        .map(|s| s.total_prompt + s.total_completion + s.total_cache_read + s.total_cache_create)
+        .sum();
+    let total_requests: i64 = filtered.iter().map(|summary| summary.request_count).sum();
     println!("Token Usage ({})", range);
-    println!("{:<30} {:>10} {:>10} {:>8}", "Model", "Prompt", "Completion", "Reqs");
+    println!(
+        "{:<30} {:>10} {:>10} {:>8}",
+        "Model", "Prompt", "Completion", "Reqs"
+    );
     println!("{}", "-".repeat(60));
-    for s in &summaries {
-        if let Some(filter) = profile {
-            if !s.model.contains(filter) { continue; }
-        }
-        println!("{:<30} {:>10} {:>10} {:>8}", s.model, s.total_prompt, s.total_completion, s.request_count);
+    for s in filtered {
+        println!(
+            "{:<30} {:>10} {:>10} {:>8}",
+            s.model, s.total_prompt, s.total_completion, s.request_count
+        );
     }
     println!("{}", "-".repeat(60));
-    println!("Total: {} tokens across {} requests", total_tokens, summaries.len());
+    println!(
+        "Total: {} tokens across {} requests",
+        total_tokens, total_requests
+    );
     Ok(())
 }
 
@@ -275,7 +386,10 @@ fn handle_history(mgr: &ConfigManager, project: Option<&str>, search: Option<&st
     }
     let sessions = mgr.db().query_sessions("claude", project, search, 200)?;
     println!("Session History");
-    println!("{:<6} {:<40} {:<12} {:>8} {:>6} Profile", "Date", "Title", "Project", "Tokens", "Msgs");
+    println!(
+        "{:<6} {:<40} {:<12} {:>8} {:>6} Profile",
+        "Date", "Title", "Project", "Tokens", "Msgs"
+    );
     println!("{}", "-".repeat(100));
     for s in &sessions {
         let date = s.start_time.get(5..16).unwrap_or(&s.start_time); // "MM-DD HH:MM", fallback safety
@@ -287,17 +401,24 @@ fn handle_history(mgr: &ConfigManager, project: Option<&str>, search: Option<&st
             raw.to_string()
         };
         let title = title.chars().take(40).collect::<String>();
-        let project_short = project_name(s).unwrap_or_default().chars().take(12).collect::<String>();
+        let project_short = project_name(s)
+            .unwrap_or_default()
+            .chars()
+            .take(12)
+            .collect::<String>();
         let tokens = s.prompt_tokens + s.completion_tokens;
         let profile = s.profile_id.as_deref().unwrap_or("-");
-        println!("{:<6} {:<40} {:<12} {:>8} {:>6} {}", date, title, project_short, tokens, s.message_count, profile);
+        println!(
+            "{:<6} {:<40} {:<12} {:>8} {:>6} {}",
+            date, title, project_short, tokens, s.message_count, profile
+        );
     }
     Ok(())
 }
 
 fn handle_completions(shell: &str) -> Result<()> {
-    use clap_complete::{generate, shells};
     use crate::cli::args::CliArgs;
+    use clap_complete::{generate, shells};
     let mut cmd = CliArgs::command();
     match shell {
         "zsh" => generate(shells::Zsh, &mut cmd, "ccs", &mut std::io::stdout()),
@@ -309,8 +430,8 @@ fn handle_completions(shell: &str) -> Result<()> {
 }
 
 fn handle_man() -> Result<()> {
-    use clap_mangen::Man;
     use crate::cli::args::CliArgs;
+    use clap_mangen::Man;
     let cmd = CliArgs::command();
     let man = Man::new(cmd);
     man.render(&mut std::io::stdout())?;

@@ -1,5 +1,5 @@
 {
-  description = "CCSwitch — Claude Code model configuration manager";
+  description = "CCSwitch — Claude Code and Codex configuration manager";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -35,7 +35,7 @@
         {
           packages.default = rustPlatform.buildRustPackage {
             pname = "ccswitch";
-            version = "1.9.0";
+            version = "1.9.1";
             src = ./.;
             cargoLock = {
               lockFile = ./Cargo.lock;
@@ -72,155 +72,166 @@
           };
         };
 
-      flake = {
-        # NixOS system-level module — installs package + generates defaults.toml
-        nixosModules.default =
-          {
-            config,
-            lib,
-            pkgs,
-            ...
-          }:
-          let
-            cfg = config.services.ccswitch;
-            format = pkgs.formats.toml { };
-          in
-          {
-            options.services.ccswitch = {
-              enable = lib.mkEnableOption "CCSwitch model configuration manager";
-              defaults = lib.mkOption {
-                type = lib.types.attrs;
-                default = { };
-                description = "Provider configurations (written to /etc/ccswitch/defaults.toml)";
-              };
-            };
-            config = lib.mkIf cfg.enable {
-              environment.systemPackages = [ self.packages.${pkgs.system}.default ];
-              environment.etc."ccswitch/defaults.toml".source =
-                format.generate "ccswitch-system-defaults.toml" cfg.defaults;
-            };
-          };
-
-        # Home Manager user-level module
-        homeModules.default =
-          {
-            config,
-            lib,
-            pkgs,
-            ...
-          }:
-          let
-            cfg = config.programs.ccswitch;
-          in
-          {
-            options.programs.ccswitch = {
-              enable = lib.mkEnableOption "CCSwitch model configuration manager";
-              envVars = lib.mkOption {
-                type = lib.types.nullOr (lib.types.either lib.types.str (lib.types.attrsOf lib.types.str));
-                default = null;
-                example = {
-                  DEEPSEEK_API_KEY = "sk-xxx";
+      flake =
+        let
+          mkDefaultsType =
+            lib: pkgs:
+            let
+              format = pkgs.formats.toml { };
+              profileType = lib.types.submodule {
+                freeformType = format.type;
+                options = {
+                  id = lib.mkOption { type = lib.types.str; };
+                  name = lib.mkOption { type = lib.types.str; };
+                  opus = lib.mkOption {
+                    type = lib.types.str;
+                    default = "";
+                  };
+                  sonnet = lib.mkOption {
+                    type = lib.types.str;
+                    default = "";
+                  };
+                  haiku = lib.mkOption {
+                    type = lib.types.str;
+                    default = "";
+                  };
+                  subagent = lib.mkOption {
+                    type = lib.types.str;
+                    default = "";
+                  };
+                  default = lib.mkOption {
+                    type = lib.types.bool;
+                    default = false;
+                  };
                 };
-                description = "Environment file path or attrset of env vars for proxy service.";
               };
-              defaults = lib.mkOption {
-                type =
+              providerType = lib.types.submodule {
+                freeformType = format.type;
+                options = {
+                  id = lib.mkOption { type = lib.types.str; };
+                  name = lib.mkOption { type = lib.types.str; };
+                  api_url = lib.mkOption { type = lib.types.str; };
+                  api_key = lib.mkOption { type = lib.types.str; };
+                  profiles = lib.mkOption {
+                    type = lib.types.listOf profileType;
+                    default = [ ];
+                  };
+                };
+              };
+              codexProviderType = lib.types.submodule {
+                freeformType = format.type;
+                options = {
+                  id = lib.mkOption { type = lib.types.str; };
+                  name = lib.mkOption { type = lib.types.str; };
+                  api_url = lib.mkOption { type = lib.types.str; };
+                  api_key = lib.mkOption { type = lib.types.str; };
+                };
+              };
+            in
+            lib.types.submodule {
+              freeformType = format.type;
+              options = {
+                version = lib.mkOption {
+                  type = lib.types.int;
+                  default = 1;
+                };
+                providers = lib.mkOption {
+                  type = lib.types.listOf providerType;
+                  default = [ ];
+                };
+                codex_providers = lib.mkOption {
+                  type = lib.types.listOf codexProviderType;
+                  default = [ ];
+                };
+              };
+            };
+        in
+        {
+          # NixOS system-level module — installs package + generates defaults.toml
+          nixosModules.default =
+            {
+              config,
+              lib,
+              pkgs,
+              ...
+            }:
+            let
+              cfg = config.services.ccswitch;
+              format = pkgs.formats.toml { };
+            in
+            {
+              options.services.ccswitch = {
+                enable = lib.mkEnableOption "CCSwitch Claude Code and Codex configuration manager";
+                defaults = lib.mkOption {
+                  type = mkDefaultsType lib pkgs;
+                  default = { };
+                  description = "Claude and Codex provider configurations (written to /etc/ccswitch/defaults.toml)";
+                };
+              };
+              config = lib.mkIf cfg.enable {
+                environment.systemPackages = [ self.packages.${pkgs.system}.default ];
+                environment.etc."ccswitch/defaults.toml".source =
+                  format.generate "ccswitch-system-defaults.toml" cfg.defaults;
+              };
+            };
+
+          # Home Manager user-level module
+          homeModules.default =
+            {
+              config,
+              lib,
+              pkgs,
+              ...
+            }:
+            let
+              cfg = config.programs.ccswitch;
+            in
+            {
+              options.programs.ccswitch = {
+                enable = lib.mkEnableOption "CCSwitch Claude Code and Codex configuration manager";
+                envVars = lib.mkOption {
+                  type = lib.types.nullOr lib.types.str;
+                  default = null;
+                  example = "%h/.config/ccswitch/env";
+                  description = "Path to an environment file kept outside the Nix store for the proxy service.";
+                };
+                defaults = lib.mkOption {
+                  type = mkDefaultsType lib pkgs;
+                  default = { };
+                  description = "Default Claude and Codex provider configurations";
+                };
+              };
+              config = lib.mkIf cfg.enable {
+                home.packages = [ self.packages.${pkgs.system}.default ];
+
+                xdg.configFile."ccswitch/defaults.toml" =
                   let
                     format = pkgs.formats.toml { };
                   in
-                  lib.types.submodule {
-                    freeformType = format.type;
-                    options.version = lib.mkOption {
-                      type = lib.types.int;
-                      default = 1;
-                    };
-                    options.providers = lib.mkOption {
-                      type = lib.types.listOf (
-                        lib.types.submodule {
-                          freeformType = format.type;
-                          options = {
-                            id = lib.mkOption { type = lib.types.str; };
-                            name = lib.mkOption { type = lib.types.str; };
-                            api_url = lib.mkOption { type = lib.types.str; };
-                            api_key = lib.mkOption { type = lib.types.str; };
-                            profiles = lib.mkOption {
-                              type = lib.types.listOf (
-                                lib.types.submodule {
-                                  freeformType = format.type;
-                                  options = {
-                                    id = lib.mkOption { type = lib.types.str; };
-                                    name = lib.mkOption { type = lib.types.str; };
-                                    opus = lib.mkOption {
-                                      type = lib.types.str;
-                                      default = "";
-                                    };
-                                    sonnet = lib.mkOption {
-                                      type = lib.types.str;
-                                      default = "";
-                                    };
-                                    haiku = lib.mkOption {
-                                      type = lib.types.str;
-                                      default = "";
-                                    };
-                                    subagent = lib.mkOption {
-                                      type = lib.types.str;
-                                      default = "";
-                                    };
-                                    default = lib.mkOption {
-                                      type = lib.types.bool;
-                                      default = false;
-                                    };
-                                  };
-                                }
-                              );
-                              default = [ ];
-                            };
-                          };
-                        }
-                      );
-                      default = [ ];
-                    };
+                  {
+                    source = format.generate "ccswitch-defaults.toml" cfg.defaults;
                   };
-                default = { };
-                description = "Default provider configurations";
-              };
-            };
-            config = lib.mkIf cfg.enable {
-              home.packages = [ self.packages.${pkgs.system}.default ];
 
-              xdg.configFile."ccswitch/defaults.toml" =
-                let
-                  format = pkgs.formats.toml { };
-                in
-                {
-                  source = format.generate "ccswitch-defaults.toml" cfg.defaults;
-                };
-
-              # Env file: attrset → generate file; string → use as-is
-              xdg.configFile."ccswitch/env" = lib.mkIf (cfg.envVars != null && !lib.isString cfg.envVars) {
-                text = lib.concatStrings (lib.mapAttrsToList (k: v: "${k}=${v}\n") cfg.envVars);
-              };
-
-              # Proxy service
-              systemd.user.services.ccs-proxy = {
-                Unit = {
-                  Description = "CCSwitch Proxy Server";
-                  After = [ "network.target" ];
-                };
-                Install = {
-                  WantedBy = [ "default.target" ];
-                };
-                Service = {
-                  ExecStart = "${self.packages.${pkgs.system}.default}/bin/ccs proxy serve";
-                  Restart = "on-failure";
-                  RestartSec = "5";
-                }
-                // lib.optionalAttrs (cfg.envVars != null) {
-                  EnvironmentFile = if lib.isString cfg.envVars then cfg.envVars else "%h/.config/ccswitch/env";
+                # Proxy service
+                systemd.user.services.ccs-proxy = {
+                  Unit = {
+                    Description = "CCSwitch Proxy Server";
+                    After = [ "network.target" ];
+                  };
+                  Install = {
+                    WantedBy = [ "default.target" ];
+                  };
+                  Service = {
+                    ExecStart = "${self.packages.${pkgs.system}.default}/bin/ccs proxy serve";
+                    Restart = "on-failure";
+                    RestartSec = "5";
+                  }
+                  // lib.optionalAttrs (cfg.envVars != null) {
+                    EnvironmentFile = cfg.envVars;
+                  };
                 };
               };
             };
-          };
-      };
+        };
     };
 }

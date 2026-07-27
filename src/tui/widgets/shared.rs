@@ -1,5 +1,5 @@
-use crate::tui::lang;
 use super::super::theme;
+use crate::tui::lang;
 use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Style},
@@ -29,7 +29,11 @@ pub fn render_search_box(f: &mut Frame, area: Rect, query: &str, is_searching: b
     } else {
         format!("\u{2315} {}{}", query, cursor)
     };
-    let color = if is_searching { theme::current().cyan } else { theme::current().comment };
+    let color = if is_searching {
+        theme::current().cyan
+    } else {
+        theme::current().comment
+    };
     let p = Paragraph::new(Line::from(Span::styled(text, Style::default().fg(color)))).block(
         Block::bordered()
             .border_set(ratatui::symbols::border::ROUNDED)
@@ -44,8 +48,14 @@ pub fn render_shortcut_bar(f: &mut Frame, area: Rect, groups: &[Vec<(String, Col
     let group_spans: Vec<Vec<Span>> = groups
         .iter()
         .map(|grp| {
-            let label = Span::styled(format!(": {}", grp[1].0.clone()), Style::default().fg(theme::current().comment));
-            vec![Span::styled(grp[0].0.clone(), Style::default().fg(grp[0].1)), label]
+            let label = Span::styled(
+                format!(": {}", grp[1].0.clone()),
+                Style::default().fg(theme::current().comment),
+            );
+            vec![
+                Span::styled(grp[0].0.clone(), Style::default().fg(grp[0].1)),
+                label,
+            ]
         })
         .collect();
 
@@ -84,17 +94,58 @@ pub fn render_shortcut_bar(f: &mut Frame, area: Rect, groups: &[Vec<(String, Col
     );
 }
 
+pub fn shortcut_line_count(available_width: u16, groups: &[Vec<(String, Color)>]) -> usize {
+    let width = available_width.saturating_sub(2).max(10) as usize;
+    let mut lines = 1usize;
+    let mut current = 0usize;
+    for group in groups {
+        if group.len() < 2 {
+            continue;
+        }
+        let group_width = display_width(&group[0].0) + 2 + display_width(&group[1].0);
+        if current > 0 && current + group_width > width {
+            lines += 1;
+            current = 0;
+        }
+        if current > 0 {
+            current += 2;
+        }
+        current += group_width;
+    }
+    lines
+}
+
+pub fn render_status_bar(f: &mut Frame, area: Rect, text: &str) {
+    let (marker, color) = if text.starts_with("Error") || text.starts_with("Failed") {
+        ("!", theme::current().red)
+    } else if text.contains("scanning") || text.contains("扫描") {
+        ("⟳", theme::current().purple)
+    } else {
+        ("✓", theme::current().green)
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!(" {} ", marker), Style::default().fg(color)),
+            Span::styled(
+                text.to_string(),
+                Style::default().fg(theme::current().comment),
+            ),
+        ])),
+        area,
+    );
+}
+
 /// Render a confirmation popup with two buttons
 pub fn render_confirm_popup(
     f: &mut Frame,
     area: Rect,
     title: &str,
     msg: &str,
-    confirm_label: &str,
-    cancel_label: &str,
-    confirm_color: Color,
-    selected: usize, // 0=confirm, 1=cancel
+    labels: (&str, &str),
+    state: (Color, usize), // color, selected button (0=confirm, 1=cancel)
 ) {
+    let (confirm_label, cancel_label) = labels;
+    let (confirm_color, selected) = state;
     let popup = centered_rect(44, 6, area);
     let cs = if selected == 0 {
         Style::default().fg(Color::Black).bg(confirm_color)
@@ -129,18 +180,28 @@ pub fn render_confirm_popup(
 
 /// Render a simple message/notice popup with OK button
 pub fn render_message_popup(f: &mut Frame, area: Rect, msg: &str) {
-    let popup_width = area.width.saturating_sub(4).min(80).max(20).min(area.width);
+    let popup_width = area.width.saturating_sub(4).clamp(20, 80).min(area.width);
     let text_width = popup_width.saturating_sub(4).max(1) as usize;
-    let message_lines = msg.lines().map(|line| {
-        let width = display_width(line).max(1);
-        width.div_ceil(text_width)
-    }).sum::<usize>().max(1);
-    let popup_height = (message_lines as u16 + 4).min(area.height).max(5.min(area.height));
+    let message_lines = msg
+        .lines()
+        .map(|line| {
+            let width = display_width(line).max(1);
+            width.div_ceil(text_width)
+        })
+        .sum::<usize>()
+        .max(1);
+    let popup_height = (message_lines as u16 + 4)
+        .min(area.height)
+        .max(5.min(area.height));
     let popup = centered_rect(popup_width, popup_height, area);
     let p = Paragraph::new(vec![
         Line::from(msg),
         Line::from(""),
-        Line::from(Span::styled(lang::current().confirm_ok, Style::default().fg(Color::Black).bg(theme::current().cyan))).centered(),
+        Line::from(Span::styled(
+            lang::current().confirm_ok,
+            Style::default().fg(Color::Black).bg(theme::current().cyan),
+        ))
+        .centered(),
     ])
     .alignment(Alignment::Center)
     .wrap(Wrap { trim: true })
@@ -154,8 +215,7 @@ pub fn render_message_popup(f: &mut Frame, area: Rect, msg: &str) {
     f.render_widget(p, popup);
 }
 
-/// === Format helpers ===
-
+// === Format helpers ===
 pub fn format_size(bytes: i64) -> String {
     if bytes < 1024 {
         format!("{}B", bytes)
@@ -167,27 +227,26 @@ pub fn format_size(bytes: i64) -> String {
 }
 
 pub fn format_date(iso: &str) -> String {
-    if iso.len() >= 16 {
-        iso[5..16].to_string()
-    } else {
-        iso.to_string()
-    }
+    iso.get(5..16).unwrap_or(iso).to_string()
 }
 
 pub fn relative_time(iso: &str) -> String {
     if iso.len() < 19 {
         return format_date(iso);
     }
-    let parsed = chrono::NaiveDateTime::parse_from_str(&iso[..19], "%Y-%m-%d %H:%M:%S");
+    let Some(timestamp) = iso.get(..19) else {
+        return format_date(iso);
+    };
+    let parsed = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S");
     let dt = match parsed {
         Ok(d) => d.and_utc(),
         Err(_) => return format_date(iso),
     };
     let dur = chrono::Utc::now() - dt;
-    let secs = dur.num_seconds();
-    let mins = dur.num_minutes();
-    let hrs = dur.num_hours();
-    let days = dur.num_days();
+    let secs = dur.num_seconds().max(0);
+    let mins = dur.num_minutes().max(0);
+    let hrs = dur.num_hours().max(0);
+    let days = dur.num_days().max(0);
     if secs < 60 {
         format!("{} seconds ago", secs)
     } else if mins < 60 {
@@ -215,7 +274,10 @@ pub fn format_tokens(n: i64) -> String {
 
 pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() > max {
-        format!("{}...", s.chars().take(max.saturating_sub(3)).collect::<String>())
+        format!(
+            "{}...",
+            s.chars().take(max.saturating_sub(3)).collect::<String>()
+        )
     } else {
         s.to_string()
     }

@@ -12,7 +12,11 @@ impl Db {
     pub fn open(path: &Path) -> Result<Self, anyhow::Error> {
         if let Some(parent) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                tracing::warn!("Failed to create DB directory '{}': {}", parent.display(), e);
+                tracing::warn!(
+                    "Failed to create DB directory '{}': {}",
+                    parent.display(),
+                    e
+                );
             }
         }
 
@@ -30,10 +34,14 @@ impl Db {
 
         let version: i32 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
-            .inspect_err(|e| {
-                tracing::warn!("Failed to read DB user_version (corrupt DB?): {}", e);
-            })
-            .unwrap_or(migrations::CURRENT_USER_VERSION); // only migrate if genuinely too old
+            .map_err(|e| anyhow::anyhow!("Failed to read DB user_version: {}", e))?;
+        if version > migrations::CURRENT_USER_VERSION {
+            anyhow::bail!(
+                "Database schema version {} is newer than this CCSwitch build supports ({})",
+                version,
+                migrations::CURRENT_USER_VERSION
+            );
+        }
         if version < migrations::CURRENT_USER_VERSION {
             tracing::info!(
                 "Applying DB migrations v{} → v{}",
@@ -43,10 +51,27 @@ impl Db {
             migrations::apply_migrations(&conn)?;
         }
 
+        set_private_permissions(path);
+        set_private_permissions(&wal);
+        set_private_permissions(&shm);
         Ok(Db { conn })
     }
 
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+}
+
+fn set_private_permissions(path: &Path) {
+    #[cfg(unix)]
+    if path.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!(
+                "Failed to restrict permissions for '{}': {}",
+                path.display(),
+                error
+            );
+        }
     }
 }

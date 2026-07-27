@@ -2,7 +2,7 @@ use anyhow::Context;
 use rusqlite::Connection;
 
 /// Current schema version. Increment each time we add a migration step.
-pub(crate) const CURRENT_USER_VERSION: i32 = 5;
+pub(crate) const CURRENT_USER_VERSION: i32 = 6;
 
 /// Apply schema migrations on the given connection.
 pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), anyhow::Error> {
@@ -33,6 +33,9 @@ pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), anyhow::Error> {
     }
     if version < 5 {
         migrate_v5(conn).context("migrate v5")?;
+    }
+    if version < 6 {
+        migrate_v6(conn).context("migrate v6")?;
     }
 
     Ok(())
@@ -263,5 +266,67 @@ fn migrate_v5(conn: &Connection) -> Result<(), anyhow::Error> {
     )?;
 
     tracing::info!("Migration v5 complete: independent session and usage file indexes");
+    Ok(())
+}
+
+fn migrate_v6(conn: &Connection) -> Result<(), anyhow::Error> {
+    conn.execute_batch(
+        "BEGIN;
+         ALTER TABLE profiles RENAME TO profiles_v5;
+         CREATE TABLE profiles (
+             id TEXT NOT NULL,
+             name TEXT NOT NULL,
+             provider_id TEXT NOT NULL DEFAULT '',
+             opus_model TEXT NOT NULL,
+             sonnet_model TEXT NOT NULL DEFAULT '',
+             haiku_model TEXT NOT NULL DEFAULT '',
+             subagent_model TEXT NOT NULL DEFAULT '',
+             is_default BOOLEAN NOT NULL DEFAULT 0,
+             created_at TEXT NOT NULL DEFAULT (datetime('now')),
+             source TEXT NOT NULL DEFAULT 'user',
+             PRIMARY KEY (id, provider_id)
+         );
+         INSERT INTO profiles
+             (id, name, provider_id, opus_model, sonnet_model, haiku_model,
+              subagent_model, is_default, created_at, source)
+             SELECT id, name, provider_id, opus_model, sonnet_model, haiku_model,
+                    subagent_model, is_default, created_at, source
+             FROM profiles_v5;
+         DROP TABLE profiles_v5;
+
+         ALTER TABLE session_history RENAME TO session_history_v5;
+         CREATE TABLE session_history (
+             id TEXT NOT NULL,
+             app_type TEXT NOT NULL CHECK(app_type IN ('claude','codex')),
+             project_path TEXT NOT NULL,
+             profile_id TEXT,
+             mode TEXT NOT NULL CHECK(mode IN ('local','proxy','direct')),
+             start_time TEXT NOT NULL,
+             end_time TEXT,
+             prompt_tokens INTEGER NOT NULL DEFAULT 0,
+             completion_tokens INTEGER NOT NULL DEFAULT 0,
+             message_count INTEGER NOT NULL DEFAULT 0,
+             title TEXT,
+             size_bytes INTEGER NOT NULL DEFAULT 0,
+             file_mtime TEXT NOT NULL DEFAULT '',
+             PRIMARY KEY (id, app_type)
+         );
+         INSERT INTO session_history
+             SELECT id, app_type, project_path, profile_id, mode, start_time, end_time,
+                    prompt_tokens, completion_tokens, message_count, title, size_bytes, file_mtime
+             FROM session_history_v5;
+         DROP TABLE session_history_v5;
+         CREATE INDEX idx_session_app_project ON session_history(app_type, project_path, start_time DESC);
+         CREATE INDEX idx_session_mtime ON session_history(file_mtime DESC);
+
+         DROP INDEX IF EXISTS idx_usage_msg_id;
+         CREATE UNIQUE INDEX idx_usage_msg_id
+             ON usage_logs(app_type, message_id)
+             WHERE message_id IS NOT NULL AND message_id != '';
+
+         PRAGMA user_version = 6;
+         COMMIT;",
+    )?;
+    tracing::info!("Migration v6 complete: provider-scoped profiles and app-scoped sessions");
     Ok(())
 }

@@ -42,14 +42,18 @@ default = true
 fn test_codex_defaults_load_without_profiles() {
     let dir = tempdir().unwrap();
     let defaults_path = dir.path().join("defaults.toml");
-    fs::write(&defaults_path, r#"
+    fs::write(
+        &defaults_path,
+        r#"
 version = 1
 [[codex_providers]]
 id = "codex-proxy"
 name = "Codex Proxy"
 api_url = "https://codex.example.com/v1"
 api_key = "env:OPENAI_API_KEY"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let mgr = ConfigManager::new(&dir.path().join("ccswitch.db"), Some(&defaults_path)).unwrap();
     let providers = mgr.list_providers_for(AppType::Codex).unwrap();
@@ -109,4 +113,27 @@ subagent = "sys-subagent"
     // System profiles still present
     assert_eq!(p1.profiles.len(), 1);
     assert_eq!(p1.profiles[0].name, "System Profile");
+}
+
+#[test]
+fn invalid_defaults_are_rejected_before_sync() {
+    let dir = tempdir().unwrap();
+    let defaults_path = dir.path().join("defaults.toml");
+    fs::write(
+        &defaults_path,
+        r#"
+version = 1
+[[codex_providers]]
+id = "invalid id"
+name = "Invalid"
+api_url = "file:///tmp/socket"
+api_key = "env:BAD-NAME"
+"#,
+    )
+    .unwrap();
+
+    let error = ConfigManager::new(&dir.path().join("ccswitch.db"), Some(&defaults_path))
+        .err()
+        .expect("invalid defaults should fail");
+    assert!(error.to_string().contains("Invalid provider"));
 }

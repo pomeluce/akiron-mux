@@ -6,7 +6,6 @@ pub struct Lang {
     pub tab_usage: &'static str,
     pub tab_history: &'static str,
     pub tab_settings: &'static str,
-    pub mode_prefix: &'static str,
 
     // Shortcut bar
     pub sc_nav: &'static str,
@@ -45,8 +44,6 @@ pub struct Lang {
     pub title_add_profile: &'static str,
     pub title_edit_provider: &'static str,
     pub title_add_provider: &'static str,
-    pub confirm_switch_title: &'static str,
-    pub confirm_switch_msg: &'static str,
     pub confirm_delete_profile: &'static str,
     pub confirm_delete_provider: &'static str,
     pub confirm_delete_profile_msg: &'static str,
@@ -68,10 +65,6 @@ pub struct Lang {
     pub chart_title: &'static str,
     pub models_title: &'static str,
     pub usage_tab_title: &'static str,
-    pub scan_scanning: &'static str,
-    pub scan_files: &'static str,
-    pub scan_records: &'static str,
-    pub scan_complete_hint: &'static str,
     pub card_today: &'static str,
     pub card_week: &'static str,
     pub card_total: &'static str,
@@ -118,7 +111,6 @@ const LANG_ZH: Lang = Lang {
     tab_usage: "用量",
     tab_history: "会话",
     tab_settings: "设置",
-    mode_prefix: "模式:",
 
     sc_nav: "导航",
     sc_quit: "退出",
@@ -155,8 +147,6 @@ const LANG_ZH: Lang = Lang {
     title_add_profile: " 添加配置 ",
     title_edit_provider: " 编辑供应商 ",
     title_add_provider: " 添加供应商 ",
-    confirm_switch_title: " 切换配置 ",
-    confirm_switch_msg: " 切换到所选配置？ ",
     confirm_delete_profile: " 删除配置 ",
     confirm_delete_provider: " 删除供应商 ",
     confirm_delete_profile_msg: " 删除此配置？ ",
@@ -177,10 +167,6 @@ const LANG_ZH: Lang = Lang {
     chart_title: "本周",
     models_title: "模型",
     usage_tab_title: "用量",
-    scan_scanning: "正在扫描 Claude Code 会话...",
-    scan_files: "个文件",
-    scan_records: "条记录已导入",
-    scan_complete_hint: "数据将在扫描完成后自动刷新",
     card_today: "今日",
     card_week: "本周",
     card_total: "总计",
@@ -219,7 +205,6 @@ const LANG_EN: Lang = Lang {
     tab_usage: "Usage",
     tab_history: "History",
     tab_settings: "Settings",
-    mode_prefix: "Mode:",
 
     sc_nav: "Nav",
     sc_quit: "Quit",
@@ -256,8 +241,6 @@ const LANG_EN: Lang = Lang {
     title_add_profile: " Add Profile ",
     title_edit_provider: " Edit Provider ",
     title_add_provider: " Add Provider ",
-    confirm_switch_title: " Switch Configuration ",
-    confirm_switch_msg: " Switch to the selected configuration? ",
     confirm_delete_profile: " Delete Profile ",
     confirm_delete_provider: " Delete Provider ",
     confirm_delete_profile_msg: " Delete this profile? ",
@@ -278,10 +261,6 @@ const LANG_EN: Lang = Lang {
     chart_title: "This Week",
     models_title: "Models",
     usage_tab_title: " Usage ",
-    scan_scanning: "Scanning Claude Code sessions...",
-    scan_files: "files",
-    scan_records: "records imported",
-    scan_complete_hint: "Data refreshes automatically when complete",
     card_today: "Today",
     card_week: "Week",
     card_total: "Total",
@@ -334,4 +313,12 @@ pub fn set_lang(name: &str) -> bool {
 pub fn current_lang() -> &'static str {
     let idx = ACTIVE.load(Ordering::Relaxed) as usize;
     LANGS[idx.min(LANGS.len() - 1)].0
+}
+
+pub fn pick(en: &'static str, zh: &'static str) -> &'static str {
+    if current_lang() == "中文" {
+        zh
+    } else {
+        en
+    }
 }

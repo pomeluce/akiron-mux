@@ -82,7 +82,9 @@ pub fn sync_codex_active_from_config(mgr: &ConfigManager) {
         .and_then(|value| value.get("source"))
         .and_then(toml::Value::as_str)
         .or_else(|| parsed.get("model_provider").and_then(toml::Value::as_str));
-    let Some(provider_id) = provider_id else { return };
+    let Some(provider_id) = provider_id else {
+        return;
+    };
 
     match mgr.find_provider_for(AppType::Codex, provider_id) {
         Ok(Some(_)) => {

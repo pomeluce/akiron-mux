@@ -1,7 +1,9 @@
 use bytes::Bytes;
 use serde_json::Value;
 use tokio::sync::mpsc;
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+
+const MAX_SSE_EVENT_SIZE: usize = 8 * 1024 * 1024;
 
 /// Transform the request body: replace `model` with the actual upstream model,
 /// return the original model name so it can be restored in the response.
@@ -49,7 +51,11 @@ pub fn transform_request_body(
 /// - Replace `message.model` → original_model
 /// - Add `ccs_model` → actual_model
 /// - Add `ccs_proxy` → true
-fn transform_sse_data(data_json: &str, original_model: &str, actual_model: &str) -> Result<String, String> {
+fn transform_sse_data(
+    data_json: &str,
+    original_model: &str,
+    actual_model: &str,
+) -> Result<String, String> {
     let trimmed = data_json.trim();
     if trimmed.is_empty() || !trimmed.starts_with('{') {
         return Ok(data_json.to_string());
@@ -90,8 +96,7 @@ fn transform_sse_chunk(bytes: &[u8], original_model: &str, actual_model: &str) -
 
     for (i, _) in text.match_indices('\n') {
         let line = &text[data_start..i];
-        if line.starts_with("data: ") {
-            let payload = &line[6..]; // after "data: "
+        if let Some(payload) = line.strip_prefix("data: ") {
             match transform_sse_data(payload, original_model, actual_model) {
                 Ok(transformed) => {
                     result.push_str("data: ");
@@ -109,7 +114,18 @@ fn transform_sse_chunk(bytes: &[u8], original_model: &str, actual_model: &str) -
     }
 
     if data_start < text.len() {
-        result.push_str(&text[data_start..]);
+        let line = &text[data_start..];
+        if let Some(payload) = line.strip_prefix("data: ") {
+            match transform_sse_data(payload, original_model, actual_model) {
+                Ok(transformed) => {
+                    result.push_str("data: ");
+                    result.push_str(&transformed);
+                }
+                Err(_) => result.push_str(line),
+            }
+        } else {
+            result.push_str(line);
+        }
     }
 
     result.into_bytes()
@@ -132,14 +148,21 @@ pub fn transform_response_stream(
                 Some(Ok(bytes)) => {
                     buffer.extend_from_slice(&bytes);
                     // Emit complete SSE events (separated by \n\n)
-                    while let Some(pos) = buffer.windows(2).position(|w| w == b"\n\n") {
-                        let event_bytes: Vec<u8> = buffer[..pos + 2].to_vec();
-                        buffer.drain(..pos + 2);
+                    while let Some(end) = find_sse_event_end(&buffer) {
+                        let event_bytes: Vec<u8> = buffer.drain(..end).collect();
                         let transformed =
                             transform_sse_chunk(&event_bytes, &original_model, &actual_model);
                         if tx.send(Ok(Bytes::from(transformed))).await.is_err() {
                             return; // receiver dropped
                         }
+                    }
+                    if buffer.len() > MAX_SSE_EVENT_SIZE {
+                        let error = std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "upstream SSE event exceeded 8 MiB",
+                        );
+                        let _ = tx.send(Err(axum::Error::new(error))).await;
+                        return;
                     }
                 }
                 Some(Err(e)) => {
@@ -149,7 +172,9 @@ pub fn transform_response_stream(
                 None => {
                     // Stream ended — emit remaining buffer
                     if !buffer.is_empty() {
-                        let _ = tx.send(Ok(Bytes::from(buffer))).await;
+                        let transformed =
+                            transform_sse_chunk(&buffer, &original_model, &actual_model);
+                        let _ = tx.send(Ok(Bytes::from(transformed))).await;
                     }
                     return;
                 }
@@ -160,9 +185,21 @@ pub fn transform_response_stream(
     axum::body::Body::from_stream(ReceiverStream::new(rx))
 }
 
+fn find_sse_event_end(buffer: &[u8]) -> Option<usize> {
+    for index in 0..buffer.len() {
+        if buffer[index..].starts_with(b"\r\n\r\n") {
+            return Some(index + 4);
+        }
+        if buffer[index..].starts_with(b"\n\n") {
+            return Some(index + 2);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::transform_request_body;
+    use super::{find_sse_event_end, transform_request_body, transform_sse_chunk};
 
     #[test]
     fn maps_all_claude_model_classes() {
@@ -180,11 +217,22 @@ mod tests {
                 "upstream-sonnet",
                 "upstream-haiku",
                 "upstream-subagent",
-            ).unwrap();
+            )
+            .unwrap();
             let parsed: serde_json::Value = serde_json::from_slice(&transformed).unwrap();
             assert_eq!(original, requested);
             assert_eq!(actual, expected);
             assert_eq!(parsed["model"], expected);
         }
+    }
+
+    #[test]
+    fn transforms_crlf_and_unterminated_sse_events() {
+        assert_eq!(find_sse_event_end(b"data: {}\r\n\r\nrest"), Some(12));
+        let input = br#"data: {"message":{"model":"upstream"}}"#;
+        let output = transform_sse_chunk(input, "claude-sonnet", "actual-model");
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("claude-sonnet"));
+        assert!(text.contains("actual-model"));
     }
 }

@@ -1,24 +1,51 @@
 use crate::core::config::ConfigManager;
-use crate::core::env::resolve_api_key;
-use crate::core::models::{ActiveConfig, AppType, Provider, SwitchMode};
+use crate::core::env::{resolve_api_key, resolve_codex_api_key};
+use crate::core::models::{
+    validate_profile, validate_provider, ActiveConfig, AppType, Provider, SwitchMode,
+};
 use anyhow::{Context, Result};
 use serde_json::json;
+use std::io::Write;
 use std::path::Path;
 
 const DEFAULT_PROXY_PORT: u16 = 15721;
 
-pub fn switch_profile(mgr: &ConfigManager, provider_id: &str, profile_id: &str, mode: SwitchMode, settings_path: Option<&Path>) -> Result<ActiveConfig> {
+pub fn switch_profile(
+    mgr: &ConfigManager,
+    provider_id: &str,
+    profile_id: &str,
+    mode: SwitchMode,
+    settings_path: Option<&Path>,
+) -> Result<ActiveConfig> {
     let (provider, profile) = mgr
         .find_profile(provider_id, profile_id)?
         .with_context(|| format!("Profile not found: {}/{}", provider_id, profile_id))?;
+    validate_provider(&provider)?;
+    validate_profile(&profile)?;
 
     let auth_token = resolve_api_key(&provider.api_key);
+    if auth_token.is_empty() {
+        anyhow::bail!(
+            "API key unavailable for '{}'. Set {} or use a literal key.",
+            provider.id,
+            provider
+                .api_key
+                .strip_prefix("env:")
+                .unwrap_or("CLAUDE_API_KEY")
+        );
+    }
     let base_url = match mode {
         SwitchMode::Proxy => format!("http://127.0.0.1:{}", DEFAULT_PROXY_PORT),
         SwitchMode::Local => provider.api_url.clone(),
     };
 
-    tracing::info!("switch_profile: mode={:?} provider={} profile={} base_url={}", mode, provider_id, profile_id, base_url);
+    tracing::info!(
+        "switch_profile: mode={:?} provider={} profile={} base_url={}",
+        mode,
+        provider_id,
+        profile_id,
+        base_url
+    );
 
     let config = ActiveConfig {
         provider_id: provider.id.clone(),
@@ -33,17 +60,19 @@ pub fn switch_profile(mgr: &ConfigManager, provider_id: &str, profile_id: &str, 
         subagent: profile.subagent.clone(),
     };
 
-    match mode {
-        SwitchMode::Local => {
-            write_settings_json(&config, mode, settings_path)?;
-        }
-        SwitchMode::Proxy => {
-            write_settings_json(&config, mode, settings_path)?;
-            mgr.set_setting("active_provider", &config.provider_id)?;
-            mgr.set_setting("active_profile", &config.profile_id)?;
-            mgr.set_setting("proxy_mode", "true")?;
-            mgr.set_setting("proxy_port", &DEFAULT_PROXY_PORT.to_string())?;
-        }
+    write_settings_json(&config, mode, settings_path)?;
+    mgr.set_setting("active_provider", &config.provider_id)?;
+    mgr.set_setting("active_profile", &config.profile_id)?;
+    mgr.set_setting(
+        "proxy_mode",
+        if mode == SwitchMode::Proxy {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
+    if mode == SwitchMode::Proxy {
+        mgr.set_setting("proxy_port", &DEFAULT_PROXY_PORT.to_string())?;
     }
     Ok(config)
 }
@@ -58,14 +87,18 @@ fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Pa
         "write_settings_json: path={} base_url={} auth_token={} reasoning={} task={}",
         settings_path.display(),
         config.base_url,
-        if config.auth_token.is_empty() { "(empty)" } else { "(set)" },
+        if config.auth_token.is_empty() {
+            "(empty)"
+        } else {
+            "(set)"
+        },
         config.opus,
         config.haiku,
     );
 
     let mut existing: serde_json::Value = if settings_path.exists() {
         let content = std::fs::read_to_string(&settings_path)?;
-        serde_json::from_str(&content).unwrap_or(json!({}))
+        serde_json::from_str(&content).context("Failed to parse Claude settings.json")?
     } else {
         json!({})
     };
@@ -74,6 +107,9 @@ fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Pa
         std::fs::create_dir_all(parent)?;
     }
 
+    if !existing.is_object() {
+        anyhow::bail!("Claude settings.json root must be an object");
+    }
     if existing["env"].is_null() || !existing["env"].is_object() {
         existing["env"] = json!({});
     }
@@ -118,7 +154,10 @@ fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Pa
         "at": now,
     });
 
-    std::fs::write(&settings_path, serde_json::to_string_pretty(&existing)?)?;
+    write_private_file(
+        &settings_path,
+        serde_json::to_string_pretty(&existing)?.as_bytes(),
+    )?;
     tracing::debug!("write_settings_json: wrote to {}", settings_path.display());
     Ok(())
 }
@@ -134,19 +173,27 @@ pub fn switch_codex_provider(
     let provider = mgr
         .find_provider_for(AppType::Codex, provider_id)?
         .with_context(|| format!("Codex provider not found: {}", provider_id))?;
-    let auth_token = resolve_api_key(&provider.api_key);
+    validate_provider(&provider)?;
+    let auth_token = resolve_codex_api_key(&provider.api_key);
     if auth_token.is_empty() {
         anyhow::bail!(
             "API key unavailable for '{}'. Set {} or use a literal key.",
             provider.id,
-            provider.api_key.strip_prefix("env:").unwrap_or("OPENAI_API_KEY")
+            provider
+                .api_key
+                .strip_prefix("env:")
+                .unwrap_or("OPENAI_API_KEY")
         );
     }
 
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let codex_dir = Path::new(&home).join(".codex");
-    let config_path = config_path.map(Path::to_path_buf).unwrap_or_else(|| codex_dir.join("config.toml"));
-    let auth_path = auth_path.map(Path::to_path_buf).unwrap_or_else(|| codex_dir.join("auth.json"));
+    let config_path = config_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| codex_dir.join("config.toml"));
+    let auth_path = auth_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| codex_dir.join("auth.json"));
 
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -157,22 +204,53 @@ pub fn switch_codex_provider(
 
     let mut config: toml_edit::DocumentMut = if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)?;
-        content.parse().context("Failed to parse Codex config.toml")?
+        content
+            .parse()
+            .context("Failed to parse Codex config.toml")?
     } else {
         toml_edit::DocumentMut::new()
     };
-    config["model_provider"] = toml_edit::value(&provider.id);
-    if !config.as_table().get("model_providers").is_some_and(toml_edit::Item::is_table) {
-        config
-            .as_table_mut()
-            .insert("model_providers", toml_edit::Item::Table(toml_edit::Table::new()));
+    let mut auth: serde_json::Value = if auth_path.exists() {
+        let content = std::fs::read_to_string(&auth_path)?;
+        serde_json::from_str(&content).context("Failed to parse Codex auth.json")?
+    } else {
+        json!({})
+    };
+    if !auth.is_object() {
+        anyhow::bail!("Codex auth.json root must be an object");
     }
-    let providers = config["model_providers"].as_table_mut().expect("table created above");
+
+    config["model_provider"] = toml_edit::value(&provider.id);
+    if config
+        .as_table()
+        .get("model_providers")
+        .is_some_and(|item| !item.is_table())
+    {
+        anyhow::bail!("Codex config.toml 'model_providers' must be a table");
+    }
+    if config.as_table().get("model_providers").is_none() {
+        config.as_table_mut().insert(
+            "model_providers",
+            toml_edit::Item::Table(toml_edit::Table::new()),
+        );
+    }
+    let providers = config["model_providers"]
+        .as_table_mut()
+        .expect("table created above");
     if providers.iter().all(|(_, item)| item.is_table()) {
         providers.set_implicit(true);
     }
-    if !providers.get(&provider.id).is_some_and(toml_edit::Item::is_table) {
-        providers.insert(&provider.id, toml_edit::Item::Table(toml_edit::Table::new()));
+    if providers
+        .get(&provider.id)
+        .is_some_and(|item| !item.is_table())
+    {
+        anyhow::bail!("Codex provider '{}' must be a table", provider.id);
+    }
+    if providers.get(&provider.id).is_none() {
+        providers.insert(
+            &provider.id,
+            toml_edit::Item::Table(toml_edit::Table::new()),
+        );
     }
     let provider_table = providers
         .get_mut(&provider.id)
@@ -184,14 +262,32 @@ pub fn switch_codex_provider(
     provider_table.insert("requires_openai_auth", toml_edit::value(true));
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    if !config.as_table().get("ccswitch").is_some_and(toml_edit::Item::is_table) {
+    if config
+        .as_table()
+        .get("ccswitch")
+        .is_some_and(|item| !item.is_table())
+    {
+        anyhow::bail!("Codex config.toml 'ccswitch' must be a table");
+    }
+    if config.as_table().get("ccswitch").is_none() {
         config
             .as_table_mut()
             .insert("ccswitch", toml_edit::Item::Table(toml_edit::Table::new()));
     }
-    let ccswitch = config["ccswitch"].as_table_mut().expect("table created above");
-    if !ccswitch.get("last_switch").is_some_and(toml_edit::Item::is_table) {
-        ccswitch.insert("last_switch", toml_edit::Item::Table(toml_edit::Table::new()));
+    let ccswitch = config["ccswitch"]
+        .as_table_mut()
+        .expect("table created above");
+    if ccswitch
+        .get("last_switch")
+        .is_some_and(|item| !item.is_table())
+    {
+        anyhow::bail!("Codex config.toml 'ccswitch.last_switch' must be a table");
+    }
+    if ccswitch.get("last_switch").is_none() {
+        ccswitch.insert(
+            "last_switch",
+            toml_edit::Item::Table(toml_edit::Table::new()),
+        );
     }
     let last_switch = ccswitch
         .get_mut("last_switch")
@@ -199,22 +295,16 @@ pub fn switch_codex_provider(
         .expect("last_switch table created above");
     last_switch.insert("source", toml_edit::value(&provider.id));
     last_switch.insert("at", toml_edit::value(now));
-    if ccswitch.iter().all(|(key, item)| key == "last_switch" && item.is_table()) {
+    if ccswitch
+        .iter()
+        .all(|(key, item)| key == "last_switch" && item.is_table())
+    {
         ccswitch.set_implicit(true);
     }
     std::fs::write(&config_path, config.to_string())?;
 
-    let mut auth: serde_json::Value = if auth_path.exists() {
-        let content = std::fs::read_to_string(&auth_path)?;
-        serde_json::from_str(&content).context("Failed to parse Codex auth.json")?
-    } else {
-        json!({})
-    };
-    if !auth.is_object() {
-        anyhow::bail!("Codex auth.json root must be an object");
-    }
     auth["OPENAI_API_KEY"] = json!(auth_token);
-    std::fs::write(&auth_path, serde_json::to_string_pretty(&auth)?)?;
+    write_private_file(&auth_path, serde_json::to_string_pretty(&auth)?.as_bytes())?;
 
     mgr.set_setting(AppType::Codex.active_provider_key(), &provider.id)?;
     Ok(provider)
@@ -236,6 +326,13 @@ pub fn remove_codex_provider(
         let mut config: toml_edit::DocumentMut = content
             .parse()
             .context("Failed to parse Codex config.toml")?;
+        if config
+            .as_table()
+            .get("model_providers")
+            .is_some_and(|item| !item.is_table())
+        {
+            anyhow::bail!("Codex config.toml 'model_providers' must be a table");
+        }
         if let Some(providers) = config
             .as_table_mut()
             .get_mut("model_providers")
@@ -271,8 +368,34 @@ pub fn remove_codex_provider(
         }
         std::fs::write(config_path, config.to_string())?;
     }
-    if mgr.get_setting(AppType::Codex.active_provider_key()).as_deref() == Some(provider_id) {
+    if mgr
+        .get_setting(AppType::Codex.active_provider_key())
+        .as_deref()
+        == Some(provider_id)
+    {
         mgr.set_setting(AppType::Codex.active_provider_key(), "")?;
     }
+    Ok(())
+}
+
+fn write_private_file(path: &Path, content: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(content)?;
+    file.sync_all()?;
     Ok(())
 }

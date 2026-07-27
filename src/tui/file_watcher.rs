@@ -35,7 +35,9 @@ struct FileWatcher {
 
 impl FileWatcher {
     fn new() -> Self {
-        FileWatcher { known: HashMap::new() }
+        FileWatcher {
+            known: HashMap::new(),
+        }
     }
 
     /// Poll directory and record baseline without signalling
@@ -100,9 +102,12 @@ fn walk_dir(dir: &PathBuf, out: &mut HashMap<PathBuf, i64>) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
+            if path.is_symlink() {
+                continue;
+            }
             if path.is_dir() {
                 walk_dir(&path, out);
-            } else if path.extension().map_or(false, |e| e == "jsonl") {
+            } else if path.extension().is_some_and(|e| e == "jsonl") {
                 let mtime = file_mtime(&path).unwrap_or(0);
                 out.insert(path, mtime);
             }

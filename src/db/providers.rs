@@ -1,6 +1,6 @@
-use rusqlite::params;
-use crate::core::models::{Profile, Provider, Source};
 use super::connection::Db;
+use crate::core::models::{Profile, Provider, Source};
+use rusqlite::params;
 
 // ── Providers ──
 
@@ -30,7 +30,7 @@ impl Db {
                 api_url: row.get(2)?,
                 api_key: row.get(3)?,
                 profiles: vec![],
-                source: source_str.parse().unwrap_or(Source::User),
+                source: source_str.parse().unwrap_or(Source::System),
             })
         })?;
         rows.collect()
@@ -40,10 +40,8 @@ impl Db {
         // Profiles belong to Claude providers only. A Codex provider may reuse
         // the same id and must not delete Claude profiles.
         if app_type == "claude" {
-            self.conn().execute(
-                "DELETE FROM profiles WHERE provider_id = ?1",
-                params![id],
-            )?;
+            self.conn()
+                .execute("DELETE FROM profiles WHERE provider_id = ?1", params![id])?;
         }
         self.conn().execute(
             "DELETE FROM providers WHERE id = ?1 AND app_type = ?2",
@@ -62,27 +60,30 @@ impl Db {
         app_type: &str,
         system_providers: &[Provider],
     ) -> Result<(), rusqlite::Error> {
+        let transaction = self.conn().unchecked_transaction()?;
         let mut toml_ids: Vec<&str> = Vec::new();
+        let mut toml_profile_keys: Vec<(String, String)> = Vec::new();
         for p in system_providers {
             toml_ids.push(&p.id);
             // INSERT only if not already present (user row takes priority)
-            self.conn().execute(
+            transaction.execute(
                 "INSERT OR IGNORE INTO providers (id, app_type, name, api_url, api_key, source)
                  VALUES (?1, ?2, ?3, ?4, ?5, 'system')",
                 params![p.id, app_type, p.name, p.api_url, p.api_key],
             )?;
             // UPDATE existing system providers with latest TOML values
-            self.conn().execute(
+            transaction.execute(
                 "UPDATE providers SET name=?1, api_url=?2, api_key=?3, source='system'
                  WHERE id=?4 AND app_type=?5 AND source='system'",
                 params![p.name, p.api_url, p.api_key, p.id, app_type],
             )?;
             // Sync profiles: INSERT OR IGNORE for system ones
             for pr in &p.profiles {
-                self.conn().execute(
+                toml_profile_keys.push((p.id.clone(), pr.id.clone()));
+                transaction.execute(
                     "INSERT INTO profiles (id, name, provider_id, opus_model, sonnet_model, haiku_model, subagent_model, is_default, source)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'system')
-                     ON CONFLICT(id) DO UPDATE SET
+                     ON CONFLICT(id, provider_id) DO UPDATE SET
                         name=excluded.name, provider_id=excluded.provider_id,
                         opus_model=excluded.opus_model, sonnet_model=excluded.sonnet_model,
                         haiku_model=excluded.haiku_model, subagent_model=excluded.subagent_model,
@@ -95,7 +96,9 @@ impl Db {
         // Demote system providers that no longer exist in TOML (always run —
         // even when toml is empty, to clean up providers removed from defaults)
         {
-            let placeholders: Vec<String> = toml_ids.iter().enumerate()
+            let placeholders: Vec<String> = toml_ids
+                .iter()
+                .enumerate()
                 .map(|(i, _)| format!("?{}", i + 2))
                 .collect();
             let sql = if toml_ids.is_empty() {
@@ -111,12 +114,50 @@ impl Db {
             for id in &toml_ids {
                 param_values.push(Box::new(id.to_string()));
             }
-            self.conn().execute(
+            transaction.execute(
                 sql,
                 rusqlite::params_from_iter(param_values.iter().map(|p| p.as_ref())),
             )?;
         }
-        Ok(())
+        if app_type == "claude" {
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                vec![Box::new(app_type.to_string())];
+            let sql = if toml_profile_keys.is_empty() {
+                "UPDATE profiles SET source='user'
+                 WHERE source='system'
+                   AND provider_id IN (SELECT id FROM providers WHERE app_type=?1)"
+                    .to_string()
+            } else {
+                let clauses = toml_profile_keys
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| {
+                        let provider_param = index * 2 + 2;
+                        let profile_param = provider_param + 1;
+                        format!(
+                            "(provider_id=?{} AND id=?{})",
+                            provider_param, profile_param
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                for (provider_id, profile_id) in &toml_profile_keys {
+                    params.push(Box::new(provider_id.clone()));
+                    params.push(Box::new(profile_id.clone()));
+                }
+                format!(
+                    "UPDATE profiles SET source='user'
+                     WHERE source='system'
+                       AND provider_id IN (SELECT id FROM providers WHERE app_type=?1)
+                       AND NOT ({})",
+                    clauses.join(" OR ")
+                )
+            };
+            transaction.execute(
+                &sql,
+                rusqlite::params_from_iter(params.iter().map(|param| param.as_ref())),
+            )?;
+        }
+        transaction.commit()
     }
 }
 
@@ -128,7 +169,7 @@ impl Db {
         self.conn().execute(
             "INSERT INTO profiles (id, name, provider_id, opus_model, sonnet_model, haiku_model, subagent_model, is_default, source)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(id) DO UPDATE SET
+             ON CONFLICT(id, provider_id) DO UPDATE SET
                 name=excluded.name, provider_id=excluded.provider_id,
                 opus_model=excluded.opus_model, sonnet_model=excluded.sonnet_model,
                 haiku_model=excluded.haiku_model, subagent_model=excluded.subagent_model,
@@ -153,14 +194,17 @@ impl Db {
                 haiku: row.get(4)?,
                 subagent: row.get(5)?,
                 default: row.get::<_, i32>(6)? != 0,
-                source: source_str.parse().unwrap_or(Source::User),
+                source: source_str.parse().unwrap_or(Source::System),
             })
         })?;
         rows.collect()
     }
 
-    pub fn delete_profile(&self, id: &str) -> Result<(), rusqlite::Error> {
-        self.conn().execute("DELETE FROM profiles WHERE id = ?1", params![id])?;
+    pub fn delete_profile(&self, provider_id: &str, id: &str) -> Result<(), rusqlite::Error> {
+        self.conn().execute(
+            "DELETE FROM profiles WHERE provider_id = ?1 AND id = ?2",
+            params![provider_id, id],
+        )?;
         Ok(())
     }
 }

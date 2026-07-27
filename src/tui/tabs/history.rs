@@ -1,9 +1,12 @@
 use crate::tui::lang;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use super::super::theme;
 use super::super::widgets::session_detail::{render_empty_detail, render_session_detail};
-use super::super::widgets::shared::{format_size, relative_time, render_confirm_popup as shared_confirm, render_search_box as shared_search, truncate};
+use super::super::widgets::shared::{
+    format_size, relative_time, render_confirm_popup as shared_confirm,
+    render_search_box as shared_search, truncate,
+};
 use super::TabContent;
 use crate::core::config::ConfigManager;
 use crate::core::models::AppType;
@@ -41,11 +44,11 @@ pub struct HistoryTab {
     cached_tokens: Option<(i64, i64)>,
     cached_tokens_sid: String,
     app: AppType,
-    mgr: Arc<ConfigManager>,
+    mgr: Rc<ConfigManager>,
 }
 
 impl HistoryTab {
-    pub fn new(mgr: Arc<ConfigManager>, app: AppType) -> Self {
+    pub fn new(mgr: Rc<ConfigManager>, app: AppType) -> Self {
         // Session import is handled before TUI launch (in main.rs with progress bar).
         // Just load whatever is already in the DB.
         let all = mgr
@@ -97,17 +100,33 @@ impl HistoryTab {
             tracing::warn!("Failed to import {} sessions: {}", app.as_str(), e);
         }
         self.reload_current();
-        self.state.select(if self.sessions.is_empty() { None } else { Some(0) });
+        self.state.select(if self.sessions.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
     }
 
     pub fn reload_current(&mut self) {
-        self.all_sessions = self.mgr.db()
+        self.all_sessions = self
+            .mgr
+            .db()
             .query_sessions(self.app.as_str(), None, None, 200)
             .unwrap_or_default()
             .into_iter()
             .filter(|session| session.size_bytes > 0)
             .collect();
         self.refresh();
+    }
+
+    pub fn status_text(&self) -> String {
+        format!(
+            "{} · {} · {} {}",
+            self.app.as_str(),
+            lang::pick("live", "实时"),
+            self.sessions.len(),
+            lang::pick("sessions", "会话")
+        )
     }
 
     pub fn refresh(&mut self) {
@@ -125,7 +144,11 @@ impl HistoryTab {
             .cloned()
             .collect();
         if self.state.selected().unwrap_or(0) >= self.sessions.len() {
-            self.state.select(if self.sessions.is_empty() { None } else { Some(0) });
+            self.state.select(if self.sessions.is_empty() {
+                None
+            } else {
+                Some(0)
+            });
         }
     }
 
@@ -134,7 +157,8 @@ impl HistoryTab {
             if idx < self.sessions.len() {
                 if let Some(session) = self.sessions.get(idx) {
                     if let Err(e) = self.mgr.db().delete_session(&session.id, self.app.as_str()) {
-                        tracing::warn!("Failed to delete session from database: {}", e);
+                        tracing::warn!("Failed to delete session: {}", e);
+                        return;
                     }
                     self.all_sessions.retain(|s| s.id != session.id);
                 }
@@ -165,19 +189,23 @@ impl HistoryTab {
 
 impl TabContent for HistoryTab {
     fn render(&mut self, f: &mut Frame, area: Rect) {
-        let main = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(area);
+        let main = if area.width >= 92 {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+                .split(area)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(52), Constraint::Min(8)])
+                .split(area)
+        };
 
         // Left panel: search box + session list
         let left_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(0)])
             .split(main[0]);
-
-        // Right panel: detail preview
-        let right_chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(3)]).split(main[1]);
 
         // Search box
         self.render_search_box(f, left_chunks[0]);
@@ -215,10 +243,17 @@ impl TabContent for HistoryTab {
                 let size = format_size(s.size_bytes);
 
                 let arrow = if is_selected { "❯ " } else { "  " };
-                let title_color = if is_selected { theme::current().cyan } else { theme::current().fg };
+                let title_color = if is_selected {
+                    theme::current().cyan
+                } else {
+                    theme::current().fg
+                };
 
                 ListItem::new(vec![
-                    Line::from(Span::styled(format!("{}{}", arrow, title), Style::default().fg(title_color))),
+                    Line::from(Span::styled(
+                        format!("{}{}", arrow, title),
+                        Style::default().fg(title_color),
+                    )),
                     Line::from(vec![
                         Span::styled("  ", Style::default()),
                         Span::styled(date, Style::default().fg(theme::current().comment)),
@@ -250,9 +285,16 @@ impl TabContent for HistoryTab {
             if let Some(s) = self.sessions.get(idx) {
                 // Cache tokens and provider/profile names — reload only on selection change
                 if self.cached_tokens_sid != s.id {
-                    self.cached_tokens = self.mgr.db().query_session_tokens(&s.id).ok();
+                    self.cached_tokens = self
+                        .mgr
+                        .db()
+                        .query_session_tokens(self.app.as_str(), &s.id)
+                        .ok();
                     self.cached_tokens_sid = s.id.clone();
-                    let prov = self.mgr.get_setting(self.app.active_provider_key()).unwrap_or_default();
+                    let prov = self
+                        .mgr
+                        .get_setting(self.app.active_provider_key())
+                        .unwrap_or_default();
                     let prof = if self.app == AppType::Claude {
                         self.mgr.get_setting("active_profile").unwrap_or_default()
                     } else {
@@ -261,14 +303,30 @@ impl TabContent for HistoryTab {
                     self.cached_prov_name = prov;
                     self.cached_prof_name = prof;
                 }
-                let prov_name = if self.cached_prov_name.is_empty() { None } else { Some(self.cached_prov_name.as_str()) };
-                let prof_name = if self.cached_prof_name.is_empty() { None } else { Some(self.cached_prof_name.as_str()) };
-                render_session_detail(f, right_chunks[0], s, self.cached_tokens, prov_name, prof_name, self.app);
+                let prov_name = if self.cached_prov_name.is_empty() {
+                    None
+                } else {
+                    Some(self.cached_prov_name.as_str())
+                };
+                let prof_name = if self.cached_prof_name.is_empty() {
+                    None
+                } else {
+                    Some(self.cached_prof_name.as_str())
+                };
+                render_session_detail(
+                    f,
+                    main[1],
+                    s,
+                    self.cached_tokens,
+                    prov_name,
+                    prof_name,
+                    self.app,
+                );
             } else {
-                render_empty_detail(f, right_chunks[0], "No session selected");
+                render_empty_detail(f, main[1], "No session selected");
             }
         } else {
-            render_empty_detail(f, right_chunks[0], lang::current().no_sessions);
+            render_empty_detail(f, main[1], lang::current().no_sessions);
         }
 
         // Shortcut bar under detail preview
@@ -374,31 +432,27 @@ impl TabContent for HistoryTab {
 
     fn shortcut_groups(&self) -> Vec<Vec<(String, Color)>> {
         vec![
-            vec![(" J/K ".into(), theme::current().comment), (lang::current().sc_nav.into(), theme::current().comment)],
-            vec![(" / ".into(), theme::current().comment), (lang::current().sc_search.into(), theme::current().comment)],
-            vec![(" ⏎  ".into(), theme::current().comment), (lang::current().sc_open.into(), theme::current().comment)],
-            vec![(" D ".into(), theme::current().comment), (lang::current().sc_delete.into(), theme::current().comment)],
-            vec![(" Q ".into(), theme::current().comment), (lang::current().sc_quit.into(), theme::current().comment)],
+            vec![
+                (" J/K ".into(), theme::current().comment),
+                (lang::current().sc_nav.into(), theme::current().comment),
+            ],
+            vec![
+                (" / ".into(), theme::current().comment),
+                (lang::current().sc_search.into(), theme::current().comment),
+            ],
+            vec![
+                (" ⏎  ".into(), theme::current().comment),
+                (lang::current().sc_open.into(), theme::current().comment),
+            ],
+            vec![
+                (" D ".into(), theme::current().comment),
+                (lang::current().sc_delete.into(), theme::current().comment),
+            ],
+            vec![
+                (" Q ".into(), theme::current().comment),
+                (lang::current().sc_quit.into(), theme::current().comment),
+            ],
         ]
-    }
-
-    fn shortcut_lines(&self, available_width: u16) -> usize {
-        let group_widths = [8usize, 9, 12, 7, 7];
-        let sep = 2usize;
-        let w = available_width.saturating_sub(2).max(10) as usize;
-        let mut lines = 1usize;
-        let mut cur = 0usize;
-        for gw in &group_widths {
-            if cur + gw > w && cur > 0 {
-                lines += 1;
-                cur = 0;
-            }
-            if cur > 0 {
-                cur += sep;
-            }
-            cur += gw;
-        }
-        lines
     }
 }
 
@@ -406,11 +460,29 @@ impl HistoryTab {
     fn render_confirm_popup(&self, f: &mut Frame, area: Rect) {
         let is_delete = self.confirm_action == Some(ConfirmAction::Delete);
         let (title, msg, c) = if is_delete {
-            (lang::current().confirm_delete_title, lang::current().confirm_delete_session_msg, theme::current().red)
+            (
+                lang::current().confirm_delete_title,
+                lang::current().confirm_delete_session_msg,
+                theme::current().red,
+            )
         } else {
-            (lang::current().confirm_open_title, lang::current().confirm_open_msg, theme::current().cyan)
+            (
+                lang::current().confirm_open_title,
+                lang::current().confirm_open_msg,
+                theme::current().cyan,
+            )
         };
-        shared_confirm(f, area, title, msg, lang::current().confirm_confirm, lang::current().confirm_cancel, c, self.confirm_button);
+        shared_confirm(
+            f,
+            area,
+            title,
+            msg,
+            (
+                lang::current().confirm_confirm,
+                lang::current().confirm_cancel,
+            ),
+            (c, self.confirm_button),
+        );
     }
 
     fn render_search_box(&self, f: &mut Frame, area: Rect) {

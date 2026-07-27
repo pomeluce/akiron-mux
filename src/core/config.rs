@@ -1,4 +1,6 @@
-use crate::core::models::{AppType, Profile, Provider, Source};
+use crate::core::models::{
+    validate_profile, validate_provider, AppType, Profile, Provider, Source,
+};
 use crate::db::Db;
 use anyhow::Context;
 use serde::Deserialize;
@@ -40,7 +42,9 @@ pub fn defaults_path() -> Option<PathBuf> {
 
 fn default_config_path() -> PathBuf {
     let user = config_dir().join("defaults.toml");
-    if user.exists() { return user; }
+    if user.exists() {
+        return user;
+    }
     PathBuf::from("/etc/ccswitch/defaults.toml")
 }
 
@@ -97,8 +101,16 @@ fn into_provider(p: ProviderToml, include_profiles: bool) -> Provider {
             p.profiles
                 .into_iter()
                 .map(|pr| {
-                    let sonnet = if pr.sonnet.is_empty() { pr.opus.clone() } else { pr.sonnet };
-                    let subagent = if pr.subagent.is_empty() { pr.haiku.clone() } else { pr.subagent };
+                    let sonnet = if pr.sonnet.is_empty() {
+                        pr.opus.clone()
+                    } else {
+                        pr.sonnet
+                    };
+                    let subagent = if pr.subagent.is_empty() {
+                        pr.haiku.clone()
+                    } else {
+                        pr.subagent
+                    };
                     Profile {
                         id: pr.id,
                         name: pr.name,
@@ -120,8 +132,7 @@ fn into_provider(p: ProviderToml, include_profiles: bool) -> Provider {
 
 impl ConfigManager {
     pub fn new(db_path: &Path, defaults_path: Option<&Path>) -> Result<Self, anyhow::Error> {
-        let dir = db_path.parent().unwrap_or_else(|| Path::new("."));
-        let db = Db::open(&dir.join("ccswitch.db")).context("Failed to open ccswitch.db")?;
+        let db = Db::open(db_path).context("Failed to open ccswitch.db")?;
 
         let default_path = default_config_path();
         let defaults_path = defaults_path.unwrap_or_else(|| &default_path);
@@ -129,26 +140,62 @@ impl ConfigManager {
             let content = std::fs::read_to_string(defaults_path)?;
             let defaults: DefaultsFile = toml::from_str(&content)?;
             (
-                defaults.providers.into_iter().map(|p| into_provider(p, true)).collect(),
-                defaults.codex_providers.into_iter().map(|p| into_provider(p, false)).collect(),
+                defaults
+                    .providers
+                    .into_iter()
+                    .map(|p| into_provider(p, true))
+                    .collect(),
+                defaults
+                    .codex_providers
+                    .into_iter()
+                    .map(|p| into_provider(p, false))
+                    .collect(),
             )
-        } else { (vec![], vec![]) };
+        } else {
+            (vec![], vec![])
+        };
+
+        validate_default_provider_ids("Claude", &system_claude_providers)?;
+        validate_default_provider_ids("Codex", &system_codex_providers)?;
+        for provider in system_claude_providers
+            .iter()
+            .chain(&system_codex_providers)
+        {
+            validate_provider(provider)
+                .with_context(|| format!("Invalid provider '{}' in defaults.toml", provider.id))?;
+            for profile in &provider.profiles {
+                validate_profile(profile).with_context(|| {
+                    format!(
+                        "Invalid profile '{}/{}' in defaults.toml",
+                        provider.id, profile.id
+                    )
+                })?;
+            }
+        }
 
         // Sync TOML providers/profiles to DB (source='system').
         // Always call — even when empty, to demote stale system providers.
-        if let Err(e) = db.sync_system_providers("claude", &system_claude_providers) {
-            tracing::warn!("Failed to sync system providers to DB: {}", e);
-        }
-        if let Err(e) = db.sync_system_providers("codex", &system_codex_providers) {
-            tracing::warn!("Failed to sync Codex system providers to DB: {}", e);
-        }
+        db.sync_system_providers("claude", &system_claude_providers)
+            .context("Failed to sync Claude defaults to DB")?;
+        db.sync_system_providers("codex", &system_codex_providers)
+            .context("Failed to sync Codex defaults to DB")?;
 
-        Ok(ConfigManager { db, system_claude_providers, system_codex_providers })
+        Ok(ConfigManager {
+            db,
+            system_claude_providers,
+            system_codex_providers,
+        })
     }
 
-    pub(crate) fn db(&self) -> &Db { &self.db }
-    pub fn get_setting(&self, key: &str) -> Option<String> { self.db.get_setting(key) }
-    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), rusqlite::Error> { self.db.set_setting(key, value) }
+    pub(crate) fn db(&self) -> &Db {
+        &self.db
+    }
+    pub fn get_setting(&self, key: &str) -> Option<String> {
+        self.db.get_setting(key)
+    }
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), rusqlite::Error> {
+        self.db.set_setting(key, value)
+    }
 
     pub fn list_providers(&self) -> Result<Vec<Provider>, anyhow::Error> {
         self.list_providers_for(AppType::Claude)
@@ -192,21 +239,55 @@ impl ConfigManager {
         Ok(result)
     }
 
-    pub fn find_profile(&self, provider_id: &str, profile_id: &str) -> Result<Option<(Provider, Profile)>, anyhow::Error> {
+    pub fn find_profile(
+        &self,
+        provider_id: &str,
+        profile_id: &str,
+    ) -> Result<Option<(Provider, Profile)>, anyhow::Error> {
         for p in self.list_providers()? {
             if p.id == provider_id {
                 for pr in &p.profiles {
-                    if pr.id == profile_id { return Ok(Some((p.clone(), pr.clone()))); }
+                    if pr.id == profile_id {
+                        return Ok(Some((p.clone(), pr.clone())));
+                    }
                 }
             }
         }
         Ok(None)
     }
 
-    pub fn find_provider_for(&self, app: AppType, provider_id: &str) -> Result<Option<Provider>, anyhow::Error> {
+    pub fn find_provider_for(
+        &self,
+        app: AppType,
+        provider_id: &str,
+    ) -> Result<Option<Provider>, anyhow::Error> {
         Ok(self
             .list_providers_for(app)?
             .into_iter()
             .find(|provider| provider.id == provider_id))
     }
+}
+
+fn validate_default_provider_ids(app: &str, providers: &[Provider]) -> anyhow::Result<()> {
+    let mut provider_ids = std::collections::HashSet::new();
+    for provider in providers {
+        if !provider_ids.insert(provider.id.as_str()) {
+            anyhow::bail!(
+                "Duplicate {} provider ID '{}' in defaults.toml",
+                app,
+                provider.id
+            );
+        }
+        let mut profile_ids = std::collections::HashSet::new();
+        for profile in &provider.profiles {
+            if !profile_ids.insert(profile.id.as_str()) {
+                anyhow::bail!(
+                    "Duplicate profile ID '{}/{}' in defaults.toml",
+                    provider.id,
+                    profile.id
+                );
+            }
+        }
+    }
+    Ok(())
 }

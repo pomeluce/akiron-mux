@@ -1,5 +1,5 @@
 use crate::core::config::ConfigManager;
-use crate::core::env::{resolve_api_key, resolve_codex_api_key};
+use crate::core::env::{resolve_api_key, resolve_codex_api_key, ApiKeyUnavailable};
 use crate::core::models::{
     validate_profile, validate_provider, ActiveConfig, AppType, Provider, SwitchMode,
 };
@@ -25,13 +25,8 @@ pub fn switch_profile(
 
     let auth_token = resolve_api_key(&provider.api_key);
     if auth_token.is_empty() {
-        anyhow::bail!(
-            "API key unavailable for '{}'. Set {} or use a literal key.",
-            provider.id,
-            provider
-                .api_key
-                .strip_prefix("env:")
-                .unwrap_or("CLAUDE_API_KEY")
+        return Err(
+            ApiKeyUnavailable::new(&provider.id, &provider.api_key, "CLAUDE_API_KEY").into(),
         );
     }
     let base_url = match mode {
@@ -176,13 +171,8 @@ pub fn switch_codex_provider(
     validate_provider(&provider)?;
     let auth_token = resolve_codex_api_key(&provider.api_key);
     if auth_token.is_empty() {
-        anyhow::bail!(
-            "API key unavailable for '{}'. Set {} or use a literal key.",
-            provider.id,
-            provider
-                .api_key
-                .strip_prefix("env:")
-                .unwrap_or("OPENAI_API_KEY")
+        return Err(
+            ApiKeyUnavailable::new(&provider.id, &provider.api_key, "OPENAI_API_KEY").into(),
         );
     }
 

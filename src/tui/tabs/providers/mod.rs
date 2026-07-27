@@ -244,15 +244,21 @@ impl ProvidersTab {
             source: crate::core::models::Source::User,
         };
         if let Err(error) = validate_provider(&pr) {
-            self.message = Some(format!("Error: {}", error));
+            self.message = Some(localized_error(&error));
             return;
         }
         if !form.is_edit && self.providers.iter().any(|provider| provider.id == pr.id) {
-            self.message = Some(format!("Provider '{}' already exists", pr.id));
+            self.message = Some(lang::pick_owned(
+                format!("Provider '{}' already exists", pr.id),
+                format!("供应商 '{}' 已存在", pr.id),
+            ));
             return;
         }
         if let Err(e) = self.mgr.db().insert_provider(&pr, self.app.as_str()) {
-            self.message = Some(format!("Failed to save provider: {}", e));
+            self.message = Some(lang::pick_owned(
+                format!("Failed to save provider: {}", e),
+                format!("保存供应商失败：{}", e),
+            ));
             return;
         }
         self.provider_form = None;
@@ -273,7 +279,10 @@ impl ProvidersTab {
             if let Err(e) =
                 crate::core::switcher::remove_codex_provider(&self.mgr, &provider_id, None)
             {
-                self.message = Some(format!("Failed to update Codex config.toml: {}", e));
+                self.message = Some(lang::pick_owned(
+                    format!("Failed to update Codex config.toml: {}", e),
+                    format!("更新 Codex config.toml 失败：{}", e),
+                ));
                 return;
             }
         }
@@ -282,7 +291,10 @@ impl ProvidersTab {
             .db()
             .delete_provider(&provider_id, self.app.as_str())
         {
-            self.message = Some(format!("Failed to delete: {}", e));
+            self.message = Some(lang::pick_owned(
+                format!("Failed to delete provider: {}", e),
+                format!("删除供应商失败：{}", e),
+            ));
             return;
         }
         if self.active_provider == provider_id {
@@ -409,7 +421,7 @@ impl ProvidersTab {
             source: crate::core::models::Source::User,
         };
         if let Err(error) = validate_profile(&pr) {
-            self.message = Some(format!("Error: {}", error));
+            self.message = Some(localized_error(&error));
             return;
         }
         if !form.is_edit
@@ -419,14 +431,17 @@ impl ProvidersTab {
                 .find(|provider| provider.id == form.prov_id)
                 .is_some_and(|provider| provider.profiles.iter().any(|profile| profile.id == pr.id))
         {
-            self.message = Some(format!(
-                "Profile '{}/{}' already exists",
-                form.prov_id, pr.id
+            self.message = Some(lang::pick_owned(
+                format!("Profile '{}/{}' already exists", form.prov_id, pr.id),
+                format!("模型配置 '{}/{}' 已存在", form.prov_id, pr.id),
             ));
             return;
         }
         if let Err(e) = self.mgr.db().insert_profile(&form.prov_id, &pr) {
-            self.message = Some(format!("Failed to save: {}", e));
+            self.message = Some(lang::pick_owned(
+                format!("Failed to save profile: {}", e),
+                format!("保存模型配置失败：{}", e),
+            ));
             tracing::error!("Failed to insert user profile: {}", e);
             return;
         }
@@ -446,7 +461,7 @@ impl ProvidersTab {
                     self.active_provider = prov_id.clone();
                     self.status_message = Some(format!("Codex switched to '{}'", prov_id));
                 }
-                Err(e) => self.message = Some(format!("Error: {}", e)),
+                Err(e) => self.message = Some(localized_error(&e)),
             }
             return;
         }
@@ -467,7 +482,7 @@ impl ProvidersTab {
         if let Err(e) =
             crate::core::switcher::switch_profile(&self.mgr, &prov_id, &prof_id, mode, None)
         {
-            self.message = Some(format!("Error: {}", e));
+            self.message = Some(localized_error(&e));
             return;
         }
         self.active_provider = prov_id;
@@ -502,7 +517,10 @@ impl ProvidersTab {
             (provider_id, prof.id.clone())
         };
         if let Err(e) = self.mgr.db().delete_profile(&provider_id, &prof_id) {
-            self.message = Some(format!("Failed to delete: {}", e));
+            self.message = Some(lang::pick_owned(
+                format!("Failed to delete profile: {}", e),
+                format!("删除模型配置失败：{}", e),
+            ));
             tracing::error!("Failed to delete user profile: {}", e);
             return;
         }
@@ -1166,6 +1184,19 @@ fn source_label(s: crate::core::models::Source) -> &'static str {
     } else {
         lang::current().label_system
     }
+}
+
+fn localized_error(error: &anyhow::Error) -> String {
+    if let Some(error) = error.downcast_ref::<crate::core::env::ApiKeyUnavailable>() {
+        return lang::pick_owned(
+            format!("Error: {}", error),
+            format!(
+                "错误：供应商 '{}' 的 API 密钥不可用。请设置 {}，或使用明文密钥。",
+                error.provider_id, error.env_var
+            ),
+        );
+    }
+    lang::pick_owned(format!("Error: {}", error), format!("错误：{}", error))
 }
 
 fn compact_model_name(model: &str) -> String {

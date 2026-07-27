@@ -2,7 +2,7 @@ use super::super::theme;
 use crate::tui::lang;
 use ratatui::{
     layout::{Alignment, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Clear, Paragraph, Wrap},
     Frame,
@@ -148,12 +148,16 @@ pub fn render_confirm_popup(
     let (confirm_color, selected) = state;
     let popup = centered_rect(44, 6, area);
     let cs = if selected == 0 {
-        Style::default().fg(Color::Black).bg(confirm_color)
+        Style::default()
+            .fg(confirm_color)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme::current().dim)
     };
     let xs = if selected == 1 {
-        Style::default().fg(Color::Black).bg(theme::current().cyan)
+        Style::default()
+            .fg(theme::current().cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme::current().dim)
     };
@@ -199,7 +203,9 @@ pub fn render_message_popup(f: &mut Frame, area: Rect, msg: &str) {
         Line::from(""),
         Line::from(Span::styled(
             lang::current().confirm_ok,
-            Style::default().fg(Color::Black).bg(theme::current().cyan),
+            Style::default()
+                .fg(theme::current().cyan)
+                .add_modifier(Modifier::BOLD),
         ))
         .centered(),
     ])

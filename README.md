@@ -77,6 +77,7 @@ Home Manager 会自动：
 
 - 将 `defaults` 写入 `~/.config/ccswitch/defaults.toml`
 - 安装并启用 `ccs-proxy` systemd user service（通过 `envVars` 传入 Nix store 外的环境文件路径）
+- 让 CLI/TUI 从同一个 `envVars` 文件解析 `env:VAR_NAME`，无需将密钥导入当前 shell
 
 注意：`defaults` 会进入 Nix store，`api_key` 应只写 `env:VAR_NAME` 引用，不要写明文密钥。
 
@@ -293,7 +294,7 @@ api_key = "env:OPENAI_API_KEY"
 
 | 格式           | 说明                                             |
 | -------------- | ------------------------------------------------ |
-| `env:VAR_NAME` | 从进程环境或 `~/.config/ccswitch/env` 读取，推荐 |
+| `env:VAR_NAME` | 从进程环境、HM 的 `envVars` 文件或 `~/.config/ccswitch/env` 读取，推荐 |
 | `sk-xxx...`    | 直接文本（明文存储，不安全）                     |
 | 空值           | Claude 使用 `$CLAUDE_API_KEY`；Codex 使用 `$OPENAI_API_KEY` |
 

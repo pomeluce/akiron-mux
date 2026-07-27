@@ -322,3 +322,11 @@ pub fn pick(en: &'static str, zh: &'static str) -> &'static str {
         en
     }
 }
+
+pub fn pick_owned(en: String, zh: String) -> String {
+    if current_lang() == "中文" {
+        zh
+    } else {
+        en
+    }
+}

@@ -35,7 +35,7 @@
         {
           packages.default = rustPlatform.buildRustPackage {
             pname = "ccswitch";
-            version = "1.9.1";
+            version = "1.9.2";
             src = ./.;
             cargoLock = {
               lockFile = ./Cargo.lock;
@@ -211,6 +211,12 @@
                   {
                     source = format.generate "ccswitch-defaults.toml" cfg.defaults;
                   };
+
+                # Let CLI/TUI processes use the same out-of-store env file as
+                # the proxy service without copying secrets into the Nix store.
+                xdg.configFile."ccswitch/env-path" = lib.mkIf (cfg.envVars != null) {
+                  text = cfg.envVars;
+                };
 
                 # Proxy service
                 systemd.user.services.ccs-proxy = {

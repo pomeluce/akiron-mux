@@ -183,6 +183,18 @@ model = "gpt-test"
 [model_providers.existing]
 name = "Existing"
 base_url = "https://existing.example.com"
+
+[model_providers.codex-proxy]
+name = "Legacy Session Provider"
+base_url = "https://legacy.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[model_providers.ccs]
+name = "Old CCSwitch Provider"
+base_url = "https://old.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
 "#,
     )
     .unwrap();
@@ -196,26 +208,30 @@ base_url = "https://existing.example.com"
     assert!(config_text.contains("[ccswitch.last_switch]"));
     let config: toml::Value = toml::from_str(&config_text).unwrap();
     assert_eq!(config["model"].as_str(), Some("gpt-test"));
-    assert_eq!(config["model_provider"].as_str(), Some("codex-proxy"));
+    assert_eq!(config["model_provider"].as_str(), Some("ccs"));
     assert_eq!(
         config["model_providers"]["existing"]["name"].as_str(),
         Some("Existing")
     );
     assert_eq!(
-        config["model_providers"]["codex-proxy"]["name"].as_str(),
+        config["model_providers"]["ccs"]["name"].as_str(),
         Some("Codex Proxy")
     );
     assert_eq!(
-        config["model_providers"]["codex-proxy"]["base_url"].as_str(),
+        config["model_providers"]["ccs"]["base_url"].as_str(),
         Some("https://codex.example.com/v1")
     );
     assert_eq!(
-        config["model_providers"]["codex-proxy"]["wire_api"].as_str(),
+        config["model_providers"]["ccs"]["wire_api"].as_str(),
         Some("responses")
     );
     assert_eq!(
-        config["model_providers"]["codex-proxy"]["requires_openai_auth"].as_bool(),
+        config["model_providers"]["ccs"]["requires_openai_auth"].as_bool(),
         Some(true)
+    );
+    assert_eq!(
+        config["model_providers"]["codex-proxy"]["base_url"].as_str(),
+        Some("https://legacy.example.com/v1")
     );
     assert_eq!(
         config["ccswitch"]["last_switch"]["source"].as_str(),
@@ -242,8 +258,15 @@ base_url = "https://existing.example.com"
     remove_codex_provider(&mgr, "codex-proxy", Some(&config_path)).unwrap();
     let removed_text = fs::read_to_string(&config_path).unwrap();
     let removed: toml::Value = toml::from_str(&removed_text).unwrap();
-    assert!(removed.get("model_provider").is_none());
-    assert!(removed["model_providers"].get("codex-proxy").is_none());
+    assert_eq!(removed["model_provider"].as_str(), Some("ccs"));
+    assert_eq!(
+        removed["model_providers"]["ccs"]["base_url"].as_str(),
+        Some("https://codex.example.com/v1")
+    );
+    assert_eq!(
+        removed["model_providers"]["codex-proxy"]["base_url"].as_str(),
+        Some("https://legacy.example.com/v1")
+    );
     assert_eq!(
         removed["model_providers"]["existing"]["name"].as_str(),
         Some("Existing")
@@ -268,6 +291,13 @@ base_url = "https://existing.example.com"
     .unwrap();
     assert!(new_config_path.exists());
     assert!(new_auth_path.exists());
+    let new_config: toml::Value =
+        toml::from_str(&fs::read_to_string(&new_config_path).unwrap()).unwrap();
+    assert_eq!(new_config["model_provider"].as_str(), Some("ccs"));
+    assert_eq!(
+        new_config["model_providers"]["ccs"]["base_url"].as_str(),
+        Some("https://codex.example.com/v1")
+    );
 
     let guarded_config_path = dir.path().join("guarded-config.toml");
     let corrupt_auth_path = dir.path().join("corrupt-auth.json");

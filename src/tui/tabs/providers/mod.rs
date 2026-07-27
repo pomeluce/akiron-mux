@@ -29,6 +29,7 @@ enum Panel {
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ProviderAction {
+    Switch,
     Delete,
 }
 
@@ -561,6 +562,21 @@ impl ProvidersTab {
                     )
                 }
             }
+            Some(ProviderAction::Switch) => {
+                if self.app == AppType::Codex {
+                    (
+                        lang::current().confirm_switch_provider,
+                        lang::current().confirm_switch_provider_msg,
+                        theme::current().cyan,
+                    )
+                } else {
+                    (
+                        lang::current().confirm_switch_profile,
+                        lang::current().confirm_switch_profile_msg,
+                        theme::current().cyan,
+                    )
+                }
+            }
             _ => return,
         };
         shared_confirm(
@@ -912,13 +928,17 @@ impl TabContent for ProvidersTab {
                     self.confirm_button = if self.confirm_button == 0 { 1 } else { 0 }
                 }
                 KeyCode::Enter => {
-                    if self.confirm_button == 0
-                        && self.confirm_action == Some(ProviderAction::Delete)
-                    {
-                        if self.panel == Panel::ProviderList {
-                            self.do_delete_provider();
-                        } else {
-                            self.do_delete();
+                    if self.confirm_button == 0 {
+                        match self.confirm_action {
+                            Some(ProviderAction::Switch) => self.do_switch(),
+                            Some(ProviderAction::Delete) => {
+                                if self.panel == Panel::ProviderList {
+                                    self.do_delete_provider();
+                                } else {
+                                    self.do_delete();
+                                }
+                            }
+                            None => {}
                         }
                     }
                     self.confirm_action = None;
@@ -1062,7 +1082,8 @@ impl ProvidersTab {
             KeyCode::Enter => {
                 if self.app == AppType::Codex {
                     if !self.providers.is_empty() {
-                        self.do_switch();
+                        self.confirm_action = Some(ProviderAction::Switch);
+                        self.confirm_button = 0;
                     }
                 } else {
                     self.panel = Panel::ProfileList;
@@ -1143,7 +1164,8 @@ impl ProvidersTab {
             }
             KeyCode::Enter => {
                 if !self.profiles.is_empty() {
-                    self.do_switch();
+                    self.confirm_action = Some(ProviderAction::Switch);
+                    self.confirm_button = 0;
                 }
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {

@@ -9,6 +9,7 @@ use std::io::Write;
 use std::path::Path;
 
 const DEFAULT_PROXY_PORT: u16 = 15721;
+const CODEX_MANAGED_PROVIDER_ID: &str = "ccs";
 
 pub fn switch_profile(
     mgr: &ConfigManager,
@@ -210,7 +211,7 @@ pub fn switch_codex_provider(
         anyhow::bail!("Codex auth.json root must be an object");
     }
 
-    config["model_provider"] = toml_edit::value(&provider.id);
+    config["model_provider"] = toml_edit::value(CODEX_MANAGED_PROVIDER_ID);
     if config
         .as_table()
         .get("model_providers")
@@ -231,19 +232,22 @@ pub fn switch_codex_provider(
         providers.set_implicit(true);
     }
     if providers
-        .get(&provider.id)
+        .get(CODEX_MANAGED_PROVIDER_ID)
         .is_some_and(|item| !item.is_table())
     {
-        anyhow::bail!("Codex provider '{}' must be a table", provider.id);
+        anyhow::bail!(
+            "Codex provider '{}' must be a table",
+            CODEX_MANAGED_PROVIDER_ID
+        );
     }
-    if providers.get(&provider.id).is_none() {
+    if providers.get(CODEX_MANAGED_PROVIDER_ID).is_none() {
         providers.insert(
-            &provider.id,
+            CODEX_MANAGED_PROVIDER_ID,
             toml_edit::Item::Table(toml_edit::Table::new()),
         );
     }
     let provider_table = providers
-        .get_mut(&provider.id)
+        .get_mut(CODEX_MANAGED_PROVIDER_ID)
         .and_then(toml_edit::Item::as_table_mut)
         .expect("provider table created above");
     provider_table.insert("name", toml_edit::value(&provider.name));
@@ -300,8 +304,8 @@ pub fn switch_codex_provider(
     Ok(provider)
 }
 
-/// Remove a Codex provider definition from config.toml while preserving all
-/// unrelated settings, comments, and other providers.
+/// Remove CCSwitch's association with a Codex provider. Provider definitions
+/// remain in config.toml because existing Codex sessions refer to them by ID.
 pub fn remove_codex_provider(
     mgr: &ConfigManager,
     provider_id: &str,
@@ -316,28 +320,6 @@ pub fn remove_codex_provider(
         let mut config: toml_edit::DocumentMut = content
             .parse()
             .context("Failed to parse Codex config.toml")?;
-        if config
-            .as_table()
-            .get("model_providers")
-            .is_some_and(|item| !item.is_table())
-        {
-            anyhow::bail!("Codex config.toml 'model_providers' must be a table");
-        }
-        if let Some(providers) = config
-            .as_table_mut()
-            .get_mut("model_providers")
-            .and_then(toml_edit::Item::as_table_mut)
-        {
-            providers.remove(provider_id);
-        }
-        let is_selected = config
-            .as_table()
-            .get("model_provider")
-            .and_then(toml_edit::Item::as_str)
-            == Some(provider_id);
-        if is_selected {
-            config.as_table_mut().remove("model_provider");
-        }
         let last_source_matches = config
             .as_table()
             .get("ccswitch")

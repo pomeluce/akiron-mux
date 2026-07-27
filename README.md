@@ -8,7 +8,7 @@ Claude Code 模型配置管理器 — Rust TUI + CLI 工具。
 
 - **Claude 四模型配置**：每个 Profile 独立配置 Opus、Sonnet、Haiku、Subagent
 - **双应用顶栏**：顶栏显示 `Claude | Codex`，Space 切换当前应用上下文
-- **Codex Provider 管理**：Codex 只配置 Provider，无需 Profile，删除时同步清理 Codex config.toml
+- **Codex Provider 管理**：Codex 只配置 Provider，无需 Profile，统一通过 `model_providers.ccs` 保持会话关联
 - **一键切换**：本地模式直接写入 `~/.claude/settings.json`，代理模式更新 SQLite
 - **会话历史**：分别扫描 Claude Code 与 Codex 本地会话文件，支持搜索、过滤
 - **代理服务**：本地 HTTP 代理（端口 15721），自动模型名转换，支持 systemd / launchd / 计划任务后台运行
@@ -380,12 +380,12 @@ Opus/Sonnet/Haiku 变量不在 settings.json 中设置，由 proxy server 透明
 
 ### Codex Provider 切换
 
-Codex 不使用 Profile，也不区分 local/proxy。切换 Provider 时保留配置文件中的其他设置和已有 Provider，并写入：
+Codex 不使用 Profile，也不区分 local/proxy。切换 Provider 时保留配置文件中的其他设置和已有 Provider，并统一更新 `model_providers.ccs`，使不同上游的会话始终绑定同一个 Codex Provider ID：
 
 ```toml
-model_provider = "codex-proxy"
+model_provider = "ccs"
 
-[model_providers.codex-proxy]
+[model_providers.ccs]
 name = "Codex Proxy"
 base_url = "https://api.example.com/v1"
 wire_api = "responses"

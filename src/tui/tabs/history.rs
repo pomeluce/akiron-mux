@@ -466,9 +466,13 @@ impl HistoryTab {
                 theme::current().red,
             )
         } else {
+            let open_msg = match self.app {
+                AppType::Claude => lang::current().confirm_open_claude_msg,
+                AppType::Codex => lang::current().confirm_open_codex_msg,
+            };
             (
                 lang::current().confirm_open_title,
-                lang::current().confirm_open_msg,
+                open_msg,
                 theme::current().cyan,
             )
         };

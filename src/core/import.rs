@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 const MAX_USAGE_TOKENS: i64 = 1_000_000_000_000;
+const CODEX_IMPORT_REVISION_KEY: &str = "codex_import_revision";
+const CODEX_IMPORT_REVISION: &str = "2";
 
 use serde::Deserialize;
 
@@ -242,6 +244,7 @@ struct CodexLine {
 /// Incrementally import Codex session transcripts from ~/.codex/sessions.
 pub fn import_codex_sessions(db: &Db) -> Result<usize, anyhow::Error> {
     let sessions_dir = codex_sessions_dir();
+    prepare_codex_import_revision(db, &sessions_dir)?;
     let session_index = load_codex_session_index(&codex_session_index_path());
     let file_index: HashMap<String, i64> = {
         let mut stmt = db.conn().prepare(
@@ -277,6 +280,48 @@ pub fn import_codex_sessions(db: &Db) -> Result<usize, anyhow::Error> {
     }
     apply_codex_session_index(db, &session_index)?;
     Ok(imported)
+}
+
+/// Invalidate Codex import state when rollout parsing semantics change.
+///
+/// Session and usage scans have independent indexes, so both need to be
+/// cleared. Imported usage is also removed because older versions may have
+/// attributed fork usage to the parent session ID.
+fn prepare_codex_import_revision(
+    db: &Db,
+    sessions_dir: &std::path::Path,
+) -> Result<(), anyhow::Error> {
+    if db.get_setting(CODEX_IMPORT_REVISION_KEY).as_deref() == Some(CODEX_IMPORT_REVISION) {
+        return Ok(());
+    }
+
+    let codex_sync_paths = {
+        let mut statement = db
+            .conn()
+            .prepare("SELECT DISTINCT file_path FROM session_log_sync")?;
+        let paths = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        paths
+            .into_iter()
+            .filter(|path| std::path::Path::new(path).starts_with(sessions_dir))
+            .collect::<Vec<_>>()
+    };
+
+    let transaction = db.conn().unchecked_transaction()?;
+    transaction.execute(
+        "DELETE FROM usage_logs WHERE app_type = 'codex' AND data_source = 'import'",
+        [],
+    )?;
+    for path in codex_sync_paths {
+        transaction.execute("DELETE FROM session_log_sync WHERE file_path = ?1", [path])?;
+    }
+    transaction.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        rusqlite::params![CODEX_IMPORT_REVISION_KEY, CODEX_IMPORT_REVISION],
+    )?;
+    transaction.commit()?;
+    Ok(())
 }
 
 fn cleanup_removed_session_files(
@@ -413,13 +458,19 @@ fn parse_codex_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, any
         }
         match line.line_type.as_str() {
             "session_meta" => {
-                session_id = line
+                let canonical_id = line
                     .payload
                     .get("id")
                     .or_else(|| line.payload.get("session_id"))
                     .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
+                    .unwrap_or("");
+                // A forked rollout can contain a second session_meta copied
+                // from its parent. The first valid metadata record identifies
+                // the rollout; later records must not overwrite it.
+                if !session_id.is_empty() || canonical_id.is_empty() {
+                    continue;
+                }
+                session_id = canonical_id.to_string();
                 cwd = line
                     .payload
                     .get("cwd")
@@ -867,6 +918,7 @@ fn parse_codex_usage_file(path: &PathBuf, fallback_sid: &str) -> (String, Vec<Us
         Err(_) => return (fallback_sid.to_string(), vec![]),
     };
     let mut sid = fallback_sid.to_string();
+    let mut session_meta_seen = false;
     let mut model = "unknown".to_string();
     let mut records = Vec::new();
     for (index, raw) in content.lines().enumerate() {
@@ -876,13 +928,18 @@ fn parse_codex_usage_file(path: &PathBuf, fallback_sid: &str) -> (String, Vec<Us
         };
         match line.line_type.as_str() {
             "session_meta" => {
+                if session_meta_seen {
+                    continue;
+                }
                 if let Some(id) = line
                     .payload
                     .get("id")
                     .or_else(|| line.payload.get("session_id"))
                     .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
                 {
                     sid = id.to_string();
+                    session_meta_seen = true;
                 }
             }
             "turn_context" => {
@@ -1056,6 +1113,139 @@ mod tests {
         apply_codex_session_index(&db, &index).unwrap();
         let stored = db.query_sessions("codex", None, None, 10).unwrap();
         assert_eq!(stored[0].title.as_deref(), Some("Renamed session"));
+    }
+
+    #[test]
+    fn codex_fork_uses_first_session_meta_as_canonical_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent_path = dir.path().join("rollout-parent-session.jsonl");
+        let fork_path = dir.path().join("rollout-fork-session.jsonl");
+        std::fs::write(
+            &parent_path,
+            concat!(
+                r#"{"timestamp":"2026-07-23T08:00:00Z","type":"session_meta","payload":{"id":"parent-session","cwd":"/tmp/parent","model_provider":"parent-provider"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-23T08:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"Parent prompt"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &fork_path,
+            concat!(
+                r#"{"timestamp":"2026-07-27T08:00:00Z","type":"session_meta","payload":{"id":"fork-session","cwd":"/tmp/fork","model_provider":"fork-provider","forked_from_id":"parent-session"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-23T08:00:00Z","type":"session_meta","payload":{"id":"parent-session","cwd":"/tmp/parent","model_provider":"parent-provider"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-27T08:00:01Z","type":"turn_context","payload":{"model":"gpt-fork"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-27T08:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":80,"cached_input_tokens":20,"output_tokens":10}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let parent = parse_codex_session_file(&parent_path).unwrap().unwrap();
+        let fork = parse_codex_session_file(&fork_path).unwrap().unwrap();
+        assert_eq!(fork.id, "fork-session");
+        assert_eq!(fork.project_path, "/tmp/fork");
+        assert_eq!(fork.profile_id.as_deref(), Some("fork-provider"));
+
+        let (sid, records) = parse_codex_usage_file(&fork_path, "fallback");
+        assert_eq!(sid, "fork-session");
+        assert_eq!(records.len(), 1);
+        assert!(records[0].msg_id.starts_with("codex:fork-session:"));
+
+        let db = Db::open(&dir.path().join("ccswitch.db")).unwrap();
+        db.insert_session(&parent, "codex").unwrap();
+        db.insert_session(&fork, "codex").unwrap();
+        let stored = db.query_sessions("codex", None, None, 10).unwrap();
+        assert_eq!(stored.len(), 2);
+        assert!(stored.iter().any(|session| session.id == "parent-session"));
+        assert!(stored.iter().any(|session| session.id == "fork-session"));
+    }
+
+    #[test]
+    fn codex_import_revision_only_invalidates_codex_import_state_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("codex-sessions");
+        let codex_path = sessions_dir.join("rollout-session.jsonl");
+        let unrelated_path = dir.path().join("claude-session.jsonl");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let db = Db::open(&dir.path().join("ccswitch.db")).unwrap();
+        for (app_type, source, message_id) in [
+            ("codex", "import", "codex-import"),
+            ("codex", "manual", "codex-manual"),
+            ("claude", "import", "claude-import"),
+        ] {
+            db.conn()
+                .execute(
+                    "INSERT INTO usage_logs (app_type, model, message_id, data_source) VALUES (?1, 'model', ?2, ?3)",
+                    rusqlite::params![app_type, message_id, source],
+                )
+                .unwrap();
+        }
+        for (path, scan_type) in [
+            (&codex_path, "session"),
+            (&codex_path, "usage"),
+            (&unrelated_path, "session"),
+        ] {
+            db.conn()
+                .execute(
+                    "INSERT INTO session_log_sync (file_path, file_mtime, scan_type) VALUES (?1, 1, ?2)",
+                    rusqlite::params![path.to_string_lossy(), scan_type],
+                )
+                .unwrap();
+        }
+
+        prepare_codex_import_revision(&db, &sessions_dir).unwrap();
+
+        let usage_ids = {
+            let mut statement = db
+                .conn()
+                .prepare("SELECT message_id FROM usage_logs ORDER BY message_id")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(usage_ids, vec!["claude-import", "codex-manual"]);
+        let sync_paths = {
+            let mut statement = db
+                .conn()
+                .prepare("SELECT file_path FROM session_log_sync")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(sync_paths, vec![unrelated_path.to_string_lossy()]);
+        assert_eq!(
+            db.get_setting(CODEX_IMPORT_REVISION_KEY).as_deref(),
+            Some(CODEX_IMPORT_REVISION)
+        );
+
+        db.conn()
+            .execute(
+                "INSERT INTO usage_logs (app_type, model, message_id, data_source) VALUES ('codex', 'model', 'new-import', 'import')",
+                [],
+            )
+            .unwrap();
+        prepare_codex_import_revision(&db, &sessions_dir).unwrap();
+        let new_import_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM usage_logs WHERE message_id = 'new-import'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_import_count, 1);
     }
 
     #[test]

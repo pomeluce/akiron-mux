@@ -2,16 +2,22 @@ pub mod form;
 
 use super::super::theme;
 use super::super::widgets::shared::{
-    render_confirm_popup as shared_confirm, render_message_popup as shared_msg,
+    clear_popup_area, render_confirm_popup as shared_confirm, render_message_popup as shared_msg,
 };
 use super::TabContent;
+use crate::core::codex_catalog::{
+    catalog_status, default_catalog_path, model_entry, write_catalog,
+};
 use crate::core::config::ConfigManager;
-use crate::core::models::{validate_profile, validate_provider, AppType, Profile, Provider};
+use crate::core::models::{
+    validate_codex_model, validate_profile, validate_provider, AppType, CodexCatalog, CodexModel,
+    Profile, Provider,
+};
 use crate::tui::lang;
 use crossterm::event::KeyCode;
-use form::{EditForm, ProviderForm};
+use form::{CodexModelForm, EditForm, ProviderForm};
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, List, ListItem, ListState, Paragraph, Wrap},
@@ -33,6 +39,15 @@ pub enum ProviderAction {
     Delete,
 }
 
+struct ContentPopup {
+    title: String,
+    content: String,
+    compact: bool,
+    scroll: u16,
+    max_scroll: u16,
+    page_height: u16,
+}
+
 pub struct ProvidersTab {
     mgr: Rc<ConfigManager>,
     app: AppType,
@@ -42,11 +57,13 @@ pub struct ProvidersTab {
     selected_provider_idx: usize,
     // Profile list
     profiles: Vec<Profile>,
+    codex_models: Vec<CodexModel>,
     profile_state: ListState,
     selected_profile_idx: usize,
     // Active state
     pub active_provider: String,
     pub active_profile: String,
+    pub active_codex_model: String,
     // Navigation
     panel: Panel,
     // Search
@@ -56,9 +73,11 @@ pub struct ProvidersTab {
     pub confirm_action: Option<ProviderAction>,
     confirm_button: usize,
     pub message: Option<String>,
+    content_popup: Option<ContentPopup>,
     status_message: Option<String>,
     edit_form: Option<EditForm>,
     provider_form: Option<ProviderForm>,
+    codex_model_form: Option<CodexModelForm>,
 }
 
 impl ProvidersTab {
@@ -82,6 +101,7 @@ impl ProvidersTab {
         } else {
             String::new()
         };
+        let active_codex_model = mgr.get_setting("active_codex_model").unwrap_or_default();
 
         let selected_provider_idx = providers
             .iter()
@@ -93,8 +113,17 @@ impl ProvidersTab {
         } else {
             vec![]
         };
+        let codex_models = providers
+            .get(selected_provider_idx)
+            .map(|provider| provider.models.clone())
+            .unwrap_or_default();
 
-        let selected_profile_idx = if profiles.is_empty() {
+        let selected_profile_idx = if app == AppType::Codex {
+            codex_models
+                .iter()
+                .position(|model| model.slug == active_codex_model)
+                .unwrap_or(0)
+        } else if profiles.is_empty() {
             0
         } else {
             profiles
@@ -106,7 +135,7 @@ impl ProvidersTab {
         let mut provider_state = ListState::default();
         provider_state.select(Some(selected_provider_idx));
         let mut profile_state = ListState::default();
-        profile_state.select(if profiles.is_empty() {
+        profile_state.select(if profiles.is_empty() && codex_models.is_empty() {
             None
         } else {
             Some(selected_profile_idx)
@@ -119,19 +148,23 @@ impl ProvidersTab {
             provider_state,
             selected_provider_idx,
             profiles,
+            codex_models,
             profile_state,
             selected_profile_idx,
             active_provider,
             active_profile,
+            active_codex_model,
             panel: Panel::ProviderList,
             search_query: String::new(),
             is_searching: false,
             confirm_action: None,
             confirm_button: 0,
             message: None,
+            content_popup: None,
             status_message: None,
             edit_form: None,
             provider_form: None,
+            codex_model_form: None,
         }
     }
 
@@ -140,9 +173,11 @@ impl ProvidersTab {
         self.panel = Panel::ProviderList;
         self.confirm_action = None;
         self.message = None;
+        self.content_popup = None;
         self.status_message = None;
         self.edit_form = None;
         self.provider_form = None;
+        self.codex_model_form = None;
         self.selected_provider_idx = 0;
         self.selected_profile_idx = 0;
         self.active_provider = self
@@ -154,6 +189,10 @@ impl ProvidersTab {
         } else {
             String::new()
         };
+        self.active_codex_model = self
+            .mgr
+            .get_setting("active_codex_model")
+            .unwrap_or_default();
         self.refresh_providers();
         if let Some(index) = self
             .providers
@@ -172,7 +211,11 @@ impl ProvidersTab {
         } else if self.app == AppType::Claude && !self.active_profile.is_empty() {
             format!("{}/{}", self.active_provider, self.active_profile)
         } else {
-            self.active_provider.clone()
+            if self.app == AppType::Codex && !self.active_codex_model.is_empty() {
+                format!("{}/{}", self.active_provider, self.active_codex_model)
+            } else {
+                self.active_provider.clone()
+            }
         }
     }
 
@@ -203,6 +246,8 @@ impl ProvidersTab {
             cursors: [0, 0, 0, 0],
             focused: 0,
             is_edit: false,
+            show_catalog: self.app == AppType::Codex,
+            custom_catalog: self.app == AppType::Codex,
         });
     }
 
@@ -229,6 +274,8 @@ impl ProvidersTab {
             ],
             focused: 0,
             is_edit: true,
+            show_catalog: self.app == AppType::Codex,
+            custom_catalog: prov.codex_catalog == CodexCatalog::Custom,
         });
     }
 
@@ -241,7 +288,13 @@ impl ProvidersTab {
             name: form.fields[0].clone(),
             api_url: form.fields[2].clone(),
             api_key: form.fields[3].clone(),
+            codex_catalog: if self.app == AppType::Codex && form.custom_catalog {
+                CodexCatalog::Custom
+            } else {
+                CodexCatalog::BuiltIn
+            },
             profiles: vec![],
+            models: vec![],
             source: crate::core::models::Source::User,
         };
         if let Err(error) = validate_provider(&pr) {
@@ -255,6 +308,38 @@ impl ProvidersTab {
             ));
             return;
         }
+        if form.is_edit
+            && self.app == AppType::Codex
+            && self.active_provider == pr.id
+            && self
+                .providers
+                .iter()
+                .find(|provider| provider.id == pr.id)
+                .is_some_and(|provider| provider.codex_catalog != pr.codex_catalog)
+        {
+            self.message = Some(lang::pick_owned(
+                "Switch to another Codex provider before changing the active provider's catalog type"
+                    .into(),
+                "请先切换到其他 Codex 供应商，再修改当前供应商的模型来源".into(),
+            ));
+            return;
+        }
+        if self.app == AppType::Codex {
+            let mut prospective = self.providers.clone();
+            if let Some(existing) = prospective.iter_mut().find(|provider| provider.id == pr.id) {
+                existing.name.clone_from(&pr.name);
+                existing.api_url.clone_from(&pr.api_url);
+                existing.api_key.clone_from(&pr.api_key);
+                existing.codex_catalog = pr.codex_catalog;
+            } else {
+                prospective.push(pr.clone());
+            }
+            if let Err(error) = crate::core::codex_catalog::build_catalog(&prospective) {
+                self.message = Some(localized_error(&error));
+                return;
+            }
+        }
+        let apply_active_codex = self.app == AppType::Codex && self.active_provider == pr.id;
         if let Err(e) = self.mgr.db().insert_provider(&pr, self.app.as_str()) {
             self.message = Some(lang::pick_owned(
                 format!("Failed to save provider: {}", e),
@@ -264,6 +349,25 @@ impl ProvidersTab {
         }
         self.provider_form = None;
         self.refresh_providers();
+        if self.app == AppType::Codex {
+            self.rebuild_catalog_if_present();
+        }
+        if apply_active_codex {
+            let model = if self.active_codex_model.is_empty() {
+                None
+            } else {
+                Some(self.active_codex_model.as_str())
+            };
+            if let Err(error) =
+                crate::core::switcher::switch_codex_model(&self.mgr, &pr.id, model, None, None)
+            {
+                self.message = Some(lang::pick_owned(
+                    format!("Provider saved, but applying it to Codex failed: {}", error),
+                    format!("供应商已保存，但应用到 Codex 失败：{}", error),
+                ));
+                return;
+            }
+        }
         self.status_message = Some(format!("Provider '{}' saved", pr.name));
     }
 
@@ -276,6 +380,13 @@ impl ProvidersTab {
             return;
         }
         let provider_id = prov.id.clone();
+        if self.app == AppType::Codex && self.active_provider == provider_id {
+            self.message = Some(lang::pick_owned(
+                "Switch to another Codex provider before deleting the active provider".into(),
+                "请先切换到其他 Codex 供应商，再删除当前供应商".into(),
+            ));
+            return;
+        }
         if self.app == AppType::Codex {
             if let Err(e) =
                 crate::core::switcher::remove_codex_provider(&self.mgr, &provider_id, None)
@@ -307,6 +418,9 @@ impl ProvidersTab {
             }
         }
         self.refresh_providers();
+        if self.app == AppType::Codex {
+            self.rebuild_catalog_if_present();
+        }
         self.status_message = Some(format!("Provider '{}' deleted", provider_id));
     }
 
@@ -338,10 +452,23 @@ impl ProvidersTab {
         } else {
             vec![]
         };
-        if self.selected_profile_idx >= self.profiles.len() {
+        self.codex_models = if self.app == AppType::Codex {
+            self.providers
+                .get(self.selected_provider_idx)
+                .map(|p| p.models.clone())
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+        let selection_len = if self.app == AppType::Codex {
+            self.codex_models.len()
+        } else {
+            self.profiles.len()
+        };
+        if self.selected_profile_idx >= selection_len {
             self.selected_profile_idx = 0;
         }
-        self.profile_state.select(if self.profiles.is_empty() {
+        self.profile_state.select(if selection_len == 0 {
             None
         } else {
             Some(self.selected_profile_idx)
@@ -354,6 +481,287 @@ impl ProvidersTab {
 
     fn selected_provider(&self) -> Option<&Provider> {
         self.providers.get(self.selected_provider_idx)
+    }
+
+    fn selected_codex_model(&self) -> Option<&CodexModel> {
+        self.codex_models.get(self.selected_profile_idx)
+    }
+
+    fn do_add_codex_model(&mut self) {
+        let Some(provider) = self.selected_provider() else {
+            return;
+        };
+        if provider.codex_catalog != CodexCatalog::Custom {
+            self.message = Some(lang::pick_owned(
+                "Change this provider to Third-party models before adding a model".into(),
+                "请先将该供应商的模型来源改为第三方模型".into(),
+            ));
+            return;
+        }
+        self.codex_model_form = Some(CodexModelForm {
+            fields: [
+                String::new(),
+                String::new(),
+                String::new(),
+                "128000".into(),
+                String::new(),
+                "95".into(),
+            ],
+            cursors: [0, 0, 0, 6, 0, 2],
+            focused: 0,
+            is_edit: false,
+            provider_id: provider.id.clone(),
+            supported_efforts: [false, false, true, true, true, false, false, false],
+            effort_cursor: 3,
+            default_effort: 3,
+            default_model: provider.models.is_empty(),
+            supports_images: false,
+            supports_parallel_tools: true,
+            support_verbosity: true,
+            supports_search: false,
+        });
+    }
+
+    fn do_edit_codex_model(&mut self) {
+        let Some(model) = self.selected_codex_model().cloned() else {
+            return;
+        };
+        if !model.source.can_delete() {
+            self.message = Some(lang::current().msg_cannot_edit_sys_profile.into());
+            return;
+        }
+        let fields = [
+            model.slug.clone(),
+            model.display_name.clone(),
+            model.description.clone(),
+            model.context_window.to_string(),
+            model
+                .max_context_window
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            model.effective_context_window_percent.to_string(),
+        ];
+        let cursors = std::array::from_fn(|index| fields[index].len());
+        let supported_efforts = std::array::from_fn(|index| {
+            model
+                .supported_reasoning_efforts
+                .iter()
+                .any(|value| value == form::REASONING_EFFORTS[index])
+        });
+        let default_effort = form::REASONING_EFFORTS
+            .iter()
+            .position(|value| *value == model.default_reasoning_effort)
+            .unwrap_or(3);
+        let provider_id = self
+            .selected_provider()
+            .map(|provider| provider.id.clone())
+            .unwrap_or_default();
+        self.codex_model_form = Some(CodexModelForm {
+            fields,
+            cursors,
+            focused: 0,
+            is_edit: true,
+            provider_id,
+            supported_efforts,
+            effort_cursor: default_effort,
+            default_effort,
+            default_model: model.default,
+            supports_images: model.input_modalities.iter().any(|item| item == "image"),
+            supports_parallel_tools: model.supports_parallel_tool_calls,
+            support_verbosity: model.support_verbosity,
+            supports_search: model.supports_search_tool,
+        });
+    }
+
+    fn commit_codex_model(&mut self) {
+        let Some(form) = self.codex_model_form.as_ref() else {
+            return;
+        };
+        let provider_id = form.provider_id.clone();
+        let max_context_window = if form.fields[4].trim().is_empty() {
+            None
+        } else {
+            match form.fields[4].trim().parse() {
+                Ok(value) => Some(value),
+                Err(_) => {
+                    self.message = Some(lang::pick_owned(
+                        "Maximum context window must be a positive integer".into(),
+                        "最大上下文必须是正整数".into(),
+                    ));
+                    return;
+                }
+            }
+        };
+        let model = CodexModel {
+            slug: form.fields[0].trim().into(),
+            display_name: form.fields[1].trim().into(),
+            description: form.fields[2].trim().into(),
+            context_window: form.fields[3].trim().parse().unwrap_or(0),
+            max_context_window,
+            effective_context_window_percent: form.fields[5].trim().parse().unwrap_or(0),
+            default_reasoning_effort: form.default_reasoning_effort(),
+            supported_reasoning_efforts: form.supported_reasoning_efforts(),
+            input_modalities: if form.supports_images {
+                vec!["text".into(), "image".into()]
+            } else {
+                vec!["text".into()]
+            },
+            supports_parallel_tool_calls: form.supports_parallel_tools,
+            support_verbosity: form.support_verbosity,
+            default_verbosity: "low".into(),
+            supports_search_tool: form.supports_search,
+            default: form.default_model,
+            source: crate::core::models::Source::User,
+        };
+        if let Err(error) = validate_codex_model(&model) {
+            self.message = Some(localized_error(&error));
+            return;
+        }
+        if !form.is_edit && self.codex_models.iter().any(|item| item.slug == model.slug) {
+            self.message = Some(format!("Model '{}' already exists", model.slug));
+            return;
+        }
+        let mut prospective = self.providers.clone();
+        if let Some(provider) = prospective
+            .iter_mut()
+            .find(|provider| provider.id == provider_id)
+        {
+            if model.default {
+                for existing in &mut provider.models {
+                    existing.default = false;
+                }
+            }
+            if let Some(existing) = provider
+                .models
+                .iter_mut()
+                .find(|existing| existing.slug == model.slug)
+            {
+                *existing = model.clone();
+            } else {
+                provider.models.push(model.clone());
+            }
+        }
+        if let Err(error) = crate::core::codex_catalog::build_catalog(&prospective) {
+            self.message = Some(localized_error(&error));
+            return;
+        }
+        if let Err(error) = self.mgr.db().insert_codex_model(&provider_id, &model) {
+            self.message = Some(format!("Failed to save model: {}", error));
+            return;
+        }
+        self.codex_model_form = None;
+        self.refresh_providers();
+        self.rebuild_catalog_if_present();
+        if self.active_provider == provider_id && self.active_codex_model == model.slug {
+            if let Err(error) = crate::core::switcher::switch_codex_model(
+                &self.mgr,
+                &provider_id,
+                Some(&model.slug),
+                None,
+                None,
+            ) {
+                self.message = Some(lang::pick_owned(
+                    format!("Model saved, but applying it to Codex failed: {}", error),
+                    format!("模型已保存，但应用到 Codex 失败：{}", error),
+                ));
+            }
+        }
+        self.status_message = Some(format!("Model '{}' saved", model.display_name));
+    }
+
+    fn do_delete_codex_model(&mut self) {
+        let Some(model) = self.selected_codex_model().cloned() else {
+            return;
+        };
+        let provider_id = self
+            .selected_provider()
+            .map(|provider| provider.id.clone())
+            .unwrap_or_default();
+        if self.active_provider == provider_id && self.active_codex_model == model.slug {
+            self.message = Some(lang::pick_owned(
+                "Switch to another Codex model before deleting the active model".into(),
+                "请先切换到其他 Codex 模型，再删除当前模型".into(),
+            ));
+            return;
+        }
+        if let Err(error) = self.mgr.db().delete_codex_model(&provider_id, &model.slug) {
+            self.message = Some(format!("Failed to delete model: {}", error));
+            return;
+        }
+        self.refresh_providers();
+        self.rebuild_catalog_if_present();
+        self.status_message = Some(format!("Model '{}' deleted", model.slug));
+    }
+
+    fn rebuild_catalog_if_present(&mut self) {
+        let path = default_catalog_path();
+        if !path.exists() {
+            return;
+        }
+        let result = self
+            .mgr
+            .list_providers_for(AppType::Codex)
+            .and_then(|providers| write_catalog(&path, &providers));
+        if let Err(error) = result {
+            self.message = Some(format!("Failed to rebuild models.json: {}", error));
+        }
+    }
+
+    fn show_catalog_status(&mut self) {
+        let path = default_catalog_path();
+        let providers = match self.mgr.list_providers_for(AppType::Codex) {
+            Ok(providers) => providers,
+            Err(error) => {
+                self.message = Some(error.to_string());
+                return;
+            }
+        };
+        let custom = providers
+            .iter()
+            .filter(|provider| provider.codex_catalog == CodexCatalog::Custom)
+            .collect::<Vec<_>>();
+        let models = custom
+            .iter()
+            .map(|provider| provider.models.len())
+            .sum::<usize>();
+        let status = match catalog_status(&path, &providers) {
+            Ok(true) => lang::pick("Synchronized", "已同步"),
+            Ok(false) if path.exists() => lang::pick("Pending", "待同步"),
+            Ok(false) => lang::pick("Not generated", "未生成"),
+            Err(_) => lang::pick("Invalid", "无效"),
+        };
+        self.content_popup = Some(ContentPopup {
+            title: lang::pick_owned("Model Catalog".into(), "模型目录".into()),
+            content: format!(
+                "{}: {}\n{}: {}\n{}: {}\n{}: {}",
+                lang::pick("File", "文件"),
+                path.display(),
+                lang::pick("Providers", "供应商"),
+                custom.len(),
+                lang::pick("Models", "模型"),
+                models,
+                lang::pick("Status", "状态"),
+                status
+            ),
+            compact: true,
+            scroll: 0,
+            max_scroll: 0,
+            page_height: 1,
+        });
+    }
+
+    fn preview_codex_model(&mut self) {
+        if let Some(model) = self.selected_codex_model() {
+            self.content_popup = Some(ContentPopup {
+                title: lang::pick_owned("Model JSON Preview".into(), "模型 JSON 预览".into()),
+                content: serde_json::to_string_pretty(&model_entry(model))
+                    .unwrap_or_else(|error| error.to_string()),
+                compact: false,
+                scroll: 0,
+                max_scroll: 0,
+                page_height: 1,
+            });
+        }
     }
 
     fn do_add_profile(&mut self) {
@@ -457,10 +865,19 @@ impl ProvidersTab {
             None => return,
         };
         if self.app == AppType::Codex {
-            match crate::core::switcher::switch_codex_provider(&self.mgr, &prov_id, None, None) {
+            let model_slug = self.selected_codex_model().map(|model| model.slug.clone());
+            match crate::core::switcher::switch_codex_model(
+                &self.mgr,
+                &prov_id,
+                model_slug.as_deref(),
+                None,
+                None,
+            ) {
                 Ok(_) => {
                     self.active_provider = prov_id.clone();
-                    self.status_message = Some(format!("Codex switched to '{}'", prov_id));
+                    self.active_codex_model = model_slug.unwrap_or_default();
+                    self.status_message =
+                        Some(format!("Codex switched to '{}'", self.active_context()));
                 }
                 Err(e) => self.message = Some(localized_error(&e)),
             }
@@ -541,7 +958,13 @@ impl ProvidersTab {
 
     fn render_provider_form(&self, f: &mut Frame, area: Rect) {
         if let Some(ref form) = self.provider_form {
-            form::render_provider_form(form, f, area);
+            form::render_provider_form(form, self.app == AppType::Codex, f, area);
+        }
+    }
+
+    fn render_codex_model_form(&self, f: &mut Frame, area: Rect) {
+        if let Some(ref form) = self.codex_model_form {
+            form::render_codex_model_form(form, f, area);
         }
     }
 
@@ -596,6 +1019,86 @@ impl ProvidersTab {
         shared_msg(f, area, self.message.as_deref().unwrap_or(""));
     }
 
+    fn render_content_popup(&mut self, f: &mut Frame, area: Rect) {
+        let Some(popup_state) = self.content_popup.as_mut() else {
+            return;
+        };
+        let content_width = popup_state
+            .content
+            .lines()
+            .map(super::super::widgets::shared::display_width)
+            .max()
+            .unwrap_or(1);
+        let width = if popup_state.compact {
+            (content_width as u16)
+                .saturating_add(6)
+                .clamp(32, 72)
+                .min(area.width)
+        } else {
+            area.width.saturating_sub(4).clamp(32, 100).min(area.width)
+        };
+        let available_content_width = width.saturating_sub(6).max(1) as usize;
+        let wrapped_line_count = wrap_display_lines(&popup_state.content, available_content_width)
+            .len()
+            .min(u16::MAX as usize) as u16;
+        let height = if popup_state.compact {
+            wrapped_line_count
+                .saturating_add(3)
+                .clamp(6, 14)
+                .min(area.height)
+        } else {
+            area.height.saturating_sub(4).clamp(9, 30).min(area.height)
+        };
+        let popup = super::super::widgets::shared::centered_rect(width, height, area);
+        let block = Block::bordered()
+            .border_set(ratatui::symbols::border::ROUNDED)
+            .title(Line::from(format!(" {} ", popup_state.title)).centered())
+            .border_style(Style::default().fg(theme::current().yellow));
+        let inner = block.inner(popup);
+        let [content_row, help_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .areas(inner);
+        let [_, content_area, _] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(2.min(content_row.width / 4)),
+                Constraint::Min(1),
+                Constraint::Length(2.min(content_row.width / 4)),
+            ])
+            .areas(content_row);
+        let lines = wrap_display_lines(&popup_state.content, content_area.width.max(1) as usize);
+        popup_state.page_height = content_area.height.max(1);
+        popup_state.max_scroll = lines
+            .len()
+            .saturating_sub(content_area.height as usize)
+            .min(u16::MAX as usize) as u16;
+        popup_state.scroll = popup_state.scroll.min(popup_state.max_scroll);
+
+        clear_popup_area(f, popup);
+        f.render_widget(block, popup);
+        f.render_widget(
+            Paragraph::new(lines.into_iter().map(Line::from).collect::<Vec<_>>())
+                .scroll((popup_state.scroll, 0)),
+            content_area,
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                if popup_state.compact {
+                    lang::pick("Esc close", "Esc 关闭")
+                } else {
+                    lang::pick(
+                        "J/K or Up/Down scroll · PgUp/PgDn page · Esc close",
+                        "J/K 或上下键滚动 · PgUp/PgDn 翻页 · Esc 关闭",
+                    )
+                },
+                Style::default().fg(theme::current().cyan),
+            )))
+            .alignment(Alignment::Center),
+            help_area,
+        );
+    }
+
     fn render_selection_detail(&self, f: &mut Frame, area: Rect) {
         let mut lines = Vec::new();
         if let Some(provider) = self.selected_provider() {
@@ -625,6 +1128,45 @@ impl ProvidersTab {
                     "responses",
                     theme::current().purple,
                 ));
+                lines.push(detail_line(
+                    "Catalog",
+                    provider.codex_catalog.as_str(),
+                    theme::current().purple,
+                ));
+                lines.push(detail_line(
+                    "Models",
+                    &provider.models.len().to_string(),
+                    theme::current().fg,
+                ));
+                if let Some(model) = self.selected_codex_model() {
+                    lines.push(Line::from(""));
+                    lines.push(detail_line(
+                        "Model",
+                        &model.display_name,
+                        theme::current().cyan,
+                    ));
+                    lines.push(detail_line("Slug", &model.slug, theme::current().fg));
+                    lines.push(detail_line(
+                        "Context",
+                        &format_context(model.context_window),
+                        theme::current().yellow,
+                    ));
+                    lines.push(detail_line(
+                        "Reasoning",
+                        &model.supported_reasoning_efforts.join("/"),
+                        theme::current().purple,
+                    ));
+                    lines.push(detail_line(
+                        "Default",
+                        &model.default_reasoning_effort,
+                        theme::current().fg,
+                    ));
+                    lines.push(detail_line(
+                        "Modalities",
+                        &model.input_modalities.join(", "),
+                        theme::current().fg,
+                    ));
+                }
             } else if let Some(profile) = self.selected_profile() {
                 lines.push(Line::from(""));
                 lines.push(detail_line("Profile", &profile.name, theme::current().cyan));
@@ -654,6 +1196,115 @@ impl ProvidersTab {
         );
         f.render_widget(detail, area);
     }
+
+    fn render_codex_model_list(&mut self, f: &mut Frame, area: Rect) {
+        let focused = self.panel == Panel::ProfileList;
+        let block = Block::bordered()
+            .border_set(ratatui::symbols::border::ROUNDED)
+            .title(format!(
+                "{} ({})",
+                lang::current().models_title,
+                self.codex_models.len()
+            ))
+            .border_style(Style::default().fg(if focused {
+                theme::current().cyan
+            } else {
+                theme::current().dim
+            }));
+        if self
+            .selected_provider()
+            .is_some_and(|provider| provider.codex_catalog == CodexCatalog::BuiltIn)
+        {
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        lang::pick(
+                            "Uses the Codex built-in model catalog",
+                            "使用 Codex 内置模型目录",
+                        ),
+                        Style::default().fg(theme::current().comment),
+                    ))
+                    .centered(),
+                ])
+                .block(block),
+                area,
+            );
+            return;
+        }
+        if self.codex_models.is_empty() {
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        lang::pick("No third-party models configured", "尚未配置第三方模型"),
+                        Style::default().fg(theme::current().comment),
+                    ))
+                    .centered(),
+                ])
+                .block(block),
+                area,
+            );
+            return;
+        }
+        let items = self
+            .codex_models
+            .iter()
+            .enumerate()
+            .map(|(index, model)| {
+                let selected = index == self.selected_profile_idx;
+                let active = self.active_provider
+                    == self
+                        .selected_provider()
+                        .map(|p| p.id.as_str())
+                        .unwrap_or("")
+                    && self.active_codex_model == model.slug;
+                ListItem::new(vec![
+                    Line::from(vec![
+                        Span::styled(
+                            format!(
+                                "{}{}",
+                                if selected { "› " } else { "  " },
+                                model.display_name
+                            ),
+                            Style::default().fg(if selected {
+                                theme::current().cyan
+                            } else {
+                                theme::current().fg
+                            }),
+                        ),
+                        if active {
+                            Span::styled(" ●", Style::default().fg(theme::current().green))
+                        } else {
+                            Span::raw("")
+                        },
+                    ]),
+                    Line::from(vec![
+                        Span::raw("    "),
+                        Span::styled(&model.slug, Style::default().fg(theme::current().comment)),
+                        Span::styled(" · ", Style::default().fg(theme::current().dim)),
+                        Span::styled(
+                            format_context(model.context_window),
+                            Style::default().fg(theme::current().comment),
+                        ),
+                        Span::styled(" · ", Style::default().fg(theme::current().dim)),
+                        Span::styled(
+                            &model.default_reasoning_effort,
+                            Style::default().fg(theme::current().comment),
+                        ),
+                    ]),
+                    Line::from(""),
+                ])
+            })
+            .collect::<Vec<_>>();
+        f.render_stateful_widget(
+            List::new(items)
+                .block(block)
+                .highlight_style(Style::default()),
+            area,
+            &mut self.profile_state,
+        );
+    }
 }
 
 fn detail_line(label: &str, value: &str, color: Color) -> Line<'static> {
@@ -666,22 +1317,50 @@ fn detail_line(label: &str, value: &str, color: Color) -> Line<'static> {
     ])
 }
 
+fn format_context(tokens: u64) -> String {
+    if tokens >= 1_000_000 && tokens % 1_000_000 == 0 {
+        format!("{}M", tokens / 1_000_000)
+    } else if tokens >= 1_000 && tokens % 1_000 == 0 {
+        format!("{}K", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
+}
+
 impl TabContent for ProvidersTab {
     fn render(&mut self, f: &mut Frame, area: Rect) {
         let popup_area = f.area();
         let (provider_area, profile_area, detail_area) = if self.app == AppType::Codex {
-            if area.width >= 86 {
-                let [providers, detail] = Layout::default()
+            if area.width >= 112 {
+                let [providers, models, detail] = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+                    .constraints([
+                        Constraint::Percentage(30),
+                        Constraint::Percentage(34),
+                        Constraint::Percentage(36),
+                    ])
                     .areas(area);
-                (providers, Rect::default(), detail)
-            } else {
-                let [providers, detail] = Layout::default()
+                (providers, models, detail)
+            } else if area.width >= 86 {
+                let [providers, right] = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                    .areas(area);
+                let [models, detail] = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([Constraint::Percentage(55), Constraint::Min(8)])
+                    .constraints([Constraint::Percentage(50), Constraint::Min(10)])
+                    .areas(right);
+                (providers, models, detail)
+            } else {
+                let [providers, models, detail] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Percentage(32),
+                        Constraint::Percentage(32),
+                        Constraint::Min(10),
+                    ])
                     .areas(area);
-                (providers, Rect::default(), detail)
+                (providers, models, detail)
             }
         } else if area.width >= 96 {
             let [providers, right] = Layout::default()
@@ -739,7 +1418,11 @@ impl TabContent for ProvidersTab {
                         Span::styled(" \u{b7} ", Style::default().fg(theme::current().dim)),
                         Span::styled(
                             if self.app == AppType::Codex {
-                                p.api_url.clone()
+                                if p.codex_catalog == CodexCatalog::Custom {
+                                    format!("{} models", p.models.len())
+                                } else {
+                                    "built-in catalog".into()
+                                }
                             } else {
                                 format!("{} {}", p.profiles.len(), lang::current().profiles_count)
                             },
@@ -770,6 +1453,7 @@ impl TabContent for ProvidersTab {
         f.render_stateful_widget(prov_list, provider_area, &mut self.provider_state);
 
         if self.app == AppType::Codex {
+            self.render_codex_model_list(f, profile_area);
             self.render_selection_detail(f, detail_area);
             if self.provider_form.is_some() {
                 self.render_provider_form(f, popup_area);
@@ -777,8 +1461,14 @@ impl TabContent for ProvidersTab {
             if self.confirm_action.is_some() {
                 self.render_confirm_popup(f, popup_area);
             }
+            if self.codex_model_form.is_some() {
+                self.render_codex_model_form(f, popup_area);
+            }
             if self.message.is_some() {
                 self.render_message_popup(f, popup_area);
+            }
+            if self.content_popup.is_some() {
+                self.render_content_popup(f, popup_area);
             }
             return;
         }
@@ -880,9 +1570,32 @@ impl TabContent for ProvidersTab {
         if self.message.is_some() {
             self.render_message_popup(f, popup_area);
         }
+        if self.content_popup.is_some() {
+            self.render_content_popup(f, popup_area);
+        }
     }
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
+        if let Some(popup) = self.content_popup.as_mut() {
+            match code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.content_popup = None,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    popup.scroll = popup.scroll.saturating_add(1).min(popup.max_scroll)
+                }
+                KeyCode::Char('k') | KeyCode::Up => popup.scroll = popup.scroll.saturating_sub(1),
+                KeyCode::PageDown => {
+                    popup.scroll = popup
+                        .scroll
+                        .saturating_add(popup.page_height)
+                        .min(popup.max_scroll)
+                }
+                KeyCode::PageUp => popup.scroll = popup.scroll.saturating_sub(popup.page_height),
+                KeyCode::Home => popup.scroll = 0,
+                KeyCode::End => popup.scroll = popup.max_scroll,
+                _ => {}
+            }
+            return true;
+        }
         if self.message.is_some() {
             if matches!(code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q')) {
                 self.message = None;
@@ -901,6 +1614,14 @@ impl TabContent for ProvidersTab {
                 _ => {
                     f.handle_key(code);
                 }
+            }
+            return true;
+        }
+        if let Some(ref mut form) = self.codex_model_form {
+            match code {
+                KeyCode::Esc => self.codex_model_form = None,
+                KeyCode::Enter => self.commit_codex_model(),
+                _ => form.handle_key(code),
             }
             return true;
         }
@@ -934,6 +1655,8 @@ impl TabContent for ProvidersTab {
                             Some(ProviderAction::Delete) => {
                                 if self.panel == Panel::ProviderList {
                                     self.do_delete_provider();
+                                } else if self.app == AppType::Codex {
+                                    self.do_delete_codex_model();
                                 } else {
                                     self.do_delete();
                                 }
@@ -961,32 +1684,77 @@ impl TabContent for ProvidersTab {
 
     fn shortcut_groups(&self) -> Vec<Vec<(String, Color)>> {
         if self.app == AppType::Codex {
-            return vec![
-                vec![
-                    (" J/K ".into(), theme::current().comment),
-                    (lang::current().sc_nav.into(), theme::current().comment),
+            return match self.panel {
+                Panel::ProviderList => vec![
+                    vec![
+                        (" J/K ".into(), theme::current().comment),
+                        (lang::current().sc_nav.into(), theme::current().comment),
+                    ],
+                    vec![
+                        (" ⏎  ".into(), theme::current().comment),
+                        (
+                            lang::current().models_title.into(),
+                            theme::current().comment,
+                        ),
+                    ],
+                    vec![
+                        (" A ".into(), theme::current().comment),
+                        (lang::current().sc_add.into(), theme::current().comment),
+                    ],
+                    vec![
+                        (" E ".into(), theme::current().comment),
+                        (lang::current().sc_edit.into(), theme::current().comment),
+                    ],
+                    vec![
+                        (" D ".into(), theme::current().comment),
+                        (lang::current().sc_delete.into(), theme::current().comment),
+                    ],
+                    vec![
+                        (" Q ".into(), theme::current().comment),
+                        (lang::current().sc_quit.into(), theme::current().comment),
+                    ],
                 ],
-                vec![
-                    (" ⏎  ".into(), theme::current().comment),
-                    (lang::current().sc_switch.into(), theme::current().comment),
+                Panel::ProfileList => vec![
+                    vec![
+                        (" J/K ".into(), theme::current().comment),
+                        (lang::current().sc_nav.into(), theme::current().comment),
+                    ],
+                    vec![
+                        (" H/← ".into(), theme::current().comment),
+                        (lang::current().sc_back.into(), theme::current().comment),
+                    ],
+                    vec![
+                        (" ⏎  ".into(), theme::current().comment),
+                        (lang::current().sc_switch.into(), theme::current().comment),
+                    ],
+                    vec![
+                        (" A ".into(), theme::current().comment),
+                        (lang::current().sc_add.into(), theme::current().comment),
+                    ],
+                    vec![
+                        (" E ".into(), theme::current().comment),
+                        (lang::current().sc_edit.into(), theme::current().comment),
+                    ],
+                    vec![
+                        (" D ".into(), theme::current().comment),
+                        (lang::current().sc_delete.into(), theme::current().comment),
+                    ],
+                    vec![
+                        (" C ".into(), theme::current().comment),
+                        (
+                            lang::pick("Catalog", "目录").into(),
+                            theme::current().comment,
+                        ),
+                    ],
+                    vec![
+                        (" V ".into(), theme::current().comment),
+                        (
+                            lang::pick("Preview", "预览").into(),
+                            theme::current().comment,
+                        ),
+                    ],
                 ],
-                vec![
-                    (" A ".into(), theme::current().comment),
-                    (lang::current().sc_add.into(), theme::current().comment),
-                ],
-                vec![
-                    (" E ".into(), theme::current().comment),
-                    (lang::current().sc_edit.into(), theme::current().comment),
-                ],
-                vec![
-                    (" D ".into(), theme::current().comment),
-                    (lang::current().sc_delete.into(), theme::current().comment),
-                ],
-                vec![
-                    (" Q ".into(), theme::current().comment),
-                    (lang::current().sc_quit.into(), theme::current().comment),
-                ],
-            ];
+            };
         }
         match self.panel {
             Panel::ProviderList => vec![
@@ -1081,19 +1849,26 @@ impl ProvidersTab {
             }
             KeyCode::Enter => {
                 if self.app == AppType::Codex {
-                    if !self.providers.is_empty() {
-                        self.confirm_action = Some(ProviderAction::Switch);
-                        self.confirm_button = 0;
-                    }
+                    self.panel = Panel::ProfileList;
+                    self.profile_state.select(if self.codex_models.is_empty() {
+                        None
+                    } else {
+                        Some(self.selected_profile_idx)
+                    });
                 } else {
                     self.panel = Panel::ProfileList;
                     self.refresh_providers();
                     self.profile_state.select(Some(self.selected_profile_idx));
                 }
             }
-            KeyCode::Char('l') | KeyCode::Right if self.app == AppType::Claude => {
+            KeyCode::Char('l') | KeyCode::Right => {
                 self.panel = Panel::ProfileList;
-                self.profile_state.select(if self.profiles.is_empty() {
+                let empty = if self.app == AppType::Codex {
+                    self.codex_models.is_empty()
+                } else {
+                    self.profiles.is_empty()
+                };
+                self.profile_state.select(if empty {
                     None
                 } else {
                     Some(self.selected_profile_idx)
@@ -1117,6 +1892,9 @@ impl ProvidersTab {
     }
 
     fn handle_profile_keys(&mut self, code: KeyCode) -> bool {
+        if self.app == AppType::Codex {
+            return self.handle_codex_model_keys(code);
+        }
         if self.is_searching {
             match code {
                 KeyCode::Esc => {
@@ -1198,6 +1976,86 @@ impl ProvidersTab {
         }
         true
     }
+
+    fn handle_codex_model_keys(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Tab | KeyCode::BackTab => return false,
+            KeyCode::Esc | KeyCode::Char('h') | KeyCode::Left => {
+                self.panel = Panel::ProviderList;
+                self.provider_state.select(Some(self.selected_provider_idx));
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                let len = self.codex_models.len();
+                if len > 0 {
+                    self.selected_profile_idx = (self.selected_profile_idx + 1) % len;
+                    self.profile_state.select(Some(self.selected_profile_idx));
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                let len = self.codex_models.len();
+                if len > 0 {
+                    self.selected_profile_idx = if self.selected_profile_idx == 0 {
+                        len - 1
+                    } else {
+                        self.selected_profile_idx - 1
+                    };
+                    self.profile_state.select(Some(self.selected_profile_idx));
+                }
+            }
+            KeyCode::Enter => {
+                let built_in = self
+                    .selected_provider()
+                    .is_some_and(|provider| provider.codex_catalog == CodexCatalog::BuiltIn);
+                if built_in || !self.codex_models.is_empty() {
+                    self.confirm_action = Some(ProviderAction::Switch);
+                    self.confirm_button = 0;
+                }
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => self.do_add_codex_model(),
+            KeyCode::Char('e') | KeyCode::Char('E') => self.do_edit_codex_model(),
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                if let Some(model) = self.selected_codex_model() {
+                    if !model.source.can_delete() {
+                        self.message = Some(lang::current().msg_cannot_delete_sys_profile.into());
+                    } else {
+                        self.confirm_action = Some(ProviderAction::Delete);
+                        self.confirm_button = 0;
+                    }
+                }
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => self.show_catalog_status(),
+            KeyCode::Char('v') | KeyCode::Char('V') => self.preview_codex_model(),
+            _ => return false,
+        }
+        true
+    }
+}
+
+fn wrap_display_lines(content: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut output = Vec::new();
+    for source in content.lines() {
+        if source.is_empty() {
+            output.push(String::new());
+            continue;
+        }
+        let mut line = String::new();
+        let mut line_width = 0usize;
+        for ch in source.chars() {
+            let char_width = super::super::widgets::shared::display_width(&ch.to_string());
+            if line_width + char_width > width && !line.is_empty() {
+                output.push(std::mem::take(&mut line));
+                line_width = 0;
+            }
+            line.push(ch);
+            line_width += char_width;
+        }
+        output.push(line);
+    }
+    if output.is_empty() {
+        output.push(String::new());
+    }
+    output
 }
 
 fn source_label(s: crate::core::models::Source) -> &'static str {

@@ -1,6 +1,6 @@
 use super::connection::Db;
-use crate::core::models::{Profile, Provider, Source};
-use rusqlite::params;
+use crate::core::models::{CodexModel, Profile, Provider, Source};
+use rusqlite::{params, types::Type};
 
 // ── Providers ──
 
@@ -8,32 +8,168 @@ impl Db {
     pub fn insert_provider(&self, p: &Provider, app_type: &str) -> Result<(), rusqlite::Error> {
         let source_str: &str = p.source.as_str();
         self.conn().execute(
-            "INSERT INTO providers (id, app_type, name, api_url, api_key, source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO providers (id, app_type, name, api_url, api_key, codex_catalog, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id, app_type) DO UPDATE SET
                 name=excluded.name, api_url=excluded.api_url,
-                api_key=excluded.api_key, source=excluded.source",
-            params![p.id, app_type, p.name, p.api_url, p.api_key, source_str],
+                api_key=excluded.api_key, codex_catalog=excluded.codex_catalog,
+                source=excluded.source",
+            params![
+                p.id,
+                app_type,
+                p.name,
+                p.api_url,
+                p.api_key,
+                p.codex_catalog.as_str(),
+                source_str
+            ],
         )?;
         Ok(())
     }
 
     pub fn get_providers(&self, app_type: &str) -> Result<Vec<Provider>, rusqlite::Error> {
         let mut stmt = self.conn().prepare(
-            "SELECT id, name, api_url, api_key, source FROM providers WHERE app_type = ?1 ORDER BY name",
+            "SELECT id, name, api_url, api_key, codex_catalog, source FROM providers WHERE app_type = ?1 ORDER BY name",
         )?;
         let rows = stmt.query_map(params![app_type], |row| {
-            let source_str: String = row.get(4)?;
+            let catalog: String = row.get(4)?;
+            let source_str: String = row.get(5)?;
             Ok(Provider {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 api_url: row.get(2)?,
                 api_key: row.get(3)?,
+                codex_catalog: catalog.parse().map_err(|_| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        Type::Text,
+                        format!("invalid Codex catalog value: {}", catalog).into(),
+                    )
+                })?,
                 profiles: vec![],
+                models: vec![],
                 source: source_str.parse().unwrap_or(Source::System),
             })
         })?;
         rows.collect()
+    }
+
+    pub fn insert_codex_model(
+        &self,
+        provider_id: &str,
+        model: &CodexModel,
+    ) -> Result<(), rusqlite::Error> {
+        let efforts = serde_json::to_string(&model.supported_reasoning_efforts)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+        let modalities = serde_json::to_string(&model.input_modalities)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+        let transaction = self.conn().unchecked_transaction()?;
+        if model.default {
+            transaction.execute(
+                "UPDATE codex_models SET is_default=0 WHERE provider_id=?1",
+                params![provider_id],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO codex_models
+             (provider_id, slug, display_name, description, context_window, max_context_window,
+              effective_context_window_percent, default_reasoning_effort,
+              supported_reasoning_efforts, input_modalities, supports_parallel_tool_calls,
+              support_verbosity, default_verbosity, supports_search_tool, is_default, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             ON CONFLICT(provider_id, slug) DO UPDATE SET
+              display_name=excluded.display_name, description=excluded.description,
+              context_window=excluded.context_window, max_context_window=excluded.max_context_window,
+              effective_context_window_percent=excluded.effective_context_window_percent,
+              default_reasoning_effort=excluded.default_reasoning_effort,
+              supported_reasoning_efforts=excluded.supported_reasoning_efforts,
+              input_modalities=excluded.input_modalities,
+              supports_parallel_tool_calls=excluded.supports_parallel_tool_calls,
+              support_verbosity=excluded.support_verbosity, default_verbosity=excluded.default_verbosity,
+              supports_search_tool=excluded.supports_search_tool, is_default=excluded.is_default,
+              source=excluded.source",
+            params![provider_id, model.slug, model.display_name, model.description,
+                model.context_window as i64, model.max_context_window.map(|value| value as i64),
+                model.effective_context_window_percent as i64, model.default_reasoning_effort,
+                efforts, modalities,
+                model.supports_parallel_tool_calls, model.support_verbosity, model.default_verbosity,
+                model.supports_search_tool, model.default, model.source.as_str()],
+        )?;
+        transaction.commit()
+    }
+
+    pub fn get_codex_models(&self, provider_id: &str) -> Result<Vec<CodexModel>, rusqlite::Error> {
+        let mut stmt = self.conn().prepare(
+            "SELECT slug, display_name, description, context_window, max_context_window,
+             effective_context_window_percent, default_reasoning_effort, supported_reasoning_efforts,
+             input_modalities, supports_parallel_tool_calls, support_verbosity, default_verbosity,
+             supports_search_tool, is_default, source
+             FROM codex_models WHERE provider_id = ?1 ORDER BY is_default DESC, display_name",
+        )?;
+        let rows = stmt.query_map(params![provider_id], |row| {
+            let efforts: String = row.get(7)?;
+            let modalities: String = row.get(8)?;
+            let source: String = row.get(14)?;
+            Ok(CodexModel {
+                slug: row.get(0)?,
+                display_name: row.get(1)?,
+                description: row.get(2)?,
+                context_window: row.get::<_, i64>(3)? as u64,
+                max_context_window: row.get::<_, Option<i64>>(4)?.map(|value| value as u64),
+                effective_context_window_percent: row.get::<_, i64>(5)? as u8,
+                default_reasoning_effort: row.get(6)?,
+                supported_reasoning_efforts: serde_json::from_str(&efforts).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(7, Type::Text, error.into())
+                })?,
+                input_modalities: serde_json::from_str(&modalities).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(8, Type::Text, error.into())
+                })?,
+                supports_parallel_tool_calls: row.get(9)?,
+                support_verbosity: row.get(10)?,
+                default_verbosity: row.get(11)?,
+                supports_search_tool: row.get(12)?,
+                default: row.get(13)?,
+                source: source.parse().unwrap_or(Source::User),
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn delete_codex_model(&self, provider_id: &str, slug: &str) -> Result<(), rusqlite::Error> {
+        self.conn().execute(
+            "DELETE FROM codex_models WHERE provider_id=?1 AND slug=?2",
+            params![provider_id, slug],
+        )?;
+        Ok(())
+    }
+
+    /// Replace system-defined Codex models while preserving user overrides.
+    pub fn sync_system_codex_models(&self, providers: &[Provider]) -> Result<(), rusqlite::Error> {
+        let transaction = self.conn().unchecked_transaction()?;
+        transaction.execute("DELETE FROM codex_models WHERE source='system'", [])?;
+        for provider in providers {
+            for model in &provider.models {
+                let efforts = serde_json::to_string(&model.supported_reasoning_efforts)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+                let modalities = serde_json::to_string(&model.input_modalities)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+                transaction.execute(
+                    "INSERT OR IGNORE INTO codex_models
+                     (provider_id, slug, display_name, description, context_window, max_context_window,
+                      effective_context_window_percent, default_reasoning_effort,
+                      supported_reasoning_efforts, input_modalities, supports_parallel_tool_calls,
+                      support_verbosity, default_verbosity, supports_search_tool, is_default, source)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 'system')",
+                    params![provider.id, model.slug, model.display_name, model.description,
+                        model.context_window as i64, model.max_context_window.map(|value| value as i64),
+                        model.effective_context_window_percent as i64, model.default_reasoning_effort,
+                        efforts, modalities,
+                        model.supports_parallel_tool_calls, model.support_verbosity, model.default_verbosity,
+                        model.supports_search_tool, model.default],
+                )?;
+            }
+        }
+        transaction.commit()
     }
 
     pub fn delete_provider(&self, id: &str, app_type: &str) -> Result<(), rusqlite::Error> {
@@ -42,6 +178,12 @@ impl Db {
         if app_type == "claude" {
             self.conn()
                 .execute("DELETE FROM profiles WHERE provider_id = ?1", params![id])?;
+        }
+        if app_type == "codex" {
+            self.conn().execute(
+                "DELETE FROM codex_models WHERE provider_id = ?1",
+                params![id],
+            )?;
         }
         self.conn().execute(
             "DELETE FROM providers WHERE id = ?1 AND app_type = ?2",
@@ -67,15 +209,31 @@ impl Db {
             toml_ids.push(&p.id);
             // INSERT only if not already present (user row takes priority)
             transaction.execute(
-                "INSERT OR IGNORE INTO providers (id, app_type, name, api_url, api_key, source)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'system')",
-                params![p.id, app_type, p.name, p.api_url, p.api_key],
+                "INSERT OR IGNORE INTO providers
+                 (id, app_type, name, api_url, api_key, codex_catalog, source)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'system')",
+                params![
+                    p.id,
+                    app_type,
+                    p.name,
+                    p.api_url,
+                    p.api_key,
+                    p.codex_catalog.as_str()
+                ],
             )?;
             // UPDATE existing system providers with latest TOML values
             transaction.execute(
-                "UPDATE providers SET name=?1, api_url=?2, api_key=?3, source='system'
-                 WHERE id=?4 AND app_type=?5 AND source='system'",
-                params![p.name, p.api_url, p.api_key, p.id, app_type],
+                "UPDATE providers SET name=?1, api_url=?2, api_key=?3,
+                 codex_catalog=?4, source='system'
+                 WHERE id=?5 AND app_type=?6 AND source='system'",
+                params![
+                    p.name,
+                    p.api_url,
+                    p.api_key,
+                    p.codex_catalog.as_str(),
+                    p.id,
+                    app_type
+                ],
             )?;
             // Sync profiles: INSERT OR IGNORE for system ones
             for pr in &p.profiles {

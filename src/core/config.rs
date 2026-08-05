@@ -1,5 +1,6 @@
 use crate::core::models::{
-    validate_profile, validate_provider, AppType, Profile, Provider, Source,
+    validate_codex_provider_models, validate_profile, validate_provider, AppType, CodexCatalog,
+    CodexModel, Profile, Provider, Source,
 };
 use crate::db::Db;
 use anyhow::Context;
@@ -66,7 +67,11 @@ struct ProviderToml {
     api_url: String,
     api_key: String,
     #[serde(default)]
+    codex_catalog: CodexCatalog,
+    #[serde(default)]
     profiles: Vec<ProfileToml>,
+    #[serde(default)]
+    models: Vec<CodexModel>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +102,7 @@ fn into_provider(p: ProviderToml, include_profiles: bool) -> Provider {
         name: p.name,
         api_url: p.api_url,
         api_key: p.api_key,
+        codex_catalog: p.codex_catalog,
         profiles: if include_profiles {
             p.profiles
                 .into_iter()
@@ -125,6 +131,17 @@ fn into_provider(p: ProviderToml, include_profiles: bool) -> Provider {
                 .collect()
         } else {
             vec![]
+        },
+        models: if include_profiles {
+            vec![]
+        } else {
+            p.models
+                .into_iter()
+                .map(|mut model| {
+                    model.source = Source::System;
+                    model
+                })
+                .collect()
         },
         source: Source::System,
     }
@@ -171,6 +188,14 @@ impl ConfigManager {
                     )
                 })?;
             }
+            if !provider.models.is_empty() {
+                validate_codex_provider_models(provider).with_context(|| {
+                    format!(
+                        "Invalid Codex models for '{}' in defaults.toml",
+                        provider.id
+                    )
+                })?;
+            }
         }
 
         // Sync TOML providers/profiles to DB (source='system').
@@ -179,6 +204,8 @@ impl ConfigManager {
             .context("Failed to sync Claude defaults to DB")?;
         db.sync_system_providers("codex", &system_codex_providers)
             .context("Failed to sync Codex defaults to DB")?;
+        db.sync_system_codex_models(&system_codex_providers)
+            .context("Failed to sync Codex models to DB")?;
 
         Ok(ConfigManager {
             db,
@@ -213,6 +240,7 @@ impl ConfigManager {
                 existing.name = dp.name.clone();
                 existing.api_url = dp.api_url.clone();
                 existing.api_key = dp.api_key.clone();
+                existing.codex_catalog = dp.codex_catalog;
                 existing.source = dp.source; // Use DB source (system/user)
             } else {
                 result.push(dp.clone());
@@ -222,6 +250,18 @@ impl ConfigManager {
         if app == AppType::Codex {
             for provider in &mut result {
                 provider.profiles.clear();
+                let db_models = self.db.get_codex_models(&provider.id)?;
+                for model in db_models {
+                    if let Some(existing) = provider
+                        .models
+                        .iter_mut()
+                        .find(|item| item.slug == model.slug)
+                    {
+                        *existing = model;
+                    } else {
+                        provider.models.push(model);
+                    }
+                }
             }
             return Ok(result);
         }

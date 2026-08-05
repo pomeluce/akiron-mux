@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AppType {
@@ -91,9 +92,191 @@ pub struct Provider {
     pub api_url: String,
     pub api_key: String,
     #[serde(default)]
+    pub codex_catalog: CodexCatalog,
+    #[serde(default)]
     pub profiles: Vec<Profile>,
+    #[serde(default)]
+    pub models: Vec<CodexModel>,
     #[serde(skip)]
     pub source: Source,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodexCatalog {
+    #[default]
+    BuiltIn,
+    Custom,
+}
+
+impl CodexCatalog {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BuiltIn => "built-in",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+impl std::str::FromStr for CodexCatalog {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "built-in" => Ok(Self::BuiltIn),
+            "custom" => Ok(Self::Custom),
+            _ => Err(()),
+        }
+    }
+}
+
+fn default_context_window() -> u64 {
+    128_000
+}
+
+fn default_effective_context_percent() -> u8 {
+    95
+}
+
+fn default_reasoning_effort() -> String {
+    "medium".into()
+}
+
+fn default_reasoning_efforts() -> Vec<String> {
+    vec!["low".into(), "medium".into(), "high".into()]
+}
+
+fn default_input_modalities() -> Vec<String> {
+    vec!["text".into()]
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_verbosity() -> String {
+    "low".into()
+}
+
+/// Model metadata used to generate Codex's custom model catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexModel {
+    pub slug: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_context_window")]
+    pub context_window: u64,
+    #[serde(default)]
+    pub max_context_window: Option<u64>,
+    #[serde(default = "default_effective_context_percent")]
+    pub effective_context_window_percent: u8,
+    #[serde(default = "default_reasoning_effort")]
+    pub default_reasoning_effort: String,
+    #[serde(default = "default_reasoning_efforts")]
+    pub supported_reasoning_efforts: Vec<String>,
+    #[serde(default = "default_input_modalities")]
+    pub input_modalities: Vec<String>,
+    #[serde(default = "default_true")]
+    pub supports_parallel_tool_calls: bool,
+    #[serde(default = "default_true")]
+    pub support_verbosity: bool,
+    #[serde(default = "default_verbosity")]
+    pub default_verbosity: String,
+    #[serde(default)]
+    pub supports_search_tool: bool,
+    #[serde(default)]
+    pub default: bool,
+    #[serde(skip)]
+    pub source: Source,
+}
+
+pub fn validate_codex_model(model: &CodexModel) -> anyhow::Result<()> {
+    validate_text("Model slug", &model.slug, 256)?;
+    validate_text("Model display name", &model.display_name, 100)?;
+    if !model.description.is_empty() {
+        validate_text("Model description", &model.description, 500)?;
+    }
+    if model.context_window == 0 {
+        anyhow::bail!("Context window must be greater than zero");
+    }
+    if model.context_window > i64::MAX as u64
+        || model
+            .max_context_window
+            .is_some_and(|value| value > i64::MAX as u64)
+    {
+        anyhow::bail!("Context windows exceed the supported storage range");
+    }
+    if model
+        .max_context_window
+        .is_some_and(|max| max < model.context_window)
+    {
+        anyhow::bail!("Maximum context window must not be smaller than context window");
+    }
+    if !(1..=100).contains(&model.effective_context_window_percent) {
+        anyhow::bail!("Effective context window percent must be between 1 and 100");
+    }
+    let allowed_efforts = [
+        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    ];
+    if model.supported_reasoning_efforts.is_empty()
+        || model
+            .supported_reasoning_efforts
+            .iter()
+            .any(|effort| !allowed_efforts.contains(&effort.as_str()))
+    {
+        anyhow::bail!("Supported reasoning efforts contain an invalid value");
+    }
+    if model
+        .supported_reasoning_efforts
+        .iter()
+        .collect::<HashSet<_>>()
+        .len()
+        != model.supported_reasoning_efforts.len()
+    {
+        anyhow::bail!("Supported reasoning efforts must not contain duplicates");
+    }
+    if !model
+        .supported_reasoning_efforts
+        .contains(&model.default_reasoning_effort)
+    {
+        anyhow::bail!("Default reasoning effort must be supported by the model");
+    }
+    if model.input_modalities.is_empty()
+        || model
+            .input_modalities
+            .iter()
+            .any(|modality| !matches!(modality.as_str(), "text" | "image"))
+    {
+        anyhow::bail!("Input modalities must contain text and/or image");
+    }
+    if model.input_modalities.iter().collect::<HashSet<_>>().len() != model.input_modalities.len() {
+        anyhow::bail!("Input modalities must not contain duplicates");
+    }
+    if !matches!(model.default_verbosity.as_str(), "low" | "medium" | "high") {
+        anyhow::bail!("Default verbosity must be low, medium or high");
+    }
+    Ok(())
+}
+
+pub fn validate_codex_provider_models(provider: &Provider) -> anyhow::Result<()> {
+    let mut slugs = HashSet::new();
+    let mut default_count = 0usize;
+    for model in &provider.models {
+        validate_codex_model(model)?;
+        if !slugs.insert(model.slug.as_str()) {
+            anyhow::bail!(
+                "Provider '{}' contains duplicate model slug '{}'",
+                provider.id,
+                model.slug
+            );
+        }
+        default_count += usize::from(model.default);
+    }
+    if default_count > 1 {
+        anyhow::bail!("Provider '{}' has more than one default model", provider.id);
+    }
+    Ok(())
 }
 
 pub fn validate_provider(provider: &Provider) -> anyhow::Result<()> {

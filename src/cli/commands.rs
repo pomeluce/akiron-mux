@@ -181,7 +181,9 @@ fn handle_add(mgr: &ConfigManager, what: &str, parent_provider: Option<&str>) ->
                 name,
                 api_url,
                 api_key,
+                codex_catalog: Default::default(),
                 profiles: vec![],
+                models: vec![],
                 source: crate::core::models::Source::User,
             };
             crate::core::models::validate_provider(&p)?;

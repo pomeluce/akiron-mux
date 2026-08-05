@@ -125,6 +125,77 @@
                   name = lib.mkOption { type = lib.types.str; };
                   api_url = lib.mkOption { type = lib.types.str; };
                   api_key = lib.mkOption { type = lib.types.str; };
+                  codex_catalog = lib.mkOption {
+                    type = lib.types.enum [
+                      "built-in"
+                      "custom"
+                    ];
+                    default = "built-in";
+                  };
+                  models = lib.mkOption {
+                    type = lib.types.listOf (
+                      lib.types.submodule {
+                        freeformType = format.type;
+                        options = {
+                          slug = lib.mkOption { type = lib.types.str; };
+                          display_name = lib.mkOption { type = lib.types.str; };
+                          description = lib.mkOption {
+                            type = lib.types.str;
+                            default = "";
+                          };
+                          context_window = lib.mkOption {
+                            type = lib.types.int;
+                            default = 128000;
+                          };
+                          max_context_window = lib.mkOption {
+                            type = lib.types.nullOr lib.types.int;
+                            default = null;
+                          };
+                          effective_context_window_percent = lib.mkOption {
+                            type = lib.types.int;
+                            default = 95;
+                          };
+                          default_reasoning_effort = lib.mkOption {
+                            type = lib.types.str;
+                            default = "medium";
+                          };
+                          supported_reasoning_efforts = lib.mkOption {
+                            type = lib.types.listOf lib.types.str;
+                            default = [
+                              "low"
+                              "medium"
+                              "high"
+                            ];
+                          };
+                          input_modalities = lib.mkOption {
+                            type = lib.types.listOf lib.types.str;
+                            default = [ "text" ];
+                          };
+                          supports_parallel_tool_calls = lib.mkOption {
+                            type = lib.types.bool;
+                            default = true;
+                          };
+                          support_verbosity = lib.mkOption {
+                            type = lib.types.bool;
+                            default = true;
+                          };
+                          default_verbosity = lib.mkOption {
+                            type = lib.types.str;
+                            default = "low";
+                          };
+                          supports_search_tool = lib.mkOption {
+                            type = lib.types.bool;
+                            default = false;
+                          };
+                          default = lib.mkOption {
+                            type = lib.types.bool;
+                            default = false;
+                          };
+                        };
+                      }
+                    );
+                    default = [ ];
+                  };
                 };
               };
             in

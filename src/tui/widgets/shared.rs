@@ -18,6 +18,16 @@ pub fn centered_rect(w: u16, h: u16, r: Rect) -> Rect {
     }
 }
 
+/// Clear one extra column on each side so an underlying double-width glyph
+/// cannot straddle a popup border.
+pub fn clear_popup_area(f: &mut Frame, popup: Rect) {
+    let bounds = f.area();
+    let left = popup.x.saturating_sub(1).max(bounds.x);
+    let right = popup.right().saturating_add(1).min(bounds.right());
+    let clear_area = Rect::new(left, popup.y, right.saturating_sub(left), popup.height);
+    f.render_widget(Clear, clear_area);
+}
+
 /// Render a search box input widget
 pub fn render_search_box(f: &mut Frame, area: Rect, query: &str, is_searching: bool) {
     let l = lang::current();
@@ -59,30 +69,20 @@ pub fn render_shortcut_bar(f: &mut Frame, area: Rect, groups: &[Vec<(String, Col
         })
         .collect();
 
-    let width = area.width.saturating_sub(2).max(10) as usize; // account for border
-    let mut rows: Vec<Line> = Vec::new();
-    let mut cur: Vec<Span> = Vec::new();
-    let mut cur_w = 0usize;
-
-    for g in &group_spans {
-        let gw: usize = g.iter().map(|s| s.width()).sum();
-        if cur_w + gw > width && !cur.is_empty() {
-            rows.push(Line::from(std::mem::take(&mut cur)));
-            cur_w = 0;
-        }
-        if !cur.is_empty() {
-            cur.push(sep());
-            cur_w += 2;
-        }
-        cur.extend(g.clone());
-        cur_w += gw;
-    }
-    if !cur.is_empty() {
-        rows.push(Line::from(cur));
-    }
-    if rows.is_empty() {
-        rows.push(Line::default());
-    }
+    let width = area.width.saturating_sub(2).max(10) as usize;
+    let rows = shortcut_rows(width, groups)
+        .into_iter()
+        .map(|indices| {
+            let mut spans = Vec::new();
+            for index in indices {
+                if !spans.is_empty() {
+                    spans.push(sep());
+                }
+                spans.extend(group_spans[index].clone());
+            }
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
 
     f.render_widget(
         Paragraph::new(rows).centered().block(
@@ -96,23 +96,30 @@ pub fn render_shortcut_bar(f: &mut Frame, area: Rect, groups: &[Vec<(String, Col
 
 pub fn shortcut_line_count(available_width: u16, groups: &[Vec<(String, Color)>]) -> usize {
     let width = available_width.saturating_sub(2).max(10) as usize;
-    let mut lines = 1usize;
-    let mut current = 0usize;
-    for group in groups {
+    shortcut_rows(width, groups).len()
+}
+
+fn shortcut_rows(width: usize, groups: &[Vec<(String, Color)>]) -> Vec<Vec<usize>> {
+    let mut rows = vec![Vec::new()];
+    let mut current_width = 0usize;
+    for (index, group) in groups.iter().enumerate() {
         if group.len() < 2 {
             continue;
         }
-        let group_width = display_width(&group[0].0) + 2 + display_width(&group[1].0);
-        if current > 0 && current + group_width > width {
-            lines += 1;
-            current = 0;
+        // Span::width uses the same terminal-width rules as the renderer.
+        let group_width = Span::raw(&group[0].0).width() + 2 + Span::raw(&group[1].0).width();
+        let separator_width = usize::from(!rows.last().is_some_and(Vec::is_empty)) * 2;
+        if current_width + separator_width + group_width > width
+            && !rows.last().is_some_and(Vec::is_empty)
+        {
+            rows.push(Vec::new());
+            current_width = 0;
         }
-        if current > 0 {
-            current += 2;
-        }
-        current += group_width;
+        let separator_width = usize::from(!rows.last().is_some_and(Vec::is_empty)) * 2;
+        rows.last_mut().expect("shortcut row exists").push(index);
+        current_width += separator_width + group_width;
     }
-    lines
+    rows
 }
 
 pub fn render_status_bar(f: &mut Frame, area: Rect, text: &str) {
@@ -178,7 +185,7 @@ pub fn render_confirm_popup(
             .title(Line::from(title).centered())
             .border_style(Style::default().fg(confirm_color)),
     );
-    f.render_widget(Clear, popup);
+    clear_popup_area(f, popup);
     f.render_widget(p, popup);
 }
 
@@ -217,7 +224,7 @@ pub fn render_message_popup(f: &mut Frame, area: Rect, msg: &str) {
             .title(Line::from(lang::current().notice_title).centered())
             .border_style(Style::default().fg(theme::current().yellow)),
     );
-    f.render_widget(Clear, popup);
+    clear_popup_area(f, popup);
     f.render_widget(p, popup);
 }
 
@@ -291,7 +298,7 @@ pub fn truncate(s: &str, max: usize) -> String {
 
 /// Display-width of a string: ASCII = 1, CJK/etc = 2 columns
 pub fn display_width(s: &str) -> usize {
-    s.chars().map(|c| if c > '\u{7e}' { 2 } else { 1 }).sum()
+    Span::raw(s).width()
 }
 
 /// Pad a label to the given display-width, appending `: ` suffix
@@ -301,5 +308,58 @@ pub fn pad_label(label: &str, w: usize) -> String {
         format!("{}: ", label)
     } else {
         format!("{}{}: ", label, " ".repeat(w - dw))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{centered_rect, shortcut_line_count, shortcut_rows};
+    use ratatui::{layout::Rect, style::Color, text::Span};
+
+    fn groups() -> Vec<Vec<(String, Color)>> {
+        [
+            (" J/K ", "导航"),
+            (" H/← ", "返回"),
+            (" C ", "Catalog"),
+            (" V ", "Preview"),
+        ]
+        .into_iter()
+        .map(|(key, label)| {
+            vec![
+                (key.to_string(), Color::White),
+                (label.to_string(), Color::White),
+            ]
+        })
+        .collect()
+    }
+
+    #[test]
+    fn shortcut_height_uses_the_same_rows_as_rendering() {
+        let groups = groups();
+        for available_width in 20u16..80 {
+            let inner_width = available_width.saturating_sub(2).max(10) as usize;
+            assert_eq!(
+                shortcut_line_count(available_width, &groups),
+                shortcut_rows(inner_width, &groups).len()
+            );
+        }
+    }
+
+    #[test]
+    fn shortcut_wrap_accounts_for_separator_width() {
+        let groups = groups();
+        let group_width = |index: usize| {
+            Span::raw(&groups[index][0].0).width() + 2 + Span::raw(&groups[index][1].0).width()
+        };
+        let first_two_width = group_width(0) + 2 + group_width(1);
+        assert_eq!(shortcut_rows(first_two_width - 1, &groups)[0], vec![0]);
+        assert_eq!(shortcut_rows(first_two_width, &groups)[0], vec![0, 1]);
+    }
+
+    #[test]
+    fn centered_popup_leaves_equal_horizontal_margins() {
+        let area = Rect::new(0, 0, 120, 40);
+        let popup = centered_rect(98, 30, area);
+        assert_eq!(popup.x - area.x, area.right() - popup.right());
     }
 }

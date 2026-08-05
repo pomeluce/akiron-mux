@@ -262,13 +262,6 @@ impl App {
         let active_context = self.providers_tab.active_context();
         render_app_bar(f, app_bar_area, self.current_app, is_proxy, &active_context);
 
-        match self.active_tab {
-            Tab::Providers => self.providers_tab.render(f, content_area),
-            Tab::Usage => self.usage_tab.render(f, content_area),
-            Tab::History => self.history_tab.render(f, content_area),
-            Tab::Settings => self.settings_tab.render(f, content_area),
-        }
-
         let status = match self.active_tab {
             Tab::Providers => self.providers_tab.status_text(),
             Tab::Usage => self.usage_tab.status_text(),
@@ -278,5 +271,13 @@ impl App {
         render_status_bar(f, status_area, &status);
 
         render_shortcut_bar(f, sc_area, &groups);
+
+        // Pages render last so their modal overlays cannot be overwritten by global bars.
+        match self.active_tab {
+            Tab::Providers => self.providers_tab.render(f, content_area),
+            Tab::Usage => self.usage_tab.render(f, content_area),
+            Tab::History => self.history_tab.render(f, content_area),
+            Tab::Settings => self.settings_tab.render(f, content_area),
+        }
     }
 }

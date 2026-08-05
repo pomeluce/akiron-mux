@@ -1,4 +1,4 @@
-use ccswitch::core::models::{Profile, Source};
+use ccswitch::core::models::{CodexModel, Profile, Source};
 use ccswitch::db::sessions::SessionRecord;
 use ccswitch::db::Db;
 use rusqlite::Connection;
@@ -150,4 +150,50 @@ fn provider_scoped_profiles_and_app_scoped_sessions_do_not_collide() {
         1
     );
     assert_eq!(db.query_sessions("codex", None, None, 10).unwrap().len(), 1);
+}
+
+#[test]
+fn selecting_a_default_codex_model_clears_the_previous_default_atomically() {
+    let dir = tempdir().unwrap();
+    let db = Db::open(&dir.path().join("ccswitch.db")).unwrap();
+    let model = |slug: &str| CodexModel {
+        slug: slug.into(),
+        display_name: slug.into(),
+        description: String::new(),
+        context_window: 128_000,
+        max_context_window: None,
+        effective_context_window_percent: 95,
+        default_reasoning_effort: "medium".into(),
+        supported_reasoning_efforts: vec!["medium".into()],
+        input_modalities: vec!["text".into()],
+        supports_parallel_tool_calls: true,
+        support_verbosity: true,
+        default_verbosity: "low".into(),
+        supports_search_tool: false,
+        default: true,
+        source: Source::User,
+    };
+    db.insert_codex_model("provider", &model("one")).unwrap();
+    db.insert_codex_model("provider", &model("two")).unwrap();
+
+    let models = db.get_codex_models("provider").unwrap();
+    assert_eq!(models.iter().filter(|model| model.default).count(), 1);
+    assert_eq!(
+        models.iter().find(|model| model.default).unwrap().slug,
+        "two"
+    );
+}
+
+#[test]
+fn corrupt_codex_model_json_is_reported_instead_of_silently_defaulted() {
+    let dir = tempdir().unwrap();
+    let db = Db::open(&dir.path().join("ccswitch.db")).unwrap();
+    db.conn()
+        .execute(
+            "INSERT INTO codex_models (provider_id, slug, display_name,
+             supported_reasoning_efforts) VALUES ('provider', 'coder', 'Coder', 'invalid')",
+            [],
+        )
+        .unwrap();
+    assert!(db.get_codex_models("provider").is_err());
 }

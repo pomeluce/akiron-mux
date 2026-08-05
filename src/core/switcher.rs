@@ -1,3 +1,4 @@
+use crate::core::codex_catalog::{default_catalog_path, write_catalog};
 use crate::core::config::ConfigManager;
 use crate::core::env::{resolve_api_key, resolve_codex_api_key, ApiKeyUnavailable};
 use crate::core::models::{
@@ -160,6 +161,7 @@ fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Pa
 
 /// Switch Codex to a provider and update ~/.codex/config.toml + auth.json.
 /// Existing unrelated settings and provider definitions are preserved.
+#[allow(dead_code)]
 pub fn switch_codex_provider(
     mgr: &ConfigManager,
     provider_id: &str,
@@ -170,6 +172,38 @@ pub fn switch_codex_provider(
         .find_provider_for(AppType::Codex, provider_id)?
         .with_context(|| format!("Codex provider not found: {}", provider_id))?;
     validate_provider(&provider)?;
+    let model_slug = provider
+        .models
+        .iter()
+        .find(|model| model.default)
+        .or_else(|| provider.models.first())
+        .map(|model| model.slug.as_str());
+    switch_codex_model(mgr, provider_id, model_slug, config_path, auth_path)
+}
+
+pub fn switch_codex_model(
+    mgr: &ConfigManager,
+    provider_id: &str,
+    model_slug: Option<&str>,
+    config_path: Option<&Path>,
+    auth_path: Option<&Path>,
+) -> Result<Provider> {
+    let provider = mgr
+        .find_provider_for(AppType::Codex, provider_id)?
+        .with_context(|| format!("Codex provider not found: {}", provider_id))?;
+    validate_provider(&provider)?;
+    let selected_model = if provider.codex_catalog == crate::core::models::CodexCatalog::Custom {
+        let slug = model_slug.context("This third-party Codex provider has no configured model")?;
+        Some(
+            provider
+                .models
+                .iter()
+                .find(|model| model.slug == slug)
+                .with_context(|| format!("Codex model not found: {}/{}", provider_id, slug))?,
+        )
+    } else {
+        None
+    };
     let auth_token = resolve_codex_api_key(&provider.api_key);
     if auth_token.is_empty() {
         return Err(
@@ -185,6 +219,10 @@ pub fn switch_codex_provider(
     let auth_path = auth_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| codex_dir.join("auth.json"));
+    let catalog_path = config_path
+        .parent()
+        .map(|dir| dir.join("ccswitch/models.json"))
+        .unwrap_or_else(default_catalog_path);
 
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -212,6 +250,34 @@ pub fn switch_codex_provider(
     }
 
     config["model_provider"] = toml_edit::value(CODEX_MANAGED_PROVIDER_ID);
+    let previous_managed_model = config
+        .get("ccswitch")
+        .and_then(toml_edit::Item::as_table)
+        .and_then(|table| table.get("last_switch"))
+        .and_then(toml_edit::Item::as_table)
+        .and_then(|table| table.get("model"))
+        .and_then(toml_edit::Item::as_str)
+        .map(str::to_owned);
+    if let Some(model) = selected_model {
+        let all_providers = mgr.list_providers_for(AppType::Codex)?;
+        write_catalog(&catalog_path, &all_providers)?;
+        config["model"] = toml_edit::value(&model.slug);
+        config["model_reasoning_effort"] = toml_edit::value(&model.default_reasoning_effort);
+        config["model_catalog_json"] = toml_edit::value(catalog_path.to_string_lossy().to_string());
+    } else if config
+        .get("model_catalog_json")
+        .and_then(toml_edit::Item::as_str)
+        .is_some_and(|path| path == catalog_path.to_string_lossy())
+    {
+        config.as_table_mut().remove("model_catalog_json");
+    }
+    if selected_model.is_none()
+        && previous_managed_model.as_deref()
+            == config.get("model").and_then(toml_edit::Item::as_str)
+    {
+        config.as_table_mut().remove("model");
+        config.as_table_mut().remove("model_reasoning_effort");
+    }
     if config
         .as_table()
         .get("model_providers")
@@ -288,6 +354,11 @@ pub fn switch_codex_provider(
         .and_then(toml_edit::Item::as_table_mut)
         .expect("last_switch table created above");
     last_switch.insert("source", toml_edit::value(&provider.id));
+    if let Some(model) = selected_model {
+        last_switch.insert("model", toml_edit::value(&model.slug));
+    } else {
+        last_switch.remove("model");
+    }
     last_switch.insert("at", toml_edit::value(now));
     if ccswitch
         .iter()
@@ -295,12 +366,17 @@ pub fn switch_codex_provider(
     {
         ccswitch.set_implicit(true);
     }
-    std::fs::write(&config_path, config.to_string())?;
-
     auth["OPENAI_API_KEY"] = json!(auth_token);
     write_private_file(&auth_path, serde_json::to_string_pretty(&auth)?.as_bytes())?;
+    write_private_file(&config_path, config.to_string().as_bytes())?;
 
     mgr.set_setting(AppType::Codex.active_provider_key(), &provider.id)?;
+    mgr.set_setting(
+        "active_codex_model",
+        selected_model
+            .map(|model| model.slug.as_str())
+            .unwrap_or(""),
+    )?;
     Ok(provider)
 }
 
@@ -338,7 +414,7 @@ pub fn remove_codex_provider(
                 ccswitch.remove("last_switch");
             }
         }
-        std::fs::write(config_path, config.to_string())?;
+        write_private_file(&config_path, config.to_string().as_bytes())?;
     }
     if mgr
         .get_setting(AppType::Codex.active_provider_key())
@@ -354,6 +430,15 @@ fn write_private_file(path: &Path, content: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let temporary = path.with_file_name(format!(
+        ".{}.{}.ccswitch.tmp",
+        file_name,
+        std::process::id()
+    ));
     let mut options = std::fs::OpenOptions::new();
     options.create(true).truncate(true).write(true);
     #[cfg(unix)]
@@ -361,7 +446,7 @@ fn write_private_file(path: &Path, content: &[u8]) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path)?;
+    let mut file = options.open(&temporary)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -369,5 +454,11 @@ fn write_private_file(path: &Path, content: &[u8]) -> Result<()> {
     }
     file.write_all(content)?;
     file.sync_all()?;
+    drop(file);
+    #[cfg(windows)]
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    std::fs::rename(temporary, path)?;
     Ok(())
 }

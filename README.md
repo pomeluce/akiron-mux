@@ -8,7 +8,7 @@ Claude Code 模型配置管理器 — Rust TUI + CLI 工具。
 
 - **Claude 四模型配置**：每个 Profile 独立配置 Opus、Sonnet、Haiku、Subagent
 - **双应用顶栏**：顶栏显示 `Claude | Codex`，Space 切换当前应用上下文
-- **Codex Provider 管理**：Codex 只配置 Provider，无需 Profile，统一通过 `model_providers.ccs` 保持会话关联
+- **Codex 第三方模型**：Provider 可使用 Codex 内置目录，或维护多个 Responses API 模型并生成聚合 Catalog
 - **一键切换**：本地模式直接写入 `~/.claude/settings.json`，代理模式更新 SQLite
 - **会话历史**：分别扫描 Claude Code 与 Codex 本地会话文件，支持搜索、过滤
 - **代理服务**：本地 HTTP 代理（端口 15721），自动模型名转换，支持 systemd / launchd / 计划任务后台运行
@@ -288,15 +288,32 @@ id = "codex-proxy"
 name = "Codex Proxy"
 api_url = "https://api.example.com/v1"
 api_key = "env:OPENAI_API_KEY"
+codex_catalog = "custom"
+
+[[codex_providers.models]]
+slug = "third-party-coder"
+display_name = "Third-party Coder"
+description = "Agentic coding model"
+context_window = 128000
+max_context_window = 256000
+effective_context_window_percent = 95
+default_reasoning_effort = "high"
+supported_reasoning_efforts = ["low", "high"]
+input_modalities = ["text"]
+supports_parallel_tool_calls = true
+support_verbosity = true
+default_verbosity = "low"
+supports_search_tool = false
+default = true
 ```
 
 ### API Key 格式
 
-| 格式           | 说明                                             |
-| -------------- | ------------------------------------------------ |
+| 格式           | 说明                                                                   |
+| -------------- | ---------------------------------------------------------------------- |
 | `env:VAR_NAME` | 从进程环境、HM 的 `envVars` 文件或 `~/.config/ccswitch/env` 读取，推荐 |
-| `sk-xxx...`    | 直接文本（明文存储，不安全）                     |
-| 空值           | Claude 使用 `$CLAUDE_API_KEY`；Codex 使用 `$OPENAI_API_KEY` |
+| `sk-xxx...`    | 直接文本（明文存储，不安全）                                           |
+| 空值           | Claude 使用 `$CLAUDE_API_KEY`；Codex 使用 `$OPENAI_API_KEY`            |
 
 ## TUI 快捷键
 
@@ -310,7 +327,7 @@ api_key = "env:OPENAI_API_KEY"
 
 ### 模型标签页
 
-Claude Code 使用两层导航：左侧 Provider 列表 → 右侧 Profile 列表。Codex 只显示 Provider 列表，`Enter` 直接切换。
+Claude Code 使用 Provider → Profile，Codex 使用 Provider → Model。Codex 内置目录 Provider 不需要维护模型；第三方 Provider 必须配置至少一个模型。
 
 | 键          | 功能                              |
 | ----------- | --------------------------------- |
@@ -380,10 +397,13 @@ Opus/Sonnet/Haiku 变量不在 settings.json 中设置，由 proxy server 透明
 
 ### Codex Provider 切换
 
-Codex 不使用 Profile，也不区分 local/proxy。切换 Provider 时保留配置文件中的其他设置和已有 Provider，并统一更新 `model_providers.ccs`，使不同上游的会话始终绑定同一个 Codex Provider ID：
+Codex 不使用 Claude Profile，也不区分 local/proxy。第三方 Responses Provider 的所有模型会聚合写入 `~/.codex/ccswitch/models.json`。切换时保留其他设置和已有 Provider，并统一更新 `model_providers.ccs`：
 
 ```toml
 model_provider = "ccs"
+model = "third-party-coder"
+model_reasoning_effort = "high"
+model_catalog_json = "/home/user/.codex/ccswitch/models.json"
 
 [model_providers.ccs]
 name = "Codex Proxy"
@@ -403,6 +423,8 @@ at = "2026-01-01 12:00:00"
   "OPENAI_API_KEY": "解析后的 provider API key"
 }
 ```
+
+固定的 Codex Catalog 兼容字段由 CCSwitch 的版本化模板生成；每个模型只配置名称、上下文、推理档位和能力差异。切回 `codex_catalog = "built-in"` 的 Provider 时，CCSwitch 只移除自己管理的 `model_catalog_json` 引用，不覆盖其他外部 Catalog 文件。
 
 ## 模式
 

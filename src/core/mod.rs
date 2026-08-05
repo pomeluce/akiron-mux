@@ -1,3 +1,4 @@
+pub mod codex_catalog;
 pub mod config;
 pub mod env;
 pub mod import;

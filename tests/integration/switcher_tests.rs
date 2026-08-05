@@ -1,6 +1,8 @@
 use ccswitch::core::config::ConfigManager;
-use ccswitch::core::models::{Provider, Source, SwitchMode};
-use ccswitch::core::switcher::{remove_codex_provider, switch_codex_provider, switch_profile};
+use ccswitch::core::models::{CodexCatalog, CodexModel, Provider, Source, SwitchMode};
+use ccswitch::core::switcher::{
+    remove_codex_provider, switch_codex_model, switch_codex_provider, switch_profile,
+};
 use ccswitch::db::Db;
 use std::fs;
 use tempfile::tempdir;
@@ -67,6 +69,133 @@ default = true
             0o600
         );
     }
+}
+
+#[test]
+fn custom_codex_model_writes_aggregated_catalog_and_model_config() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("ccswitch.db");
+    let db = Db::open(&db_path).unwrap();
+    let provider = Provider {
+        id: "third-party".into(),
+        name: "Third Party".into(),
+        api_url: "https://api.example.com".into(),
+        api_key: "sk-third-party".into(),
+        codex_catalog: CodexCatalog::Custom,
+        profiles: vec![],
+        models: vec![],
+        source: Source::User,
+    };
+    db.insert_provider(&provider, "codex").unwrap();
+    let model = CodexModel {
+        slug: "third-party-coder".into(),
+        display_name: "Third-party Coder".into(),
+        description: "Agentic coding model".into(),
+        context_window: 128_000,
+        max_context_window: Some(256_000),
+        effective_context_window_percent: 95,
+        default_reasoning_effort: "high".into(),
+        supported_reasoning_efforts: vec!["low".into(), "high".into()],
+        input_modalities: vec!["text".into()],
+        supports_parallel_tool_calls: true,
+        support_verbosity: true,
+        default_verbosity: "low".into(),
+        supports_search_tool: false,
+        default: true,
+        source: Source::User,
+    };
+    db.insert_codex_model(&provider.id, &model).unwrap();
+    drop(db);
+    let mgr = ConfigManager::new(&db_path, None).unwrap();
+    let config_path = dir.path().join("codex/config.toml");
+    let auth_path = dir.path().join("codex/auth.json");
+    switch_codex_model(
+        &mgr,
+        &provider.id,
+        Some(&model.slug),
+        Some(&config_path),
+        Some(&auth_path),
+    )
+    .unwrap();
+
+    let config: toml::Value = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(config["model"].as_str(), Some("third-party-coder"));
+    assert_eq!(config["model_reasoning_effort"].as_str(), Some("high"));
+    let catalog_path = config["model_catalog_json"].as_str().unwrap();
+    let catalog: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(catalog_path).unwrap()).unwrap();
+    assert_eq!(catalog["models"][0]["slug"], "third-party-coder");
+    assert_eq!(catalog["models"][0]["context_window"], 128_000);
+    assert_eq!(
+        mgr.get_setting("active_codex_model").as_deref(),
+        Some("third-party-coder")
+    );
+}
+
+#[test]
+fn switching_from_custom_to_builtin_removes_ccswitch_model_fields() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("ccswitch.db");
+    let db = Db::open(&db_path).unwrap();
+    for provider in [
+        Provider {
+            id: "custom".into(),
+            name: "Custom".into(),
+            api_url: "https://custom.example.com".into(),
+            api_key: "sk-custom".into(),
+            codex_catalog: CodexCatalog::Custom,
+            profiles: vec![],
+            models: vec![],
+            source: Source::User,
+        },
+        Provider {
+            id: "builtin".into(),
+            name: "Builtin".into(),
+            api_url: "https://api.openai.com/v1".into(),
+            api_key: "sk-builtin".into(),
+            codex_catalog: CodexCatalog::BuiltIn,
+            profiles: vec![],
+            models: vec![],
+            source: Source::User,
+        },
+    ] {
+        db.insert_provider(&provider, "codex").unwrap();
+    }
+    let model = CodexModel {
+        slug: "custom-coder".into(),
+        display_name: "Custom Coder".into(),
+        description: String::new(),
+        context_window: 128_000,
+        max_context_window: None,
+        effective_context_window_percent: 95,
+        default_reasoning_effort: "medium".into(),
+        supported_reasoning_efforts: vec!["medium".into()],
+        input_modalities: vec!["text".into()],
+        supports_parallel_tool_calls: true,
+        support_verbosity: true,
+        default_verbosity: "low".into(),
+        supports_search_tool: false,
+        default: true,
+        source: Source::User,
+    };
+    db.insert_codex_model("custom", &model).unwrap();
+    drop(db);
+    let mgr = ConfigManager::new(&db_path, None).unwrap();
+    let config_path = dir.path().join("codex/config.toml");
+    let auth_path = dir.path().join("codex/auth.json");
+    switch_codex_model(
+        &mgr,
+        "custom",
+        Some("custom-coder"),
+        Some(&config_path),
+        Some(&auth_path),
+    )
+    .unwrap();
+    switch_codex_model(&mgr, "builtin", None, Some(&config_path), Some(&auth_path)).unwrap();
+    let config: toml::Value = toml::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
+    assert!(config.get("model_catalog_json").is_none());
+    assert!(config.get("model").is_none());
+    assert!(config.get("model_reasoning_effort").is_none());
 }
 
 #[test]
@@ -165,7 +294,9 @@ fn test_switch_codex_provider_preserves_existing_config() {
             name: "Codex Proxy".into(),
             api_url: "https://codex.example.com/v1".into(),
             api_key: "sk-codex".into(),
+            codex_catalog: Default::default(),
             profiles: vec![],
+            models: vec![],
             source: Source::User,
         },
         "codex",

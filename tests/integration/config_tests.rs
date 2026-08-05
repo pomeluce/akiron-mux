@@ -63,6 +63,80 @@ api_key = "env:OPENAI_API_KEY"
 }
 
 #[test]
+fn test_custom_codex_models_load_from_defaults() {
+    let dir = tempdir().unwrap();
+    let defaults_path = dir.path().join("defaults.toml");
+    fs::write(
+        &defaults_path,
+        r#"
+version = 1
+[[codex_providers]]
+id = "third-party"
+name = "Third Party"
+api_url = "https://api.example.com"
+api_key = "env:THIRD_PARTY_KEY"
+codex_catalog = "custom"
+
+[[codex_providers.models]]
+slug = "third-party-coder"
+display_name = "Third-party Coder"
+context_window = 128000
+default_reasoning_effort = "high"
+supported_reasoning_efforts = ["low", "high"]
+default = true
+"#,
+    )
+    .unwrap();
+    let mgr = ConfigManager::new(&dir.path().join("ccswitch.db"), Some(&defaults_path)).unwrap();
+    let providers = mgr.list_providers_for(AppType::Codex).unwrap();
+    assert_eq!(
+        providers[0].codex_catalog,
+        ccswitch::core::models::CodexCatalog::Custom
+    );
+    assert_eq!(providers[0].models.len(), 1);
+    assert_eq!(providers[0].models[0].slug, "third-party-coder");
+}
+
+#[test]
+fn removed_system_codex_models_do_not_remain_in_database() {
+    let dir = tempdir().unwrap();
+    let defaults_path = dir.path().join("defaults.toml");
+    fs::write(
+        &defaults_path,
+        r#"
+[[codex_providers]]
+id = "third-party"
+name = "Third Party"
+api_url = "https://api.example.com"
+api_key = "env:THIRD_PARTY_KEY"
+codex_catalog = "custom"
+[[codex_providers.models]]
+slug = "old-model"
+display_name = "Old Model"
+"#,
+    )
+    .unwrap();
+    let db_path = dir.path().join("ccswitch.db");
+    ConfigManager::new(&db_path, Some(&defaults_path)).unwrap();
+    fs::write(
+        &defaults_path,
+        r#"
+[[codex_providers]]
+id = "third-party"
+name = "Third Party"
+api_url = "https://api.example.com"
+api_key = "env:THIRD_PARTY_KEY"
+codex_catalog = "custom"
+"#,
+    )
+    .unwrap();
+    let mgr = ConfigManager::new(&db_path, Some(&defaults_path)).unwrap();
+    assert!(mgr.list_providers_for(AppType::Codex).unwrap()[0]
+        .models
+        .is_empty());
+}
+
+#[test]
 fn test_user_override() {
     let dir = tempdir().unwrap();
     let defaults_path = dir.path().join("defaults.toml");
@@ -96,7 +170,9 @@ subagent = "sys-subagent"
             name: "My Override".into(),
             api_url: "https://my.example.com".into(),
             api_key: "sk-xyz".into(),
+            codex_catalog: Default::default(),
             profiles: vec![],
+            models: vec![],
             source: Source::User,
         },
         "claude",

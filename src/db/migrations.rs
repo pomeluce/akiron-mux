@@ -2,7 +2,7 @@ use anyhow::Context;
 use rusqlite::Connection;
 
 /// Current schema version. Increment each time we add a migration step.
-pub(crate) const CURRENT_USER_VERSION: i32 = 6;
+pub(crate) const CURRENT_USER_VERSION: i32 = 7;
 
 /// Apply schema migrations on the given connection.
 pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), anyhow::Error> {
@@ -37,7 +37,56 @@ pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), anyhow::Error> {
     if version < 6 {
         migrate_v6(conn).context("migrate v6")?;
     }
+    if version < 7 {
+        migrate_v7(conn).context("migrate v7")?;
+    }
 
+    Ok(())
+}
+
+fn migrate_v7(conn: &Connection) -> Result<(), anyhow::Error> {
+    let providers_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='providers')",
+        [],
+        |row| row.get(0),
+    )?;
+    let transaction = conn.unchecked_transaction()?;
+    if providers_exists {
+        let has_catalog: bool = transaction
+            .prepare("PRAGMA table_info(providers)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|column| column == "codex_catalog");
+        if !has_catalog {
+            transaction.execute_batch(
+                "ALTER TABLE providers ADD COLUMN codex_catalog TEXT NOT NULL DEFAULT 'built-in';",
+            )?;
+        }
+    }
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS codex_models (
+             provider_id TEXT NOT NULL,
+             slug TEXT NOT NULL,
+             display_name TEXT NOT NULL,
+             description TEXT NOT NULL DEFAULT '',
+             context_window INTEGER NOT NULL DEFAULT 128000,
+             max_context_window INTEGER,
+             effective_context_window_percent INTEGER NOT NULL DEFAULT 95,
+             default_reasoning_effort TEXT NOT NULL DEFAULT 'medium',
+             supported_reasoning_efforts TEXT NOT NULL DEFAULT '[\"low\",\"medium\",\"high\"]',
+             input_modalities TEXT NOT NULL DEFAULT '[\"text\"]',
+             supports_parallel_tool_calls BOOLEAN NOT NULL DEFAULT 1,
+             support_verbosity BOOLEAN NOT NULL DEFAULT 1,
+             default_verbosity TEXT NOT NULL DEFAULT 'low',
+             supports_search_tool BOOLEAN NOT NULL DEFAULT 0,
+             is_default BOOLEAN NOT NULL DEFAULT 0,
+             source TEXT NOT NULL DEFAULT 'user',
+             PRIMARY KEY (provider_id, slug)
+         );",
+    )?;
+    transaction.pragma_update(None, "user_version", 7)?;
+    transaction.commit()?;
+    tracing::info!("Migration v7 complete: Codex custom model catalogs added");
     Ok(())
 }
 

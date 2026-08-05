@@ -1,4 +1,7 @@
-use ccswitch::core::models::{validate_profile, validate_provider, Profile, Provider, Source};
+use ccswitch::core::models::{
+    validate_codex_model, validate_codex_provider_models, validate_profile, validate_provider,
+    CodexModel, Profile, Provider, Source,
+};
 
 #[test]
 fn test_provider_deserialization() {
@@ -13,6 +16,76 @@ api_key = "env:DEEPSEEK_API_KEY"
     assert_eq!(p.name, "DeepSeek");
     assert_eq!(p.api_url, "https://api.deepseek.com/anthropic");
     assert_eq!(p.api_key, "env:DEEPSEEK_API_KEY");
+}
+
+#[test]
+fn codex_model_validation_checks_context_and_reasoning() {
+    let mut model = CodexModel {
+        slug: "third-party-coder".into(),
+        display_name: "Third-party Coder".into(),
+        description: String::new(),
+        context_window: 128_000,
+        max_context_window: Some(256_000),
+        effective_context_window_percent: 95,
+        default_reasoning_effort: "medium".into(),
+        supported_reasoning_efforts: vec!["low".into(), "medium".into(), "high".into()],
+        input_modalities: vec!["text".into()],
+        supports_parallel_tool_calls: true,
+        support_verbosity: true,
+        default_verbosity: "low".into(),
+        supports_search_tool: false,
+        default: true,
+        source: Source::User,
+    };
+    assert!(validate_codex_model(&model).is_ok());
+    model.default_reasoning_effort = "max".into();
+    assert!(validate_codex_model(&model).is_err());
+    model.default_reasoning_effort = "medium".into();
+    model.max_context_window = Some(64_000);
+    assert!(validate_codex_model(&model).is_err());
+    model.max_context_window = Some(256_000);
+    model.supported_reasoning_efforts.push("medium".into());
+    assert!(validate_codex_model(&model).is_err());
+    model.supported_reasoning_efforts.pop();
+    model.context_window = u64::MAX;
+    model.max_context_window = Some(u64::MAX);
+    assert!(validate_codex_model(&model).is_err());
+}
+
+#[test]
+fn codex_provider_models_reject_duplicate_slugs_and_defaults() {
+    let model = CodexModel {
+        slug: "coder".into(),
+        display_name: "Coder".into(),
+        description: String::new(),
+        context_window: 128_000,
+        max_context_window: None,
+        effective_context_window_percent: 95,
+        default_reasoning_effort: "medium".into(),
+        supported_reasoning_efforts: vec!["medium".into()],
+        input_modalities: vec!["text".into()],
+        supports_parallel_tool_calls: true,
+        support_verbosity: true,
+        default_verbosity: "low".into(),
+        supports_search_tool: false,
+        default: true,
+        source: Source::User,
+    };
+    let mut provider = Provider {
+        id: "provider".into(),
+        name: "Provider".into(),
+        api_url: "https://api.example.com".into(),
+        api_key: "key".into(),
+        codex_catalog: Default::default(),
+        profiles: vec![],
+        models: vec![model.clone(), model],
+        source: Source::User,
+    };
+    assert!(validate_codex_provider_models(&provider).is_err());
+    provider.models[1].slug = "coder-2".into();
+    assert!(validate_codex_provider_models(&provider).is_err());
+    provider.models[1].default = false;
+    assert!(validate_codex_provider_models(&provider).is_ok());
 }
 
 #[test]
@@ -54,7 +127,9 @@ fn provider_validation_rejects_unsafe_ids_urls_and_env_refs() {
         name: "Provider".into(),
         api_url: api_url.into(),
         api_key: api_key.into(),
+        codex_catalog: Default::default(),
         profiles: vec![],
+        models: vec![],
         source: Source::User,
     };
 

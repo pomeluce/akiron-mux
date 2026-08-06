@@ -106,7 +106,8 @@ fn custom_codex_model_writes_aggregated_catalog_and_model_config() {
     };
     db.insert_codex_model(&provider.id, &model).unwrap();
     drop(db);
-    let mgr = ConfigManager::new(&db_path, None).unwrap();
+    let defaults_path = dir.path().join("missing-defaults.toml");
+    let mgr = ConfigManager::new(&db_path, Some(&defaults_path)).unwrap();
     let config_path = dir.path().join("codex/config.toml");
     let auth_path = dir.path().join("codex/auth.json");
     switch_codex_model(
@@ -180,7 +181,8 @@ fn switching_from_custom_to_builtin_removes_ccswitch_model_fields() {
     };
     db.insert_codex_model("custom", &model).unwrap();
     drop(db);
-    let mgr = ConfigManager::new(&db_path, None).unwrap();
+    let defaults_path = dir.path().join("missing-defaults.toml");
+    let mgr = ConfigManager::new(&db_path, Some(&defaults_path)).unwrap();
     let config_path = dir.path().join("codex/config.toml");
     let auth_path = dir.path().join("codex/auth.json");
     switch_codex_model(

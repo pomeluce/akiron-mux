@@ -455,7 +455,8 @@ impl ProvidersTab {
         self.codex_models = if self.app == AppType::Codex {
             self.providers
                 .get(self.selected_provider_idx)
-                .map(|p| p.models.clone())
+                .filter(|provider| provider.codex_catalog == CodexCatalog::Custom)
+                .map(|provider| provider.models.clone())
                 .unwrap_or_default()
         } else {
             vec![]
@@ -865,7 +866,11 @@ impl ProvidersTab {
             None => return,
         };
         if self.app == AppType::Codex {
-            let model_slug = self.selected_codex_model().map(|model| model.slug.clone());
+            let model_slug = self
+                .selected_provider()
+                .filter(|provider| provider.codex_catalog == CodexCatalog::Custom)
+                .and_then(|_| self.selected_codex_model())
+                .map(|model| model.slug.clone());
             match crate::core::switcher::switch_codex_model(
                 &self.mgr,
                 &prov_id,
@@ -1693,7 +1698,13 @@ impl TabContent for ProvidersTab {
                     vec![
                         (" ⏎  ".into(), theme::current().comment),
                         (
-                            lang::current().models_title.into(),
+                            if self.selected_provider().is_some_and(|provider| {
+                                provider.codex_catalog == CodexCatalog::BuiltIn
+                            }) {
+                                lang::current().sc_switch.into()
+                            } else {
+                                lang::current().models_title.into()
+                            },
                             theme::current().comment,
                         ),
                     ],
@@ -1849,12 +1860,24 @@ impl ProvidersTab {
             }
             KeyCode::Enter => {
                 if self.app == AppType::Codex {
-                    self.panel = Panel::ProfileList;
-                    self.profile_state.select(if self.codex_models.is_empty() {
-                        None
-                    } else {
-                        Some(self.selected_profile_idx)
-                    });
+                    match self
+                        .selected_provider()
+                        .map(|provider| provider.codex_catalog)
+                    {
+                        Some(CodexCatalog::BuiltIn) => {
+                            self.confirm_action = Some(ProviderAction::Switch);
+                            self.confirm_button = 0;
+                        }
+                        Some(CodexCatalog::Custom) => {
+                            self.panel = Panel::ProfileList;
+                            self.profile_state.select(if self.codex_models.is_empty() {
+                                None
+                            } else {
+                                Some(self.selected_profile_idx)
+                            });
+                        }
+                        None => {}
+                    }
                 } else {
                     self.panel = Panel::ProfileList;
                     self.refresh_providers();
@@ -1862,6 +1885,20 @@ impl ProvidersTab {
                 }
             }
             KeyCode::Char('l') | KeyCode::Right => {
+                if self.app == AppType::Codex {
+                    match self
+                        .selected_provider()
+                        .map(|provider| provider.codex_catalog)
+                    {
+                        Some(CodexCatalog::BuiltIn) => {
+                            self.confirm_action = Some(ProviderAction::Switch);
+                            self.confirm_button = 0;
+                            return true;
+                        }
+                        Some(CodexCatalog::Custom) => {}
+                        None => return true,
+                    }
+                }
                 self.panel = Panel::ProfileList;
                 let empty = if self.app == AppType::Codex {
                     self.codex_models.is_empty()
@@ -2094,7 +2131,13 @@ fn compact_model_name(model: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::compact_model_name;
+    use super::{compact_model_name, Panel, ProviderAction, ProvidersTab};
+    use crate::core::config::ConfigManager;
+    use crate::core::models::{AppType, CodexCatalog, Provider, Source};
+    use crate::tui::tabs::TabContent;
+    use crossterm::event::KeyCode;
+    use std::rc::Rc;
+    use tempfile::{tempdir, TempDir};
 
     #[test]
     fn formats_profile_opus_model_for_list() {
@@ -2104,5 +2147,45 @@ mod tests {
         );
         assert_eq!(compact_model_name(" claude-opus-4 "), "claude-opus-4");
         assert_eq!(compact_model_name(""), "-");
+    }
+
+    fn codex_tab(catalog: CodexCatalog) -> (TempDir, ProvidersTab) {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("ccswitch.db");
+        let defaults_path = dir.path().join("missing-defaults.toml");
+        let mgr = Rc::new(ConfigManager::new(&db_path, Some(&defaults_path)).unwrap());
+        mgr.db()
+            .insert_provider(
+                &Provider {
+                    id: "test-provider".into(),
+                    name: "Test Provider".into(),
+                    api_url: "https://api.example.com".into(),
+                    api_key: "test-key".into(),
+                    codex_catalog: catalog,
+                    profiles: vec![],
+                    models: vec![],
+                    source: Source::User,
+                },
+                AppType::Codex.as_str(),
+            )
+            .unwrap();
+        let tab = ProvidersTab::new(mgr, AppType::Codex);
+        (dir, tab)
+    }
+
+    #[test]
+    fn builtin_codex_provider_enter_starts_switch_without_opening_models() {
+        let (_dir, mut tab) = codex_tab(CodexCatalog::BuiltIn);
+        assert!(tab.handle_key(KeyCode::Enter));
+        assert!(tab.panel == Panel::ProviderList);
+        assert!(tab.confirm_action == Some(ProviderAction::Switch));
+    }
+
+    #[test]
+    fn custom_codex_provider_enter_opens_models() {
+        let (_dir, mut tab) = codex_tab(CodexCatalog::Custom);
+        assert!(tab.handle_key(KeyCode::Enter));
+        assert!(tab.panel == Panel::ProfileList);
+        assert!(tab.confirm_action.is_none());
     }
 }

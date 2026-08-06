@@ -127,7 +127,9 @@ mod tests {
     #[test]
     fn managed_builtin_switch_does_not_import_unrelated_model() {
         let dir = tempdir().unwrap();
-        let mgr = ConfigManager::new(&dir.path().join("ccswitch.db"), None).unwrap();
+        let defaults_path = dir.path().join("missing-defaults.toml");
+        let mgr =
+            ConfigManager::new(&dir.path().join("ccswitch.db"), Some(&defaults_path)).unwrap();
         mgr.db()
             .insert_provider(
                 &Provider {

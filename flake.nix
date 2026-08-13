@@ -240,7 +240,7 @@
                 };
               };
               config = lib.mkIf cfg.enable {
-                environment.systemPackages = [ self.packages.${pkgs.system}.default ];
+                environment.systemPackages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.default ];
                 environment.etc."ccswitch/defaults.toml".source =
                   format.generate "ccswitch-system-defaults.toml" cfg.defaults;
               };
@@ -273,7 +273,7 @@
                 };
               };
               config = lib.mkIf cfg.enable {
-                home.packages = [ self.packages.${pkgs.system}.default ];
+                home.packages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.default ];
 
                 xdg.configFile."ccswitch/defaults.toml" =
                   let
@@ -299,7 +299,7 @@
                     WantedBy = [ "default.target" ];
                   };
                   Service = {
-                    ExecStart = "${self.packages.${pkgs.system}.default}/bin/ccs proxy serve";
+                    ExecStart = "${self.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/ccs proxy serve";
                     Restart = "on-failure";
                     RestartSec = "5";
                   }

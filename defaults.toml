@@ -1,12 +1,12 @@
 version = 1
 
-[[providers]]
+[[claude_providers]]
 id = "deepseek"
 name = "DeepSeek"
 api_url = "https://api.deepseek.com/anthropic"
 api_key = "env:DEEPSEEK_API_KEY"
 
-[[providers.profiles]]
+[[claude_providers.profiles]]
 id = "v4"
 name = "V4"
 opus = "deepseek-v4-pro[1m]"

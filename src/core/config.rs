@@ -43,12 +43,13 @@ fn default_config_path() -> PathBuf {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DefaultsFile {
     #[serde(default)]
     #[allow(dead_code)]
     version: u32,
     #[serde(default)]
-    providers: Vec<ProviderToml>,
+    claude_providers: Vec<ProviderToml>,
     #[serde(default)]
     codex_providers: Vec<ProviderToml>,
 }
@@ -142,7 +143,7 @@ impl ConfigManager {
             let content = std::fs::read_to_string(defaults_path)?;
             let defaults: DefaultsFile = toml::from_str(&content)?;
             (
-                defaults.providers.into_iter().map(|p| into_provider(p, true)).collect(),
+                defaults.claude_providers.into_iter().map(|p| into_provider(p, true)).collect(),
                 defaults.codex_providers.into_iter().map(|p| into_provider(p, false)).collect(),
             )
         } else {

@@ -38,7 +38,7 @@ Claude Code 模型配置管理器 — Rust TUI + CLI 工具。
             envVars = "%h/.config/ccswitch/env";
             defaults = {
               version = 1;
-              providers = [
+              claude_providers = [
                 {
                   id = "deepseek";
                   name = "DeepSeek";
@@ -98,7 +98,7 @@ Home Manager 会自动：
             enable = true;
             defaults = {
               version = 1;
-              providers = [ ... ];
+              claude_providers = [ ... ];
               codex_providers = [
                 {
                   id = "openai-api";
@@ -251,16 +251,18 @@ ccs man                          # 输出 roff 格式 man page
 
 ### defaults.toml
 
+Claude 与 Codex Provider 分别使用 `claude_providers` 和 `codex_providers`；旧的 `providers` 字段不再支持。
+
 ```toml
 version = 1
 
-[[providers]]
+[[claude_providers]]
 id = "deepseek"
 name = "DeepSeek"
 api_url = "https://api.deepseek.com/anthropic"
 api_key = "env:DEEPSEEK_API_KEY"
 
-[[providers.profiles]]
+[[claude_providers.profiles]]
 id = "v4"
 name = "V4"
 opus = "deepseek-v4-pro[1m]"
@@ -269,13 +271,13 @@ haiku = "deepseek-v4-flash"
 subagent = "deepseek-v4-flash"
 default = true
 
-[[providers]]
+[[claude_providers]]
 id = "openrouter"
 name = "OpenRouter"
 api_url = "https://openrouter.ai/api"
 api_key = "env:OPENROUTER_API_KEY"
 
-[[providers.profiles]]
+[[claude_providers.profiles]]
 id = "claude"
 name = "Claude"
 opus = "anthropic/claude-opus-4"
@@ -320,7 +322,7 @@ default = true
 ### 全局
 
 | 键                  | 功能             |
-| ------------------- | ---------------- |
+| ------------------- | ---------------- | ---------- |
 | `Tab` / `Shift+Tab` | 切换侧边栏标签页 |
 | `Space`             | 切换顶栏 `Claude | Codex` Tab |
 | `Q` / `q`           | 退出             |

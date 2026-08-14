@@ -13,12 +13,12 @@ fn test_switch_local_writes_settings_json() {
         &defaults_path,
         r#"
 version = 1
-[[providers]]
+[[claude_providers]]
 id = "p1"
 name = "Test"
 api_url = "https://api.test.com"
 api_key = "sk-test-key"
-[[providers.profiles]]
+[[claude_providers.profiles]]
 id = "prof1"
 name = "Default"
 opus = "opus-model"
@@ -175,12 +175,12 @@ fn invalid_claude_settings_are_not_overwritten() {
         &defaults_path,
         r#"
 version = 1
-[[providers]]
+[[claude_providers]]
 id = "p1"
 name = "Test"
 api_url = "https://api.test.com"
 api_key = "sk-test-key"
-[[providers.profiles]]
+[[claude_providers.profiles]]
 id = "prof1"
 name = "Default"
 opus = "opus"
@@ -207,12 +207,12 @@ fn test_switch_proxy_updates_sqlite() {
         &defaults_path,
         r#"
 version = 1
-[[providers]]
+[[claude_providers]]
 id = "p1"
 name = "Test"
 api_url = "https://api.test.com"
 api_key = "env:TEST_KEY"
-[[providers.profiles]]
+[[claude_providers.profiles]]
 id = "prof1"
 name = "Default"
 opus = "opus-model"

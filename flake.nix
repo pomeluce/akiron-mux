@@ -35,7 +35,7 @@
         {
           packages.default = rustPlatform.buildRustPackage {
             pname = "ccswitch";
-            version = "1.10.2";
+            version = "1.10.3";
             src = ./.;
             cargoLock = {
               lockFile = ./Cargo.lock;
@@ -200,13 +200,12 @@
               };
             in
             lib.types.submodule {
-              freeformType = format.type;
               options = {
                 version = lib.mkOption {
                   type = lib.types.int;
                   default = 1;
                 };
-                providers = lib.mkOption {
+                claude_providers = lib.mkOption {
                   type = lib.types.listOf providerType;
                   default = [ ];
                 };

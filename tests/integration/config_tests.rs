@@ -12,12 +12,12 @@ fn test_system_defaults_loaded() {
         &defaults_path,
         r#"
 version = 1
-[[providers]]
+[[claude_providers]]
 id = "test-provider"
 name = "Test Provider"
 api_url = "https://test.example.com"
 api_key = "env:TEST_KEY"
-[[providers.profiles]]
+[[claude_providers.profiles]]
 id = "test-profile"
 name = "Test Profile"
 opus = "model-opus"
@@ -36,6 +36,29 @@ default = true
     assert_eq!(providers[0].source, ccswitch::core::models::Source::System);
     assert_eq!(providers[0].profiles.len(), 1);
     assert_eq!(providers[0].profiles[0].name, "Test Profile");
+}
+
+#[test]
+fn legacy_providers_key_is_rejected() {
+    let dir = tempdir().unwrap();
+    let defaults_path = dir.path().join("defaults.toml");
+    fs::write(
+        &defaults_path,
+        r#"
+version = 1
+[[providers]]
+id = "legacy-provider"
+name = "Legacy Provider"
+api_url = "https://legacy.example.com"
+api_key = "env:LEGACY_KEY"
+"#,
+    )
+    .unwrap();
+
+    let error = ConfigManager::new(&dir.path().join("ccswitch.db"), Some(&defaults_path))
+        .err()
+        .expect("legacy providers key should be rejected");
+    assert!(error.to_string().contains("unknown field `providers`"));
 }
 
 #[test]
@@ -139,12 +162,12 @@ fn test_user_override() {
         &defaults_path,
         r#"
 version = 1
-[[providers]]
+[[claude_providers]]
 id = "p1"
 name = "System Provider"
 api_url = "https://system.example.com"
 api_key = "env:SYS_KEY"
-[[providers.profiles]]
+[[claude_providers.profiles]]
 id = "prof1"
 name = "System Profile"
 opus = "sys-opus"

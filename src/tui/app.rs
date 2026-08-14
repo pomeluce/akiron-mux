@@ -7,10 +7,7 @@ use ratatui::{backend::CrosstermBackend, Frame, Terminal};
 use crate::core::config::ConfigManager;
 use crate::core::models::AppType;
 
-use super::tabs::{
-    history::HistoryTab, providers::ProvidersTab, settings::SettingsTab, usage::UsageTab, Tab,
-    TabContent,
-};
+use super::tabs::{history::HistoryTab, providers::ProvidersTab, settings::SettingsTab, usage::UsageTab, Tab, TabContent};
 use super::theme;
 
 pub struct App {
@@ -29,22 +26,13 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(
-        db_path: &std::path::Path,
-        defaults_path: Option<&std::path::Path>,
-    ) -> anyhow::Result<Self> {
+    pub fn new(db_path: &std::path::Path, defaults_path: Option<&std::path::Path>) -> anyhow::Result<Self> {
         let mgr = Rc::new(ConfigManager::new(db_path, defaults_path)?);
         if let Err(e) = crate::core::import::import_codex_sessions(mgr.db()) {
             tracing::warn!("Failed to import Codex sessions: {}", e);
         }
-        let current_app = mgr
-            .get_setting("active_app")
-            .and_then(|value| value.parse().ok())
-            .unwrap_or_default();
-        let proxy_mode = mgr
-            .get_setting("proxy_mode")
-            .map(|v| v == "true")
-            .unwrap_or(false);
+        let current_app = mgr.get_setting("active_app").and_then(|value| value.parse().ok()).unwrap_or_default();
+        let proxy_mode = mgr.get_setting("proxy_mode").map(|v| v == "true").unwrap_or(false);
         let providers_tab = ProvidersTab::new(mgr.clone(), current_app);
         let usage_tab = UsageTab::new(mgr.clone(), current_app);
         let history_tab = HistoryTab::new(mgr.clone(), current_app);
@@ -73,20 +61,13 @@ impl App {
         result
     }
 
-    fn event_loop(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    ) -> anyhow::Result<()> {
+    fn event_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> anyhow::Result<()> {
         while !self.should_quit {
             self.usage_tab.poll_scan_events();
             self.poll_file_changes();
 
             // Refresh proxy_mode once per tick (cheap DB read, avoids per-frame query)
-            self.proxy_mode = self
-                .mgr
-                .get_setting("proxy_mode")
-                .map(|v| v == "true")
-                .unwrap_or(false);
+            self.proxy_mode = self.mgr.get_setting("proxy_mode").map(|v| v == "true").unwrap_or(false);
 
             terminal.draw(|f| self.render(f))?;
 
@@ -100,17 +81,8 @@ impl App {
             if self.history_tab.needs_terminal_reinit {
                 ratatui::restore();
                 if let Some(ref project) = self.history_tab.launch_project.take() {
-                    let sid = self
-                        .history_tab
-                        .launch_session_id
-                        .take()
-                        .unwrap_or_default();
-                    println!(
-                        "\n  Launching {} session {} in {}\n",
-                        self.current_app.display_name(),
-                        sid,
-                        project
-                    );
+                    let sid = self.history_tab.launch_session_id.take().unwrap_or_default();
+                    println!("\n  Launching {} session {} in {}\n", self.current_app.display_name(), sid, project);
                     let mut cmd = if self.current_app == AppType::Codex {
                         let mut command = std::process::Command::new("codex");
                         if !sid.is_empty() {
@@ -193,10 +165,7 @@ impl App {
         self.providers_tab.switch_app(self.current_app);
         self.usage_tab.set_app(self.current_app);
         self.history_tab.set_app(self.current_app);
-        if let Err(e) = self
-            .mgr
-            .set_setting("active_app", self.current_app.as_str())
-        {
+        if let Err(e) = self.mgr.set_setting("active_app", self.current_app.as_str()) {
             tracing::warn!("Failed to persist active app: {}", e);
         }
     }
@@ -235,21 +204,13 @@ impl App {
             Tab::History => self.history_tab.shortcut_groups(),
             Tab::Settings => self.settings_tab.shortcut_groups(),
         };
-        groups.push(vec![
-            (" Space ".into(), theme::current().comment),
-            ("Claude/Codex".into(), theme::current().comment),
-        ]);
+        groups.push(vec![(" Space ".into(), theme::current().comment), ("Claude/Codex".into(), theme::current().comment)]);
         let sc_lines = shortcut_line_count(area.width, &groups);
 
         // Global bars span the full terminal; the sidebar only occupies the middle row.
         let [app_bar_area, body_area, status_area, sc_area] = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(3),
-                Constraint::Length(1),
-                Constraint::Length(2 + sc_lines as u16),
-            ])
+            .constraints([Constraint::Length(3), Constraint::Min(3), Constraint::Length(1), Constraint::Length(2 + sc_lines as u16)])
             .areas(area);
 
         let [sidebar_area, content_area] = Layout::default()

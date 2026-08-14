@@ -23,11 +23,7 @@ pub fn sync_active_from_settings(mgr: &ConfigManager) {
             return;
         }
     };
-    let source = parsed
-        .get("last_switch")
-        .and_then(|v| v.get("source"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let source = parsed.get("last_switch").and_then(|v| v.get("source")).and_then(|v| v.as_str()).unwrap_or("");
     if let Some((pid, pfid)) = source.split_once('/') {
         let providers = match mgr.list_providers() {
             Ok(p) => p,
@@ -36,10 +32,7 @@ pub fn sync_active_from_settings(mgr: &ConfigManager) {
                 return;
             }
         };
-        if providers
-            .iter()
-            .any(|p| p.id == pid && p.profiles.iter().any(|pr| pr.id == pfid))
-        {
+        if providers.iter().any(|p| p.id == pid && p.profiles.iter().any(|pr| pr.id == pfid)) {
             if let Err(e) = mgr.set_setting("active_provider", pid) {
                 tracing::warn!("sync: failed to save active_provider: {}", e);
             }
@@ -49,11 +42,7 @@ pub fn sync_active_from_settings(mgr: &ConfigManager) {
         }
 
         // Restore proxy_mode from last switch
-        let mode = parsed
-            .get("last_switch")
-            .and_then(|v| v.get("mode"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("local");
+        let mode = parsed.get("last_switch").and_then(|v| v.get("mode")).and_then(|v| v.as_str()).unwrap_or("local");
         let is_proxy = mode == "proxy";
         if let Err(e) = mgr.set_setting("proxy_mode", &is_proxy.to_string()) {
             tracing::warn!("sync: failed to save proxy_mode: {}", e);
@@ -80,10 +69,7 @@ fn sync_codex_active_from_path(mgr: &ConfigManager, config_path: &std::path::Pat
             return;
         }
     };
-    let managed_switch = parsed
-        .get("ccswitch")
-        .and_then(|value| value.get("last_switch"))
-        .and_then(toml::Value::as_table);
+    let managed_switch = parsed.get("ccswitch").and_then(|value| value.get("last_switch")).and_then(toml::Value::as_table);
     let provider_id = managed_switch
         .and_then(|switch| switch.get("source"))
         .and_then(toml::Value::as_str)
@@ -92,15 +78,9 @@ fn sync_codex_active_from_path(mgr: &ConfigManager, config_path: &std::path::Pat
         return;
     };
     let model = if let Some(switch) = managed_switch {
-        switch
-            .get("model")
-            .and_then(toml::Value::as_str)
-            .unwrap_or("")
+        switch.get("model").and_then(toml::Value::as_str).unwrap_or("")
     } else {
-        parsed
-            .get("model")
-            .and_then(toml::Value::as_str)
-            .unwrap_or("")
+        parsed.get("model").and_then(toml::Value::as_str).unwrap_or("")
     };
 
     match mgr.find_provider_for(AppType::Codex, provider_id) {
@@ -128,8 +108,7 @@ mod tests {
     fn managed_builtin_switch_does_not_import_unrelated_model() {
         let dir = tempdir().unwrap();
         let defaults_path = dir.path().join("missing-defaults.toml");
-        let mgr =
-            ConfigManager::new(&dir.path().join("ccswitch.db"), Some(&defaults_path)).unwrap();
+        let mgr = ConfigManager::new(&dir.path().join("ccswitch.db"), Some(&defaults_path)).unwrap();
         mgr.db()
             .insert_provider(
                 &Provider {
@@ -158,10 +137,7 @@ source = "builtin"
         .unwrap();
 
         sync_codex_active_from_path(&mgr, &config_path);
-        assert_eq!(
-            mgr.get_setting("active_codex_provider").as_deref(),
-            Some("builtin")
-        );
+        assert_eq!(mgr.get_setting("active_codex_provider").as_deref(), Some("builtin"));
         assert_eq!(mgr.get_setting("active_codex_model").as_deref(), Some(""));
     }
 }

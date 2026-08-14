@@ -7,15 +7,8 @@ const MAX_SSE_EVENT_SIZE: usize = 8 * 1024 * 1024;
 
 /// Transform the request body: replace `model` with the actual upstream model,
 /// return the original model name so it can be restored in the response.
-pub fn transform_request_body(
-    body_bytes: &[u8],
-    opus_model: &str,
-    sonnet_model: &str,
-    haiku_model: &str,
-    subagent_model: &str,
-) -> Result<(Vec<u8>, String, String), String> {
-    let mut json: Value =
-        serde_json::from_slice(body_bytes).map_err(|e| format!("JSON parse: {}", e))?;
+pub fn transform_request_body(body_bytes: &[u8], opus_model: &str, sonnet_model: &str, haiku_model: &str, subagent_model: &str) -> Result<(Vec<u8>, String, String), String> {
+    let mut json: Value = serde_json::from_slice(body_bytes).map_err(|e| format!("JSON parse: {}", e))?;
 
     let original_model = json["model"].as_str().unwrap_or("").to_string();
 
@@ -51,18 +44,13 @@ pub fn transform_request_body(
 /// - Replace `message.model` → original_model
 /// - Add `ccs_model` → actual_model
 /// - Add `ccs_proxy` → true
-fn transform_sse_data(
-    data_json: &str,
-    original_model: &str,
-    actual_model: &str,
-) -> Result<String, String> {
+fn transform_sse_data(data_json: &str, original_model: &str, actual_model: &str) -> Result<String, String> {
     let trimmed = data_json.trim();
     if trimmed.is_empty() || !trimmed.starts_with('{') {
         return Ok(data_json.to_string());
     }
 
-    let mut json: Value =
-        serde_json::from_str(trimmed).map_err(|e| format!("SSE JSON parse: {}: {}", e, trimmed))?;
+    let mut json: Value = serde_json::from_str(trimmed).map_err(|e| format!("SSE JSON parse: {}: {}", e, trimmed))?;
 
     // Replace message.model + inject ccs_ fields inside message
     let ccs_model = actual_model.replace("[1m]", "");
@@ -150,17 +138,13 @@ pub fn transform_response_stream(
                     // Emit complete SSE events (separated by \n\n)
                     while let Some(end) = find_sse_event_end(&buffer) {
                         let event_bytes: Vec<u8> = buffer.drain(..end).collect();
-                        let transformed =
-                            transform_sse_chunk(&event_bytes, &original_model, &actual_model);
+                        let transformed = transform_sse_chunk(&event_bytes, &original_model, &actual_model);
                         if tx.send(Ok(Bytes::from(transformed))).await.is_err() {
                             return; // receiver dropped
                         }
                     }
                     if buffer.len() > MAX_SSE_EVENT_SIZE {
-                        let error = std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "upstream SSE event exceeded 8 MiB",
-                        );
+                        let error = std::io::Error::new(std::io::ErrorKind::InvalidData, "upstream SSE event exceeded 8 MiB");
                         let _ = tx.send(Err(axum::Error::new(error))).await;
                         return;
                     }
@@ -172,8 +156,7 @@ pub fn transform_response_stream(
                 None => {
                     // Stream ended — emit remaining buffer
                     if !buffer.is_empty() {
-                        let transformed =
-                            transform_sse_chunk(&buffer, &original_model, &actual_model);
+                        let transformed = transform_sse_chunk(&buffer, &original_model, &actual_model);
                         let _ = tx.send(Ok(Bytes::from(transformed))).await;
                     }
                     return;
@@ -211,14 +194,7 @@ mod tests {
         ];
         for (requested, expected) in cases {
             let body = format!(r#"{{"model":"{}"}}"#, requested);
-            let (transformed, original, actual) = transform_request_body(
-                body.as_bytes(),
-                "upstream-opus",
-                "upstream-sonnet",
-                "upstream-haiku",
-                "upstream-subagent",
-            )
-            .unwrap();
+            let (transformed, original, actual) = transform_request_body(body.as_bytes(), "upstream-opus", "upstream-sonnet", "upstream-haiku", "upstream-subagent").unwrap();
             let parsed: serde_json::Value = serde_json::from_slice(&transformed).unwrap();
             assert_eq!(original, requested);
             assert_eq!(actual, expected);

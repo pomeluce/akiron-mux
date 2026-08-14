@@ -6,9 +6,7 @@ pub(crate) const CURRENT_USER_VERSION: i32 = 7;
 
 /// Apply schema migrations on the given connection.
 pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), anyhow::Error> {
-    let version: i32 = conn
-        .pragma_query_value(None, "user_version", |r| r.get(0))
-        .context("read user_version")?;
+    let version: i32 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).context("read user_version")?;
 
     if version > CURRENT_USER_VERSION {
         anyhow::bail!(
@@ -45,11 +43,7 @@ pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), anyhow::Error> {
 }
 
 fn migrate_v7(conn: &Connection) -> Result<(), anyhow::Error> {
-    let providers_exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='providers')",
-        [],
-        |row| row.get(0),
-    )?;
+    let providers_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='providers')", [], |row| row.get(0))?;
     let transaction = conn.unchecked_transaction()?;
     if providers_exists {
         let has_catalog: bool = transaction
@@ -58,9 +52,7 @@ fn migrate_v7(conn: &Connection) -> Result<(), anyhow::Error> {
             .filter_map(Result::ok)
             .any(|column| column == "codex_catalog");
         if !has_catalog {
-            transaction.execute_batch(
-                "ALTER TABLE providers ADD COLUMN codex_catalog TEXT NOT NULL DEFAULT 'built-in';",
-            )?;
+            transaction.execute_batch("ALTER TABLE providers ADD COLUMN codex_catalog TEXT NOT NULL DEFAULT 'built-in';")?;
         }
     }
     transaction.execute_batch(

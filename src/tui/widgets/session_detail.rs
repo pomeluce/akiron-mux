@@ -30,10 +30,7 @@ pub fn render_session_detail(
     // Title
     lines.push(Line::from(vec![
         Span::styled("  ", Style::default()),
-        Span::styled(
-            session.title.as_deref().unwrap_or(&session.id),
-            Style::default().fg(theme::current().cyan),
-        ),
+        Span::styled(session.title.as_deref().unwrap_or(&session.id), Style::default().fg(theme::current().cyan)),
     ]));
     lines.push(Line::from(""));
 
@@ -48,11 +45,7 @@ pub fn render_session_detail(
     lines.push(Line::from(""));
 
     // Profile: provider_id · profile_id
-    let pid = session
-        .profile_id
-        .as_deref()
-        .or(active_provider)
-        .unwrap_or("-");
+    let pid = session.profile_id.as_deref().or(active_provider).unwrap_or("-");
     let pfid = active_profile.unwrap_or("-");
     let profile_text = if app == AppType::Codex {
         pid.to_string()
@@ -85,17 +78,9 @@ pub fn render_session_detail(
 
     // Tokens
     let token_text = if let Some((p, c)) = tokens {
-        format!(
-            "{} prompt / {} completion",
-            format_tokens(p),
-            format_tokens(c)
-        )
+        format!("{} prompt / {} completion", format_tokens(p), format_tokens(c))
     } else {
-        format!(
-            "{} prompt / {} completion",
-            format_tokens(session.prompt_tokens),
-            format_tokens(session.completion_tokens)
-        )
+        format!("{} prompt / {} completion", format_tokens(session.prompt_tokens), format_tokens(session.completion_tokens))
     };
     lines.extend(line_with_wrap(
         lang::current().detail_tokens,
@@ -150,11 +135,7 @@ pub fn render_session_detail(
 pub fn render_empty_detail(f: &mut Frame, area: Rect, hint: &str) {
     let p = Paragraph::new(vec![
         Line::from(""),
-        Line::from(Span::styled(
-            hint,
-            Style::default().fg(theme::current().comment),
-        ))
-        .centered(),
+        Line::from(Span::styled(hint, Style::default().fg(theme::current().comment))).centered(),
     ])
     .block(
         Block::bordered()
@@ -166,17 +147,8 @@ pub fn render_empty_detail(f: &mut Frame, area: Rect, hint: &str) {
 }
 
 /// Build labeled lines with left pad + fixed-width label: "  Label:  value"
-fn line_with_wrap(
-    label: &str,
-    value: &str,
-    max_w: usize,
-    label_color: ratatui::style::Color,
-    value_color: ratatui::style::Color,
-) -> Vec<Line<'static>> {
-    let dw = label
-        .chars()
-        .map(|c| if c > '\u{7e}' { 2 } else { 1 })
-        .sum::<usize>();
+fn line_with_wrap(label: &str, value: &str, max_w: usize, label_color: ratatui::style::Color, value_color: ratatui::style::Color) -> Vec<Line<'static>> {
+    let dw = label.chars().map(|c| if c > '\u{7e}' { 2 } else { 1 }).sum::<usize>();
     let prefix = if dw >= 8 {
         format!("  {}:  ", label)
     } else {

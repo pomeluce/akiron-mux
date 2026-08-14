@@ -32,10 +32,7 @@ WantedBy=default.target
         run_cmd("systemctl", &["daemon-reload"])?;
         run_cmd("systemctl", &["enable", SERVICE_NAME])?;
         run_cmd("systemctl", &["start", SERVICE_NAME])?;
-        println!(
-            "Service installed (system): systemctl status {}",
-            SERVICE_NAME
-        );
+        println!("Service installed (system): systemctl status {}", SERVICE_NAME);
     } else {
         let dir = systemd_user_dir();
         std::fs::create_dir_all(&dir)?;
@@ -44,10 +41,7 @@ WantedBy=default.target
         run_cmd("systemctl", &["--user", "daemon-reload"])?;
         run_cmd("systemctl", &["--user", "enable", SERVICE_NAME])?;
         run_cmd("systemctl", &["--user", "start", SERVICE_NAME])?;
-        println!(
-            "Service installed (user): systemctl --user status {}",
-            SERVICE_NAME
-        );
+        println!("Service installed (user): systemctl --user status {}", SERVICE_NAME);
     }
     Ok(())
 }
@@ -73,10 +67,7 @@ pub fn uninstall_service(system: bool) -> Result<()> {
 
 fn systemd_user_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home)
-        .join(".config")
-        .join("systemd")
-        .join("user")
+    PathBuf::from(home).join(".config").join("systemd").join("user")
 }
 
 // ── macOS launchd ──────────────────────────────────────────────────
@@ -123,15 +114,8 @@ pub fn install_service(_system: bool) -> Result<()> {
     let uid = get_uid()?;
     // Unload if already loaded, then bootstrap
     let domain = format!("gui/{}", uid);
-    run_cmd(
-        "launchctl",
-        &["bootout", &domain, &path.display().to_string()],
-    )
-    .ok();
-    run_cmd(
-        "launchctl",
-        &["bootstrap", &domain, &path.display().to_string()],
-    )?;
+    run_cmd("launchctl", &["bootout", &domain, &path.display().to_string()]).ok();
+    run_cmd("launchctl", &["bootstrap", &domain, &path.display().to_string()])?;
 
     println!("Service installed: launchctl list | grep ccswitch");
     Ok(())
@@ -144,11 +128,7 @@ pub fn uninstall_service(_system: bool) -> Result<()> {
 
     let uid = get_uid().unwrap_or(0);
     let domain = format!("gui/{}", uid);
-    run_cmd(
-        "launchctl",
-        &["bootout", &domain, &path.display().to_string()],
-    )
-    .ok();
+    run_cmd("launchctl", &["bootout", &domain, &path.display().to_string()]).ok();
     std::fs::remove_file(&path).ok();
     println!("Service uninstalled.");
     Ok(())
@@ -207,10 +187,7 @@ pub fn install_service(_system: bool) -> Result<()> {
     // Start it now
     run_cmd("schtasks", &["/run", "/tn", &task_name])?;
 
-    println!(
-        "Service installed (Scheduled Task): schtasks /query /tn {}",
-        task_name
-    );
+    println!("Service installed (Scheduled Task): schtasks /query /tn {}", task_name);
     Ok(())
 }
 
@@ -226,10 +203,7 @@ pub fn uninstall_service(_system: bool) -> Result<()> {
 // ── Shared helpers ─────────────────────────────────────────────────
 
 fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(cmd)
-        .args(args)
-        .status()
-        .with_context(|| format!("Failed to run: {} {:?}", cmd, args))?;
+    let status = Command::new(cmd).args(args).status().with_context(|| format!("Failed to run: {} {:?}", cmd, args))?;
     if !status.success() {
         anyhow::bail!("{} {:?} exited with {}", cmd, args, status);
     }
@@ -242,15 +216,7 @@ pub fn start_proxy() -> Result<()> {
     if systemd_available() {
         write_systemd_unit()?;
         run_cmd("systemctl", &["--user", "daemon-reload"])?;
-        run_cmd(
-            "systemctl",
-            &[
-                "--user",
-                "enable",
-                "--now",
-                &format!("{}.service", SERVICE_NAME),
-            ],
-        )?;
+        run_cmd("systemctl", &["--user", "enable", "--now", &format!("{}.service", SERVICE_NAME)])?;
         println!("Proxy started via systemd (user service)");
     } else {
         if let Some(pid) = read_proxy_pid().filter(|pid| process_matches_proxy(*pid)) {
@@ -277,10 +243,7 @@ pub fn start_proxy() -> Result<()> {
 
 pub fn stop_proxy() -> Result<()> {
     if systemd_available() {
-        run_cmd(
-            "systemctl",
-            &["--user", "stop", &format!("{}.service", SERVICE_NAME)],
-        )?;
+        run_cmd("systemctl", &["--user", "stop", &format!("{}.service", SERVICE_NAME)])?;
         println!("Proxy stopped (systemd)");
     } else {
         if let Some(pid) = read_proxy_pid() {
@@ -300,9 +263,7 @@ pub fn stop_proxy() -> Result<()> {
 
 pub fn proxy_status() -> Result<()> {
     if systemd_available() {
-        let status = Command::new("systemctl")
-            .args(["--user", "status", &format!("{}.service", SERVICE_NAME)])
-            .output()?;
+        let status = Command::new("systemctl").args(["--user", "status", &format!("{}.service", SERVICE_NAME)]).output()?;
         println!("{}", String::from_utf8_lossy(&status.stdout));
         if !status.status.success() {
             let stderr = String::from_utf8_lossy(&status.stderr);
@@ -361,11 +322,7 @@ fn systemd_available() -> bool {
 }
 
 fn systemd_quote(path: &std::path::Path) -> String {
-    let escaped = path
-        .to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('%', "%%");
+    let escaped = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%");
     format!("\"{}\"", escaped)
 }
 
@@ -398,11 +355,7 @@ fn write_pid_file(pid: u32) -> Result<()> {
 }
 
 fn read_proxy_pid() -> Option<u32> {
-    std::fs::read_to_string(proxy_pid_path())
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+    std::fs::read_to_string(proxy_pid_path()).ok()?.trim().parse().ok()
 }
 
 #[cfg(target_os = "linux")]
@@ -416,17 +369,13 @@ fn process_matches_proxy(pid: u32) -> bool {
     same_executable
         && command.is_some_and(|bytes| {
             let parts = bytes.split(|byte| *byte == 0).collect::<Vec<_>>();
-            parts
-                .windows(2)
-                .any(|pair| pair[0] == b"proxy" && pair[1] == b"serve")
+            parts.windows(2).any(|pair| pair[0] == b"proxy" && pair[1] == b"serve")
         })
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn process_matches_proxy(pid: u32) -> bool {
-    let current_exe = std::env::current_exe()
-        .ok()
-        .map(|path| path.to_string_lossy().to_string());
+    let current_exe = std::env::current_exe().ok().map(|path| path.to_string_lossy().to_string());
     current_exe.is_some_and(|current_exe| {
         Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "command="])
@@ -442,14 +391,9 @@ fn process_matches_proxy(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn process_matches_proxy(pid: u32) -> bool {
-    let current_exe = std::env::current_exe()
-        .ok()
-        .map(|path| path.to_string_lossy().to_string());
+    let current_exe = std::env::current_exe().ok().map(|path| path.to_string_lossy().to_string());
     current_exe.is_some_and(|current_exe| {
-        let command = format!(
-            "(Get-CimInstance Win32_Process -Filter \"ProcessId = {}\").CommandLine",
-            pid
-        );
+        let command = format!("(Get-CimInstance Win32_Process -Filter \"ProcessId = {}\").CommandLine", pid);
         Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &command])
             .output()

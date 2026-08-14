@@ -17,9 +17,7 @@ pub struct ProxyServer {
 impl ProxyServer {
     /// Create a new proxy server backed by the given config manager.
     pub fn new(mgr: ConfigManager) -> Self {
-        ProxyServer {
-            mgr: Arc::new(Mutex::new(mgr)),
-        }
+        ProxyServer { mgr: Arc::new(Mutex::new(mgr)) }
     }
 
     /// Run the proxy server in the foreground, blocking until shutdown.
@@ -32,14 +30,9 @@ impl ProxyServer {
             .timeout(std::time::Duration::from_secs(600))
             .build()?;
 
-        let state = Arc::new(ProxyState {
-            mgr: self.mgr.clone(),
-            client,
-        });
+        let state = Arc::new(ProxyState { mgr: self.mgr.clone(), client });
 
-        let app = Router::<Arc<ProxyState>>::new()
-            .fallback(proxy_handler)
-            .with_state(state);
+        let app = Router::<Arc<ProxyState>>::new().fallback(proxy_handler).with_state(state);
 
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let listener = TcpListener::bind(addr).await?;

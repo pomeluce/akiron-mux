@@ -66,9 +66,7 @@ fn codex_sessions_dir() -> PathBuf {
 
 fn codex_session_index_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home)
-        .join(".codex")
-        .join("session_index.jsonl")
+    PathBuf::from(home).join(".codex").join("session_index.jsonl")
 }
 
 enum TitleField {
@@ -109,33 +107,19 @@ fn truncate_title(s: &str) -> String {
 fn parse_timestamp(val: &serde_json::Value) -> Option<i64> {
     match val {
         serde_json::Value::Number(n) => {
-            let ts = n
-                .as_i64()
-                .or_else(|| n.as_u64().and_then(|value| i64::try_from(value).ok()))?;
+            let ts = n.as_i64().or_else(|| n.as_u64().and_then(|value| i64::try_from(value).ok()))?;
             if ts <= 0 {
                 return None;
             }
-            Some(if ts > 1_000_000_000_000 {
-                ts
-            } else {
-                ts.checked_mul(1000)?
-            })
+            Some(if ts > 1_000_000_000_000 { ts } else { ts.checked_mul(1000)? })
         }
-        serde_json::Value::String(s) => chrono::DateTime::parse_from_rfc3339(s)
-            .ok()
-            .map(|dt| dt.timestamp_millis()),
+        serde_json::Value::String(s) => chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp_millis()),
         _ => None,
     }
 }
 
 fn extract_command(text: &str) -> Option<String> {
-    let name = text
-        .split("<command-name>")
-        .nth(1)?
-        .split("</command-name>")
-        .next()?
-        .trim()
-        .to_string();
+    let name = text.split("<command-name>").nth(1)?.split("</command-name>").next()?.trim().to_string();
     let args = text
         .split("<command-args>")
         .nth(1)
@@ -159,15 +143,10 @@ fn ts_to_iso(ts_ms: i64) -> String {
 
 /// Import with progress callback. Incremental: only processes files whose
 /// mtime differs from the stored index in session_log_sync.
-pub fn import_claude_sessions_with_progress(
-    db: &Db,
-    on_progress: impl Fn(usize, usize, usize),
-) -> Result<usize, anyhow::Error> {
+pub fn import_claude_sessions_with_progress(db: &Db, on_progress: impl Fn(usize, usize, usize)) -> Result<usize, anyhow::Error> {
     let projects_dir = claude_projects_dir();
     let file_index: HashMap<String, i64> = {
-        let mut stmt = db.conn().prepare(
-            "SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type = 'session'",
-        )?;
+        let mut stmt = db.conn().prepare("SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type = 'session'")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         rows.filter_map(|r| r.ok()).collect()
     };
@@ -247,12 +226,8 @@ pub fn import_codex_sessions(db: &Db) -> Result<usize, anyhow::Error> {
     prepare_codex_import_revision(db, &sessions_dir)?;
     let session_index = load_codex_session_index(&codex_session_index_path());
     let file_index: HashMap<String, i64> = {
-        let mut stmt = db.conn().prepare(
-            "SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type = 'session'",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
+        let mut stmt = db.conn().prepare("SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type = 'session'")?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
         rows.filter_map(|row| row.ok()).collect()
     };
     cleanup_removed_session_files(db, &sessions_dir, "codex", &file_index)?;
@@ -287,32 +262,19 @@ pub fn import_codex_sessions(db: &Db) -> Result<usize, anyhow::Error> {
 /// Session and usage scans have independent indexes, so both need to be
 /// cleared. Imported usage is also removed because older versions may have
 /// attributed fork usage to the parent session ID.
-fn prepare_codex_import_revision(
-    db: &Db,
-    sessions_dir: &std::path::Path,
-) -> Result<(), anyhow::Error> {
+fn prepare_codex_import_revision(db: &Db, sessions_dir: &std::path::Path) -> Result<(), anyhow::Error> {
     if db.get_setting(CODEX_IMPORT_REVISION_KEY).as_deref() == Some(CODEX_IMPORT_REVISION) {
         return Ok(());
     }
 
     let codex_sync_paths = {
-        let mut statement = db
-            .conn()
-            .prepare("SELECT DISTINCT file_path FROM session_log_sync")?;
-        let paths = statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        paths
-            .into_iter()
-            .filter(|path| std::path::Path::new(path).starts_with(sessions_dir))
-            .collect::<Vec<_>>()
+        let mut statement = db.conn().prepare("SELECT DISTINCT file_path FROM session_log_sync")?;
+        let paths = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        paths.into_iter().filter(|path| std::path::Path::new(path).starts_with(sessions_dir)).collect::<Vec<_>>()
     };
 
     let transaction = db.conn().unchecked_transaction()?;
-    transaction.execute(
-        "DELETE FROM usage_logs WHERE app_type = 'codex' AND data_source = 'import'",
-        [],
-    )?;
+    transaction.execute("DELETE FROM usage_logs WHERE app_type = 'codex' AND data_source = 'import'", [])?;
     for path in codex_sync_paths {
         transaction.execute("DELETE FROM session_log_sync WHERE file_path = ?1", [path])?;
     }
@@ -324,12 +286,7 @@ fn prepare_codex_import_revision(
     Ok(())
 }
 
-fn cleanup_removed_session_files(
-    db: &Db,
-    root: &std::path::Path,
-    app_type: &str,
-    file_index: &HashMap<String, i64>,
-) -> Result<usize, anyhow::Error> {
+fn cleanup_removed_session_files(db: &Db, root: &std::path::Path, app_type: &str, file_index: &HashMap<String, i64>) -> Result<usize, anyhow::Error> {
     let stale_paths = file_index
         .keys()
         .map(PathBuf::from)
@@ -340,12 +297,8 @@ fn cleanup_removed_session_files(
     }
 
     let codex_ids = if app_type == "codex" {
-        let mut statement = db
-            .conn()
-            .prepare("SELECT id FROM session_history WHERE app_type = 'codex'")?;
-        let ids = statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut statement = db.conn().prepare("SELECT id FROM session_history WHERE app_type = 'codex'")?;
+        let ids = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         ids
     } else {
         Vec::new()
@@ -354,38 +307,21 @@ fn cleanup_removed_session_files(
     let transaction = db.conn().unchecked_transaction()?;
     let mut removed = 0usize;
     for path in stale_paths {
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
+        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
         let session_id = if app_type == "codex" {
             codex_ids
                 .iter()
-                .find(|id| {
-                    file_name == format!("{}.jsonl", id)
-                        || file_name.ends_with(&format!("-{}.jsonl", id))
-                })
+                .find(|id| file_name == format!("{}.jsonl", id) || file_name.ends_with(&format!("-{}.jsonl", id)))
                 .cloned()
         } else {
-            path.file_stem()
-                .and_then(|name| name.to_str())
-                .map(str::to_owned)
+            path.file_stem().and_then(|name| name.to_str()).map(str::to_owned)
         };
 
         if let Some(session_id) = session_id.as_deref() {
-            transaction.execute(
-                "DELETE FROM usage_logs WHERE app_type = ?1 AND session_id = ?2",
-                rusqlite::params![app_type, session_id],
-            )?;
-            removed += transaction.execute(
-                "DELETE FROM session_history WHERE app_type = ?1 AND id = ?2",
-                rusqlite::params![app_type, session_id],
-            )?;
+            transaction.execute("DELETE FROM usage_logs WHERE app_type = ?1 AND session_id = ?2", rusqlite::params![app_type, session_id])?;
+            removed += transaction.execute("DELETE FROM session_history WHERE app_type = ?1 AND id = ?2", rusqlite::params![app_type, session_id])?;
         }
-        transaction.execute(
-            "DELETE FROM session_log_sync WHERE file_path = ?1",
-            [path.to_string_lossy().as_ref()],
-        )?;
+        transaction.execute("DELETE FROM session_log_sync WHERE file_path = ?1", [path.to_string_lossy().as_ref()])?;
     }
     transaction.commit()?;
     Ok(removed)
@@ -417,15 +353,10 @@ fn load_codex_session_index(path: &std::path::Path) -> HashMap<String, String> {
         .collect()
 }
 
-fn apply_codex_session_index(
-    db: &Db,
-    index: &HashMap<String, String>,
-) -> Result<(), rusqlite::Error> {
+fn apply_codex_session_index(db: &Db, index: &HashMap<String, String>) -> Result<(), rusqlite::Error> {
     for (id, title) in index {
-        db.conn().execute(
-            "UPDATE session_history SET title = ?1 WHERE id = ?2 AND app_type = 'codex'",
-            rusqlite::params![title, id],
-        )?;
+        db.conn()
+            .execute("UPDATE session_history SET title = ?1 WHERE id = ?2 AND app_type = 'codex'", rusqlite::params![title, id])?;
     }
     Ok(())
 }
@@ -446,11 +377,7 @@ fn parse_codex_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, any
             Ok(line) => line,
             Err(_) => continue,
         };
-        if let Some(normalized) = line
-            .timestamp
-            .as_deref()
-            .and_then(normalize_session_timestamp)
-        {
+        if let Some(normalized) = line.timestamp.as_deref().and_then(normalize_session_timestamp) {
             if start_time.is_empty() {
                 start_time = normalized.clone();
             }
@@ -471,43 +398,21 @@ fn parse_codex_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, any
                     continue;
                 }
                 session_id = canonical_id.to_string();
-                cwd = line
-                    .payload
-                    .get("cwd")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                provider = line
-                    .payload
-                    .get("model_provider")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                if let Some(timestamp) = line
-                    .payload
-                    .get("timestamp")
-                    .and_then(serde_json::Value::as_str)
-                {
+                cwd = line.payload.get("cwd").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+                provider = line.payload.get("model_provider").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+                if let Some(timestamp) = line.payload.get("timestamp").and_then(serde_json::Value::as_str) {
                     if let Some(normalized) = normalize_session_timestamp(timestamp) {
                         start_time = normalized;
                     }
                 }
             }
             "event_msg" => {
-                let event_type = line
-                    .payload
-                    .get("type")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
+                let event_type = line.payload.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
                 if matches!(event_type, "user_message" | "agent_message") {
                     message_count += 1;
                 }
                 if title.is_none() && event_type == "user_message" {
-                    title = line
-                        .payload
-                        .get("message")
-                        .and_then(serde_json::Value::as_str)
-                        .map(truncate_title);
+                    title = line.payload.get("message").and_then(serde_json::Value::as_str).map(truncate_title);
                 }
             }
             _ => {}
@@ -530,18 +435,10 @@ fn parse_codex_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, any
     Ok(Some(SessionRecord {
         id: session_id,
         project_path: cwd.clone(),
-        profile_id: if provider.is_empty() {
-            None
-        } else {
-            Some(provider)
-        },
+        profile_id: if provider.is_empty() { None } else { Some(provider) },
         mode: "direct".into(),
         start_time,
-        end_time: if end_time.is_empty() {
-            None
-        } else {
-            Some(end_time)
-        },
+        end_time: if end_time.is_empty() { None } else { Some(end_time) },
         prompt_tokens: 0,
         completion_tokens: 0,
         message_count,
@@ -713,13 +610,7 @@ fn parse_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, anyhow::E
         }
     }
 
-    let session_id = session_id
-        .or_else(|| {
-            path.file_stem()
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_default();
+    let session_id = session_id.or_else(|| path.file_stem().and_then(|n| n.to_str()).map(|s| s.to_string())).unwrap_or_default();
 
     if session_id.is_empty() {
         return Ok(None);
@@ -727,15 +618,8 @@ fn parse_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, anyhow::E
 
     let cwd = cwd.unwrap_or_default();
     let start_time = created_at.map(ts_to_iso).unwrap_or_default();
-    let project_name = std::path::Path::new(&cwd)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let title = custom_title
-        .or(ai_title)
-        .or(last_prompt)
-        .or(fallback_title)
-        .unwrap_or(project_name);
+    let project_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let title = custom_title.or(ai_title).or(last_prompt).or(fallback_title).unwrap_or(project_name);
 
     // Detect proxy mode: scan last 30 lines for assistant message with ccs_proxy marker
     let mode = detect_mode(&lines);
@@ -794,12 +678,7 @@ struct UsageData {
 }
 
 /// Background-thread function: collect changed files, parse them, send batches via channel.
-pub fn parse_files_in_background(
-    app_type: String,
-    ctx: ScanContext,
-    batch_size: usize,
-    tx: std::sync::mpsc::Sender<ScanEvent>,
-) {
+pub fn parse_files_in_background(app_type: String, ctx: ScanContext, batch_size: usize, tx: std::sync::mpsc::Sender<ScanEvent>) {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let projects_dir = if app_type == "codex" {
         PathBuf::from(&home).join(".codex/sessions")
@@ -824,10 +703,7 @@ pub fn parse_files_in_background(
         let (sid, records) = if app_type == "codex" {
             parse_codex_usage_file(path, fallback_sid)
         } else {
-            (
-                fallback_sid.clone(),
-                parse_claude_usage_file(path, fallback_sid),
-            )
+            (fallback_sid.clone(), parse_claude_usage_file(path, fallback_sid))
         };
         let n = records.len();
         total_records += n;
@@ -870,17 +746,9 @@ fn parse_claude_usage_file(path: &PathBuf, fallback_sid: &str) -> Vec<UsageRecor
             let msg = parsed.message.as_ref()?;
             let usage = msg.usage.as_ref()?;
             let timestamp = parsed.timestamp.as_deref().unwrap_or("");
-            let msg_id = msg
-                .id
-                .clone()
-                .unwrap_or_else(|| format!("claude:{}:{}:{}", fallback_sid, timestamp, index));
+            let msg_id = msg.id.clone().unwrap_or_else(|| format!("claude:{}:{}:{}", fallback_sid, timestamp, index));
             // Prefer ccs_model (actual upstream model from proxy) over message.model
-            let model = msg
-                .ccs_model
-                .as_deref()
-                .or(msg.model.as_deref())
-                .unwrap_or("unknown")
-                .replace("[1m]", "");
+            let model = msg.ccs_model.as_deref().or(msg.model.as_deref()).unwrap_or("unknown").replace("[1m]", "");
             if model == "<synthetic>" {
                 return None;
             }
@@ -888,14 +756,8 @@ fn parse_claude_usage_file(path: &PathBuf, fallback_sid: &str) -> Vec<UsageRecor
             let date = normalize_usage_timestamp(ts);
             let input = usage.input_tokens.unwrap_or(0).clamp(0, MAX_USAGE_TOKENS);
             let output = usage.output_tokens.unwrap_or(0).clamp(0, MAX_USAGE_TOKENS);
-            let cr = usage
-                .cache_read_input_tokens
-                .unwrap_or(0)
-                .clamp(0, MAX_USAGE_TOKENS);
-            let cc = usage
-                .cache_creation_input_tokens
-                .unwrap_or(0)
-                .clamp(0, MAX_USAGE_TOKENS);
+            let cr = usage.cache_read_input_tokens.unwrap_or(0).clamp(0, MAX_USAGE_TOKENS);
+            let cc = usage.cache_creation_input_tokens.unwrap_or(0).clamp(0, MAX_USAGE_TOKENS);
             if input == 0 && output == 0 && cr == 0 && cc == 0 {
                 return None;
             }
@@ -943,42 +805,19 @@ fn parse_codex_usage_file(path: &PathBuf, fallback_sid: &str) -> (String, Vec<Us
                 }
             }
             "turn_context" => {
-                if let Some(value) = line
-                    .payload
-                    .get("model")
-                    .and_then(serde_json::Value::as_str)
-                {
+                if let Some(value) = line.payload.get("model").and_then(serde_json::Value::as_str) {
                     model = value.to_string();
                 }
             }
-            "event_msg"
-                if line.payload.get("type").and_then(serde_json::Value::as_str)
-                    == Some("token_count") =>
-            {
-                let Some(usage) = line
-                    .payload
-                    .get("info")
-                    .and_then(|info| info.get("last_token_usage"))
-                else {
+            "event_msg" if line.payload.get("type").and_then(serde_json::Value::as_str) == Some("token_count") => {
+                let Some(usage) = line.payload.get("info").and_then(|info| info.get("last_token_usage")) else {
                     continue;
                 };
                 let timestamp = line.timestamp.as_deref().unwrap_or("");
                 let msg_id = format!("codex:{}:{}:{}", sid, timestamp, index);
-                let input = usage
-                    .get("input_tokens")
-                    .and_then(serde_json::Value::as_i64)
-                    .unwrap_or(0)
-                    .clamp(0, MAX_USAGE_TOKENS);
-                let cached = usage
-                    .get("cached_input_tokens")
-                    .and_then(serde_json::Value::as_i64)
-                    .unwrap_or(0)
-                    .clamp(0, input);
-                let output = usage
-                    .get("output_tokens")
-                    .and_then(serde_json::Value::as_i64)
-                    .unwrap_or(0)
-                    .clamp(0, MAX_USAGE_TOKENS);
+                let input = usage.get("input_tokens").and_then(serde_json::Value::as_i64).unwrap_or(0).clamp(0, MAX_USAGE_TOKENS);
+                let cached = usage.get("cached_input_tokens").and_then(serde_json::Value::as_i64).unwrap_or(0).clamp(0, input);
+                let output = usage.get("output_tokens").and_then(serde_json::Value::as_i64).unwrap_or(0).clamp(0, MAX_USAGE_TOKENS);
                 records.push(UsageRecord {
                     msg_id,
                     model: model.clone(),
@@ -996,16 +835,12 @@ fn parse_codex_usage_file(path: &PathBuf, fallback_sid: &str) -> (String, Vec<Us
 }
 
 fn normalize_usage_timestamp(timestamp: &str) -> String {
-    let date = timestamp.get(..10).filter(|value| {
-        value.is_ascii()
-            && value.as_bytes().get(4) == Some(&b'-')
-            && value.as_bytes().get(7) == Some(&b'-')
-    });
-    let time = timestamp.get(11..19).filter(|value| {
-        value.is_ascii()
-            && value.as_bytes().get(2) == Some(&b':')
-            && value.as_bytes().get(5) == Some(&b':')
-    });
+    let date = timestamp
+        .get(..10)
+        .filter(|value| value.is_ascii() && value.as_bytes().get(4) == Some(&b'-') && value.as_bytes().get(7) == Some(&b'-'));
+    let time = timestamp
+        .get(11..19)
+        .filter(|value| value.is_ascii() && value.as_bytes().get(2) == Some(&b':') && value.as_bytes().get(5) == Some(&b':'));
     match (date, time) {
         (Some(date), Some(time)) => format!("{} {}", date, time),
         (Some(date), None) => format!("{} 00:00:00", date),
@@ -1015,21 +850,13 @@ fn normalize_usage_timestamp(timestamp: &str) -> String {
 
 fn normalize_session_timestamp(timestamp: &str) -> Option<String> {
     chrono::DateTime::parse_from_rfc3339(timestamp)
-        .map(|dt| {
-            dt.with_timezone(&chrono::Utc)
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string()
-        })
+        .map(|dt| dt.with_timezone(&chrono::Utc).format("%Y-%m-%d %H:%M:%S").to_string())
         .ok()
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
 
-pub fn collect_changed_files(
-    dir: &PathBuf,
-    out: &mut Vec<(PathBuf, String)>,
-    file_index: &HashMap<String, i64>,
-) {
+pub fn collect_changed_files(dir: &PathBuf, out: &mut Vec<(PathBuf, String)>, file_index: &HashMap<String, i64>) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1039,17 +866,11 @@ pub fn collect_changed_files(
             if path.is_dir() {
                 collect_changed_files(&path, out, file_index);
             } else if path.extension().is_some_and(|e| e == "jsonl") {
-                let sid = path
-                    .file_stem()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_string();
+                let sid = path.file_stem().and_then(|n| n.to_str()).unwrap_or("").to_string();
                 if !sid.is_empty() {
                     let mtime = file_mtime(&path).unwrap_or(0);
                     let file_path_str = path.to_string_lossy().to_string();
-                    let changed = file_index
-                        .get(&file_path_str)
-                        .map_or(true, |&old| old != mtime);
+                    let changed = file_index.get(&file_path_str).map_or(true, |&old| old != mtime);
                     if changed {
                         out.push((path, sid));
                     }
@@ -1099,15 +920,9 @@ mod tests {
         assert_eq!(records[0].output, 20);
 
         let index_path = dir.path().join("session_index.jsonl");
-        std::fs::write(
-            &index_path,
-            r#"{"id":"session-1","thread_name":"Renamed session","updated_at":"2026-07-26T13:00:00Z"}"#,
-        ).unwrap();
+        std::fs::write(&index_path, r#"{"id":"session-1","thread_name":"Renamed session","updated_at":"2026-07-26T13:00:00Z"}"#).unwrap();
         let index = load_codex_session_index(&index_path);
-        assert_eq!(
-            index.get("session-1").map(String::as_str),
-            Some("Renamed session")
-        );
+        assert_eq!(index.get("session-1").map(String::as_str), Some("Renamed session"));
         let db = Db::open(&dir.path().join("ccswitch.db")).unwrap();
         db.insert_session(&session, "codex").unwrap();
         apply_codex_session_index(&db, &index).unwrap();
@@ -1186,11 +1001,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        for (path, scan_type) in [
-            (&codex_path, "session"),
-            (&codex_path, "usage"),
-            (&unrelated_path, "session"),
-        ] {
+        for (path, scan_type) in [(&codex_path, "session"), (&codex_path, "usage"), (&unrelated_path, "session")] {
             db.conn()
                 .execute(
                     "INSERT INTO session_log_sync (file_path, file_mtime, scan_type) VALUES (?1, 1, ?2)",
@@ -1202,33 +1013,16 @@ mod tests {
         prepare_codex_import_revision(&db, &sessions_dir).unwrap();
 
         let usage_ids = {
-            let mut statement = db
-                .conn()
-                .prepare("SELECT message_id FROM usage_logs ORDER BY message_id")
-                .unwrap();
-            statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .unwrap()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap()
+            let mut statement = db.conn().prepare("SELECT message_id FROM usage_logs ORDER BY message_id").unwrap();
+            statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
         };
         assert_eq!(usage_ids, vec!["claude-import", "codex-manual"]);
         let sync_paths = {
-            let mut statement = db
-                .conn()
-                .prepare("SELECT file_path FROM session_log_sync")
-                .unwrap();
-            statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .unwrap()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap()
+            let mut statement = db.conn().prepare("SELECT file_path FROM session_log_sync").unwrap();
+            statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
         };
         assert_eq!(sync_paths, vec![unrelated_path.to_string_lossy()]);
-        assert_eq!(
-            db.get_setting(CODEX_IMPORT_REVISION_KEY).as_deref(),
-            Some(CODEX_IMPORT_REVISION)
-        );
+        assert_eq!(db.get_setting(CODEX_IMPORT_REVISION_KEY).as_deref(), Some(CODEX_IMPORT_REVISION));
 
         db.conn()
             .execute(
@@ -1239,11 +1033,7 @@ mod tests {
         prepare_codex_import_revision(&db, &sessions_dir).unwrap();
         let new_import_count: i64 = db
             .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM usage_logs WHERE message_id = 'new-import'",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM usage_logs WHERE message_id = 'new-import'", [], |row| row.get(0))
             .unwrap();
         assert_eq!(new_import_count, 1);
     }
@@ -1273,19 +1063,12 @@ mod tests {
 
         let reparsed = parse_claude_usage_file(&path, "session-1");
         assert_eq!(
-            records
-                .iter()
-                .map(|record| &record.msg_id)
-                .collect::<Vec<_>>(),
-            reparsed
-                .iter()
-                .map(|record| &record.msg_id)
-                .collect::<Vec<_>>()
+            records.iter().map(|record| &record.msg_id).collect::<Vec<_>>(),
+            reparsed.iter().map(|record| &record.msg_id).collect::<Vec<_>>()
         );
 
         let db = Db::open(&dir.path().join("ccswitch.db")).unwrap();
-        db.insert_usage_batch("claude", "session-1", &path, &records)
-            .unwrap();
+        db.insert_usage_batch("claude", "session-1", &path, &records).unwrap();
         let replacement = vec![UsageRecord {
             msg_id: records[0].msg_id.clone(),
             model: records[0].model.clone(),
@@ -1295,8 +1078,7 @@ mod tests {
             cr: 0,
             cc: 0,
         }];
-        db.insert_usage_batch("claude", "session-1", &path, &replacement)
-            .unwrap();
+        db.insert_usage_batch("claude", "session-1", &path, &replacement).unwrap();
         let summary = db.query_usage("claude", "all").unwrap();
         assert_eq!(summary.len(), 1);
         assert_eq!(summary[0].total_prompt, 5);
@@ -1349,24 +1131,10 @@ mod tests {
         std::fs::remove_file(&session_path).unwrap();
 
         let file_index = HashMap::from([(path_text, 1)]);
-        assert_eq!(
-            cleanup_removed_session_files(&db, &root, "claude", &file_index).unwrap(),
-            1
-        );
-        assert!(db
-            .query_sessions("claude", None, None, 10)
-            .unwrap()
-            .is_empty());
-        let usage_count: i64 = db
-            .conn()
-            .query_row("SELECT COUNT(*) FROM usage_logs", [], |row| row.get(0))
-            .unwrap();
-        let sync_count: i64 = db
-            .conn()
-            .query_row("SELECT COUNT(*) FROM session_log_sync", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
+        assert_eq!(cleanup_removed_session_files(&db, &root, "claude", &file_index).unwrap(), 1);
+        assert!(db.query_sessions("claude", None, None, 10).unwrap().is_empty());
+        let usage_count: i64 = db.conn().query_row("SELECT COUNT(*) FROM usage_logs", [], |row| row.get(0)).unwrap();
+        let sync_count: i64 = db.conn().query_row("SELECT COUNT(*) FROM session_log_sync", [], |row| row.get(0)).unwrap();
         assert_eq!(usage_count, 0);
         assert_eq!(sync_count, 0);
     }

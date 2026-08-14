@@ -27,11 +27,7 @@ pub fn render_sidebar(f: &mut Frame, area: Rect, active_tab: Tab) {
     // Compute max label width and left pad for centered block
     let max_w = tabs
         .iter()
-        .map(|(_, l)| {
-            l.chars()
-                .map(|c| if c > '\u{7e}' { 2 } else { 1 })
-                .sum::<usize>()
-        })
+        .map(|(_, l)| l.chars().map(|c| if c > '\u{7e}' { 2 } else { 1 }).sum::<usize>())
         .max()
         .unwrap_or(8);
     let tab_pad = " ".repeat(inner_w.saturating_sub(max_w + 2) / 2);
@@ -42,16 +38,10 @@ pub fn render_sidebar(f: &mut Frame, area: Rect, active_tab: Tab) {
         } else {
             Style::default().fg(theme::current().dim)
         };
-        let dw = label
-            .chars()
-            .map(|c| if c > '\u{7e}' { 2 } else { 1 })
-            .sum::<usize>();
+        let dw = label.chars().map(|c| if c > '\u{7e}' { 2 } else { 1 }).sum::<usize>();
         let rpad = " ".repeat(max_w.saturating_sub(dw));
         let marker = if *tab == active_tab { "› " } else { "  " };
-        lines.push(Line::from(Span::styled(
-            format!("{}{}{}{}", tab_pad, marker, label, rpad),
-            style,
-        )));
+        lines.push(Line::from(Span::styled(format!("{}{}{}{}", tab_pad, marker, label, rpad), style)));
         lines.push(Line::from(""));
     }
 

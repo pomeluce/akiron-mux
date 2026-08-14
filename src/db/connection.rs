@@ -12,11 +12,7 @@ impl Db {
     pub fn open(path: &Path) -> Result<Self, anyhow::Error> {
         if let Some(parent) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                tracing::warn!(
-                    "Failed to create DB directory '{}': {}",
-                    parent.display(),
-                    e
-                );
+                tracing::warn!("Failed to create DB directory '{}': {}", parent.display(), e);
             }
         }
 
@@ -43,11 +39,7 @@ impl Db {
             );
         }
         if version < migrations::CURRENT_USER_VERSION {
-            tracing::info!(
-                "Applying DB migrations v{} → v{}",
-                version,
-                migrations::CURRENT_USER_VERSION
-            );
+            tracing::info!("Applying DB migrations v{} → v{}", version, migrations::CURRENT_USER_VERSION);
             migrations::apply_migrations(&conn)?;
         }
 
@@ -67,11 +59,7 @@ fn set_private_permissions(path: &Path) {
     if path.exists() {
         use std::os::unix::fs::PermissionsExt;
         if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-            tracing::warn!(
-                "Failed to restrict permissions for '{}': {}",
-                path.display(),
-                error
-            );
+            tracing::warn!("Failed to restrict permissions for '{}': {}", path.display(), error);
         }
     }
 }

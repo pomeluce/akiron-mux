@@ -9,13 +9,7 @@ use ratatui::{
     Frame,
 };
 
-pub fn render_app_bar(
-    f: &mut Frame,
-    area: Rect,
-    app: AppType,
-    proxy_mode: bool,
-    active_context: &str,
-) {
+pub fn render_app_bar(f: &mut Frame, area: Rect, app: AppType, proxy_mode: bool, active_context: &str) {
     let claude = " Claude ";
     let separator = " | ";
     let codex = " Codex ";
@@ -36,23 +30,9 @@ pub fn render_app_bar(
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(
-                claude,
-                if app == AppType::Claude {
-                    active
-                } else {
-                    inactive
-                },
-            ),
+            Span::styled(claude, if app == AppType::Claude { active } else { inactive }),
             Span::styled(separator, Style::default().fg(theme::current().comment)),
-            Span::styled(
-                codex,
-                if app == AppType::Codex {
-                    active
-                } else {
-                    inactive
-                },
-            ),
+            Span::styled(codex, if app == AppType::Codex { active } else { inactive }),
         ])),
         tabs_area,
     );
@@ -61,11 +41,7 @@ pub fn render_app_bar(
     }
     let [left, _, right] = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(20.min(inner.width)),
-            Constraint::Min(18),
-            Constraint::Length(34.min(inner.width / 2)),
-        ])
+        .constraints([Constraint::Length(20.min(inner.width)), Constraint::Min(18), Constraint::Length(34.min(inner.width / 2))])
         .areas(inner);
     f.render_widget(
         Paragraph::new(Span::styled(
@@ -95,11 +71,7 @@ pub fn render_app_bar(
     };
     if inner.width >= 90 {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                right_text,
-                Style::default().fg(theme::current().green),
-            ))
-            .alignment(Alignment::Right),
+            Paragraph::new(Span::styled(right_text, Style::default().fg(theme::current().green))).alignment(Alignment::Right),
             right,
         );
     }

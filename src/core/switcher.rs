@@ -1,9 +1,7 @@
 use crate::core::codex_catalog::{default_catalog_path, write_catalog};
 use crate::core::config::ConfigManager;
 use crate::core::env::{resolve_api_key, resolve_codex_api_key, ApiKeyUnavailable};
-use crate::core::models::{
-    validate_profile, validate_provider, ActiveConfig, AppType, Provider, SwitchMode,
-};
+use crate::core::models::{validate_profile, validate_provider, ActiveConfig, AppType, Provider, SwitchMode};
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::io::Write;
@@ -12,13 +10,7 @@ use std::path::Path;
 const DEFAULT_PROXY_PORT: u16 = 15721;
 const CODEX_MANAGED_PROVIDER_ID: &str = "ccs";
 
-pub fn switch_profile(
-    mgr: &ConfigManager,
-    provider_id: &str,
-    profile_id: &str,
-    mode: SwitchMode,
-    settings_path: Option<&Path>,
-) -> Result<ActiveConfig> {
+pub fn switch_profile(mgr: &ConfigManager, provider_id: &str, profile_id: &str, mode: SwitchMode, settings_path: Option<&Path>) -> Result<ActiveConfig> {
     let (provider, profile) = mgr
         .find_profile(provider_id, profile_id)?
         .with_context(|| format!("Profile not found: {}/{}", provider_id, profile_id))?;
@@ -27,22 +19,14 @@ pub fn switch_profile(
 
     let auth_token = resolve_api_key(&provider.api_key);
     if auth_token.is_empty() {
-        return Err(
-            ApiKeyUnavailable::new(&provider.id, &provider.api_key, "CLAUDE_API_KEY").into(),
-        );
+        return Err(ApiKeyUnavailable::new(&provider.id, &provider.api_key, "CLAUDE_API_KEY").into());
     }
     let base_url = match mode {
         SwitchMode::Proxy => format!("http://127.0.0.1:{}", DEFAULT_PROXY_PORT),
         SwitchMode::Local => provider.api_url.clone(),
     };
 
-    tracing::info!(
-        "switch_profile: mode={:?} provider={} profile={} base_url={}",
-        mode,
-        provider_id,
-        profile_id,
-        base_url
-    );
+    tracing::info!("switch_profile: mode={:?} provider={} profile={} base_url={}", mode, provider_id, profile_id, base_url);
 
     let config = ActiveConfig {
         provider_id: provider.id.clone(),
@@ -60,14 +44,7 @@ pub fn switch_profile(
     write_settings_json(&config, mode, settings_path)?;
     mgr.set_setting("active_provider", &config.provider_id)?;
     mgr.set_setting("active_profile", &config.profile_id)?;
-    mgr.set_setting(
-        "proxy_mode",
-        if mode == SwitchMode::Proxy {
-            "true"
-        } else {
-            "false"
-        },
-    )?;
+    mgr.set_setting("proxy_mode", if mode == SwitchMode::Proxy { "true" } else { "false" })?;
     if mode == SwitchMode::Proxy {
         mgr.set_setting("proxy_port", &DEFAULT_PROXY_PORT.to_string())?;
     }
@@ -84,11 +61,7 @@ fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Pa
         "write_settings_json: path={} base_url={} auth_token={} reasoning={} task={}",
         settings_path.display(),
         config.base_url,
-        if config.auth_token.is_empty() {
-            "(empty)"
-        } else {
-            "(set)"
-        },
+        if config.auth_token.is_empty() { "(empty)" } else { "(set)" },
         config.opus,
         config.haiku,
     );
@@ -151,10 +124,7 @@ fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Pa
         "at": now,
     });
 
-    write_private_file(
-        &settings_path,
-        serde_json::to_string_pretty(&existing)?.as_bytes(),
-    )?;
+    write_private_file(&settings_path, serde_json::to_string_pretty(&existing)?.as_bytes())?;
     tracing::debug!("write_settings_json: wrote to {}", settings_path.display());
     Ok(())
 }
@@ -162,12 +132,7 @@ fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Pa
 /// Switch Codex to a provider and update ~/.codex/config.toml + auth.json.
 /// Existing unrelated settings and provider definitions are preserved.
 #[allow(dead_code)]
-pub fn switch_codex_provider(
-    mgr: &ConfigManager,
-    provider_id: &str,
-    config_path: Option<&Path>,
-    auth_path: Option<&Path>,
-) -> Result<Provider> {
+pub fn switch_codex_provider(mgr: &ConfigManager, provider_id: &str, config_path: Option<&Path>, auth_path: Option<&Path>) -> Result<Provider> {
     let provider = mgr
         .find_provider_for(AppType::Codex, provider_id)?
         .with_context(|| format!("Codex provider not found: {}", provider_id))?;
@@ -181,13 +146,7 @@ pub fn switch_codex_provider(
     switch_codex_model(mgr, provider_id, model_slug, config_path, auth_path)
 }
 
-pub fn switch_codex_model(
-    mgr: &ConfigManager,
-    provider_id: &str,
-    model_slug: Option<&str>,
-    config_path: Option<&Path>,
-    auth_path: Option<&Path>,
-) -> Result<Provider> {
+pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Option<&str>, config_path: Option<&Path>, auth_path: Option<&Path>) -> Result<Provider> {
     let provider = mgr
         .find_provider_for(AppType::Codex, provider_id)?
         .with_context(|| format!("Codex provider not found: {}", provider_id))?;
@@ -206,23 +165,14 @@ pub fn switch_codex_model(
     };
     let auth_token = resolve_codex_api_key(&provider.api_key);
     if auth_token.is_empty() {
-        return Err(
-            ApiKeyUnavailable::new(&provider.id, &provider.api_key, "OPENAI_API_KEY").into(),
-        );
+        return Err(ApiKeyUnavailable::new(&provider.id, &provider.api_key, "OPENAI_API_KEY").into());
     }
 
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let codex_dir = Path::new(&home).join(".codex");
-    let config_path = config_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| codex_dir.join("config.toml"));
-    let auth_path = auth_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| codex_dir.join("auth.json"));
-    let catalog_path = config_path
-        .parent()
-        .map(|dir| dir.join("ccswitch/models.json"))
-        .unwrap_or_else(default_catalog_path);
+    let config_path = config_path.map(Path::to_path_buf).unwrap_or_else(|| codex_dir.join("config.toml"));
+    let auth_path = auth_path.map(Path::to_path_buf).unwrap_or_else(|| codex_dir.join("auth.json"));
+    let catalog_path = config_path.parent().map(|dir| dir.join("ccswitch/models.json")).unwrap_or_else(default_catalog_path);
 
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -233,9 +183,7 @@ pub fn switch_codex_model(
 
     let mut config: toml_edit::DocumentMut = if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)?;
-        content
-            .parse()
-            .context("Failed to parse Codex config.toml")?
+        content.parse().context("Failed to parse Codex config.toml")?
     } else {
         toml_edit::DocumentMut::new()
     };
@@ -271,46 +219,25 @@ pub fn switch_codex_model(
     {
         config.as_table_mut().remove("model_catalog_json");
     }
-    if selected_model.is_none()
-        && previous_managed_model.as_deref()
-            == config.get("model").and_then(toml_edit::Item::as_str)
-    {
+    if selected_model.is_none() && previous_managed_model.as_deref() == config.get("model").and_then(toml_edit::Item::as_str) {
         config.as_table_mut().remove("model");
         config.as_table_mut().remove("model_reasoning_effort");
     }
-    if config
-        .as_table()
-        .get("model_providers")
-        .is_some_and(|item| !item.is_table())
-    {
+    if config.as_table().get("model_providers").is_some_and(|item| !item.is_table()) {
         anyhow::bail!("Codex config.toml 'model_providers' must be a table");
     }
     if config.as_table().get("model_providers").is_none() {
-        config.as_table_mut().insert(
-            "model_providers",
-            toml_edit::Item::Table(toml_edit::Table::new()),
-        );
+        config.as_table_mut().insert("model_providers", toml_edit::Item::Table(toml_edit::Table::new()));
     }
-    let providers = config["model_providers"]
-        .as_table_mut()
-        .expect("table created above");
+    let providers = config["model_providers"].as_table_mut().expect("table created above");
     if providers.iter().all(|(_, item)| item.is_table()) {
         providers.set_implicit(true);
     }
-    if providers
-        .get(CODEX_MANAGED_PROVIDER_ID)
-        .is_some_and(|item| !item.is_table())
-    {
-        anyhow::bail!(
-            "Codex provider '{}' must be a table",
-            CODEX_MANAGED_PROVIDER_ID
-        );
+    if providers.get(CODEX_MANAGED_PROVIDER_ID).is_some_and(|item| !item.is_table()) {
+        anyhow::bail!("Codex provider '{}' must be a table", CODEX_MANAGED_PROVIDER_ID);
     }
     if providers.get(CODEX_MANAGED_PROVIDER_ID).is_none() {
-        providers.insert(
-            CODEX_MANAGED_PROVIDER_ID,
-            toml_edit::Item::Table(toml_edit::Table::new()),
-        );
+        providers.insert(CODEX_MANAGED_PROVIDER_ID, toml_edit::Item::Table(toml_edit::Table::new()));
     }
     let provider_table = providers
         .get_mut(CODEX_MANAGED_PROVIDER_ID)
@@ -322,32 +249,18 @@ pub fn switch_codex_model(
     provider_table.insert("requires_openai_auth", toml_edit::value(true));
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    if config
-        .as_table()
-        .get("ccswitch")
-        .is_some_and(|item| !item.is_table())
-    {
+    if config.as_table().get("ccswitch").is_some_and(|item| !item.is_table()) {
         anyhow::bail!("Codex config.toml 'ccswitch' must be a table");
     }
     if config.as_table().get("ccswitch").is_none() {
-        config
-            .as_table_mut()
-            .insert("ccswitch", toml_edit::Item::Table(toml_edit::Table::new()));
+        config.as_table_mut().insert("ccswitch", toml_edit::Item::Table(toml_edit::Table::new()));
     }
-    let ccswitch = config["ccswitch"]
-        .as_table_mut()
-        .expect("table created above");
-    if ccswitch
-        .get("last_switch")
-        .is_some_and(|item| !item.is_table())
-    {
+    let ccswitch = config["ccswitch"].as_table_mut().expect("table created above");
+    if ccswitch.get("last_switch").is_some_and(|item| !item.is_table()) {
         anyhow::bail!("Codex config.toml 'ccswitch.last_switch' must be a table");
     }
     if ccswitch.get("last_switch").is_none() {
-        ccswitch.insert(
-            "last_switch",
-            toml_edit::Item::Table(toml_edit::Table::new()),
-        );
+        ccswitch.insert("last_switch", toml_edit::Item::Table(toml_edit::Table::new()));
     }
     let last_switch = ccswitch
         .get_mut("last_switch")
@@ -360,10 +273,7 @@ pub fn switch_codex_model(
         last_switch.remove("model");
     }
     last_switch.insert("at", toml_edit::value(now));
-    if ccswitch
-        .iter()
-        .all(|(key, item)| key == "last_switch" && item.is_table())
-    {
+    if ccswitch.iter().all(|(key, item)| key == "last_switch" && item.is_table()) {
         ccswitch.set_implicit(true);
     }
     auth["OPENAI_API_KEY"] = json!(auth_token);
@@ -371,31 +281,18 @@ pub fn switch_codex_model(
     write_private_file(&config_path, config.to_string().as_bytes())?;
 
     mgr.set_setting(AppType::Codex.active_provider_key(), &provider.id)?;
-    mgr.set_setting(
-        "active_codex_model",
-        selected_model
-            .map(|model| model.slug.as_str())
-            .unwrap_or(""),
-    )?;
+    mgr.set_setting("active_codex_model", selected_model.map(|model| model.slug.as_str()).unwrap_or(""))?;
     Ok(provider)
 }
 
 /// Remove CCSwitch's association with a Codex provider. Provider definitions
 /// remain in config.toml because existing Codex sessions refer to them by ID.
-pub fn remove_codex_provider(
-    mgr: &ConfigManager,
-    provider_id: &str,
-    config_path: Option<&Path>,
-) -> Result<()> {
+pub fn remove_codex_provider(mgr: &ConfigManager, provider_id: &str, config_path: Option<&Path>) -> Result<()> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let config_path = config_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| Path::new(&home).join(".codex/config.toml"));
+    let config_path = config_path.map(Path::to_path_buf).unwrap_or_else(|| Path::new(&home).join(".codex/config.toml"));
     if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)?;
-        let mut config: toml_edit::DocumentMut = content
-            .parse()
-            .context("Failed to parse Codex config.toml")?;
+        let mut config: toml_edit::DocumentMut = content.parse().context("Failed to parse Codex config.toml")?;
         let last_source_matches = config
             .as_table()
             .get("ccswitch")
@@ -406,21 +303,13 @@ pub fn remove_codex_provider(
             .and_then(toml_edit::Item::as_str)
             == Some(provider_id);
         if last_source_matches {
-            if let Some(ccswitch) = config
-                .as_table_mut()
-                .get_mut("ccswitch")
-                .and_then(toml_edit::Item::as_table_mut)
-            {
+            if let Some(ccswitch) = config.as_table_mut().get_mut("ccswitch").and_then(toml_edit::Item::as_table_mut) {
                 ccswitch.remove("last_switch");
             }
         }
         write_private_file(&config_path, config.to_string().as_bytes())?;
     }
-    if mgr
-        .get_setting(AppType::Codex.active_provider_key())
-        .as_deref()
-        == Some(provider_id)
-    {
+    if mgr.get_setting(AppType::Codex.active_provider_key()).as_deref() == Some(provider_id) {
         mgr.set_setting(AppType::Codex.active_provider_key(), "")?;
     }
     Ok(())
@@ -430,15 +319,8 @@ fn write_private_file(path: &Path, content: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("config");
-    let temporary = path.with_file_name(format!(
-        ".{}.{}.ccswitch.tmp",
-        file_name,
-        std::process::id()
-    ));
+    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("config");
+    let temporary = path.with_file_name(format!(".{}.{}.ccswitch.tmp", file_name, std::process::id()));
     let mut options = std::fs::OpenOptions::new();
     options.create(true).truncate(true).write(true);
     #[cfg(unix)]

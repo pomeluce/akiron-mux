@@ -1,7 +1,4 @@
-use ccswitch::core::models::{
-    validate_codex_model, validate_codex_provider_models, validate_profile, validate_provider,
-    CodexModel, Profile, Provider, Source,
-};
+use ccswitch::core::models::{validate_codex_model, validate_codex_provider_models, validate_profile, validate_provider, CodexModel, Profile, Provider, Source};
 
 #[test]
 fn test_provider_deserialization() {
@@ -133,24 +130,12 @@ fn provider_validation_rejects_unsafe_ids_urls_and_env_refs() {
         source: Source::User,
     };
 
-    assert!(validate_provider(&provider(
-        "safe-id",
-        "https://api.example.com/v1",
-        "env:API_KEY"
-    ))
-    .is_ok());
+    assert!(validate_provider(&provider("safe-id", "https://api.example.com/v1", "env:API_KEY")).is_ok());
     assert!(validate_provider(&provider("bad id", "https://api.example.com", "key")).is_err());
     assert!(validate_provider(&provider("safe", "file:///tmp/socket", "key")).is_err());
     assert!(validate_provider(&provider("safe", "https://user:pass@example.com", "key")).is_err());
-    assert!(validate_provider(&provider(
-        "safe",
-        "https://api.example.com?token=secret",
-        "key"
-    ))
-    .is_err());
-    assert!(
-        validate_provider(&provider("safe", "https://api.example.com", "env:BAD-NAME")).is_err()
-    );
+    assert!(validate_provider(&provider("safe", "https://api.example.com?token=secret", "key")).is_err());
+    assert!(validate_provider(&provider("safe", "https://api.example.com", "env:BAD-NAME")).is_err());
 }
 
 #[test]

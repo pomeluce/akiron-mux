@@ -39,21 +39,10 @@ impl SettingsTab {
             0
         } else {
             lang::set_lang(&saved_lang);
-            lang::LANGS
-                .iter()
-                .position(|(n, _)| *n == saved_lang)
-                .unwrap_or(0)
+            lang::LANGS.iter().position(|(n, _)| *n == saved_lang).unwrap_or(0)
         };
 
-        let mode_idx = if mgr
-            .get_setting("proxy_mode")
-            .map(|v| v == "true")
-            .unwrap_or(false)
-        {
-            1
-        } else {
-            0
-        };
+        let mode_idx = if mgr.get_setting("proxy_mode").map(|v| v == "true").unwrap_or(false) { 1 } else { 0 };
         SettingsTab {
             mgr,
             selected: 0,
@@ -115,13 +104,8 @@ impl SettingsTab {
         } else {
             crate::core::models::SwitchMode::Local
         };
-        if let (Some(prov_id), Some(prof_id)) = (
-            self.mgr.get_setting("active_provider"),
-            self.mgr.get_setting("active_profile"),
-        ) {
-            if let Err(e) =
-                crate::core::switcher::switch_profile(&self.mgr, &prov_id, &prof_id, mode, None)
-            {
+        if let (Some(prov_id), Some(prof_id)) = (self.mgr.get_setting("active_provider"), self.mgr.get_setting("active_profile")) {
+            if let Err(e) = crate::core::switcher::switch_profile(&self.mgr, &prov_id, &prof_id, mode, None) {
                 tracing::warn!("Failed to apply mode switch: {}", e);
             }
         }
@@ -157,11 +141,7 @@ impl TabContent for SettingsTab {
             .unwrap_or(0);
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(7),
-                Constraint::Length(5),
-                Constraint::Min(5),
-            ])
+            .constraints([Constraint::Length(7), Constraint::Length(5), Constraint::Min(5)])
             .split(area);
 
         let appearance = vec![
@@ -170,24 +150,11 @@ impl TabContent for SettingsTab {
             setting_line(1, self.selected, items[1].0, &items[1].1, max_label_dw),
         ];
         f.render_widget(
-            section(
-                format!(
-                    "{} · {}",
-                    lang::pick("Appearance", "外观"),
-                    lang::current().settings_title
-                ),
-                appearance,
-            ),
+            section(format!("{} · {}", lang::pick("Appearance", "外观"), lang::current().settings_title), appearance),
             sections[0],
         );
 
-        let claude = vec![setting_line(
-            2,
-            self.selected,
-            items[2].0,
-            &items[2].1,
-            max_label_dw,
-        )];
+        let claude = vec![setting_line(2, self.selected, items[2].0, &items[2].1, max_label_dw)];
         f.render_widget(section("Claude".into(), claude), sections[1]);
 
         let database = shorten_home(&config::db_path().display().to_string());
@@ -195,10 +162,7 @@ impl TabContent for SettingsTab {
             readonly_line(refresh_label, lang::pick("Real-time", "实时"), max_label_dw),
             readonly_line(database_label, &database, max_label_dw),
         ];
-        f.render_widget(
-            section(lang::pick("Data", "数据").into(), data),
-            sections[2],
-        );
+        f.render_widget(section(lang::pick("Data", "数据").into(), data), sections[2]);
     }
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
@@ -231,18 +195,9 @@ impl TabContent for SettingsTab {
     fn shortcut_groups(&self) -> Vec<Vec<(String, Color)>> {
         let l = lang::current();
         vec![
-            vec![
-                (" J/K ".into(), theme::current().comment),
-                (l.sc_nav.into(), theme::current().comment),
-            ],
-            vec![
-                (" H/L ".into(), theme::current().comment),
-                (l.sc_toggle.into(), theme::current().comment),
-            ],
-            vec![
-                (" Q ".into(), theme::current().comment),
-                (l.sc_quit.into(), theme::current().comment),
-            ],
+            vec![(" J/K ".into(), theme::current().comment), (l.sc_nav.into(), theme::current().comment)],
+            vec![(" H/L ".into(), theme::current().comment), (l.sc_toggle.into(), theme::current().comment)],
+            vec![(" Q ".into(), theme::current().comment), (l.sc_quit.into(), theme::current().comment)],
         ]
     }
 }
@@ -256,34 +211,17 @@ fn section<'a>(title: String, lines: Vec<Line<'a>>) -> Paragraph<'a> {
     )
 }
 
-fn setting_line<'a>(
-    index: usize,
-    selected: usize,
-    label: &'a str,
-    value: &'a str,
-    width: usize,
-) -> Line<'a> {
+fn setting_line<'a>(index: usize, selected: usize, label: &'a str, value: &'a str, width: usize) -> Line<'a> {
     let active = index == selected;
     Line::from(vec![
-        Span::styled(
-            if active { "› " } else { "  " },
-            Style::default().fg(theme::current().cyan),
-        ),
+        Span::styled(if active { "› " } else { "  " }, Style::default().fg(theme::current().cyan)),
         Span::styled(
             settings_label(label, width),
-            Style::default().fg(if active {
-                theme::current().cyan
-            } else {
-                theme::current().fg
-            }),
+            Style::default().fg(if active { theme::current().cyan } else { theme::current().fg }),
         ),
         Span::styled(
             format!("<{}>", value),
-            Style::default().fg(if active {
-                theme::current().purple
-            } else {
-                theme::current().dim
-            }),
+            Style::default().fg(if active { theme::current().purple } else { theme::current().dim }),
         ),
     ])
 }
@@ -291,10 +229,7 @@ fn setting_line<'a>(
 fn readonly_line<'a>(label: &'a str, value: &'a str, width: usize) -> Line<'a> {
     Line::from(vec![
         Span::raw("  "),
-        Span::styled(
-            settings_label(label, width),
-            Style::default().fg(theme::current().fg),
-        ),
+        Span::styled(settings_label(label, width), Style::default().fg(theme::current().fg)),
         Span::styled(value, Style::default().fg(theme::current().comment)),
     ])
 }
@@ -309,8 +244,5 @@ fn settings_label(label: &str, width: usize) -> String {
 }
 
 fn shorten_home(path: &str) -> String {
-    std::env::var("HOME")
-        .ok()
-        .map(|home| path.replacen(&home, "~", 1))
-        .unwrap_or_else(|| path.to_string())
+    std::env::var("HOME").ok().map(|home| path.replacen(&home, "~", 1)).unwrap_or_else(|| path.to_string())
 }

@@ -21,11 +21,7 @@ use std::sync::mpsc;
 /// Background scan state, updated by poll_scan_events()
 enum ScanState {
     Idle,
-    Scanning {
-        files_done: usize,
-        files_total: usize,
-        records: usize,
-    },
+    Scanning { files_done: usize, files_total: usize, records: usize },
 }
 
 pub struct UsageTab {
@@ -62,11 +58,7 @@ impl UsageTab {
             let db = mgr.db();
             let count: i64 = db
                 .conn()
-                .query_row(
-                    "SELECT COUNT(*) FROM usage_logs WHERE app_type = ?1",
-                    [&app_type],
-                    |r| r.get(0),
-                )
+                .query_row("SELECT COUNT(*) FROM usage_logs WHERE app_type = ?1", [&app_type], |r| r.get(0))
                 .unwrap_or(0);
             count == 0
         };
@@ -132,11 +124,7 @@ impl UsageTab {
         self.app_type = app.as_str().to_string();
         self.cached_daily = None;
         self.selected_index = 0;
-        self.summaries = self
-            .mgr
-            .db()
-            .query_usage(&self.app_type, &self.range)
-            .unwrap_or_default();
+        self.summaries = self.mgr.db().query_usage(&self.app_type, &self.range).unwrap_or_default();
         self.sync_visible_selection();
         if self.scan_handle.is_none() {
             self.trigger_incremental_scan();
@@ -152,11 +140,7 @@ impl UsageTab {
 
     pub fn status_text(&self) -> String {
         match self.scan_state {
-            ScanState::Scanning {
-                files_done,
-                files_total,
-                records,
-            } => {
+            ScanState::Scanning { files_done, files_total, records } => {
                 format!(
                     "{} · {} {}/{} {} · {} {}",
                     self.app_type,
@@ -223,10 +207,7 @@ impl UsageTab {
         self.summaries
             .iter()
             .enumerate()
-            .filter(|(_, summary)| {
-                Self::token_total(summary) > 0
-                    && (query.is_empty() || summary.model.to_lowercase().contains(&query))
-            })
+            .filter(|(_, summary)| Self::token_total(summary) > 0 && (query.is_empty() || summary.model.to_lowercase().contains(&query)))
             .map(|(index, _)| index)
             .collect()
     }
@@ -238,10 +219,7 @@ impl UsageTab {
             self.state.select(None);
             return;
         }
-        if let Some(position) = visible
-            .iter()
-            .position(|index| *index == self.selected_index)
-        {
+        if let Some(position) = visible.iter().position(|index| *index == self.selected_index) {
             self.state.select(Some(position));
         } else {
             self.selected_index = visible[0];
@@ -272,26 +250,14 @@ impl UsageTab {
                     records,
                 }) => {
                     if !records.is_empty() {
-                        if let Err(e) = self
-                            .mgr
-                            .db()
-                            .insert_usage_batch(&app_type, &sid, &file_path, &records)
-                        {
+                        if let Err(e) = self.mgr.db().insert_usage_batch(&app_type, &sid, &file_path, &records) {
                             tracing::error!("Failed to insert usage batch: {}", e);
                         }
                     }
                 }
-                Ok(ScanEvent::Progress {
-                    files_done,
-                    files_total,
-                    records,
-                }) => {
+                Ok(ScanEvent::Progress { files_done, files_total, records }) => {
                     if matches!(self.scan_state, ScanState::Scanning { .. }) {
-                        self.scan_state = ScanState::Scanning {
-                            files_done,
-                            files_total,
-                            records,
-                        };
+                        self.scan_state = ScanState::Scanning { files_done, files_total, records };
                     }
                 }
                 Ok(ScanEvent::Done {}) => {
@@ -316,11 +282,7 @@ impl UsageTab {
                 let _ = h.join();
             }
             self.cached_daily = None;
-            self.summaries = self
-                .mgr
-                .db()
-                .query_usage(&self.app_type, &self.range)
-                .unwrap_or_default();
+            self.summaries = self.mgr.db().query_usage(&self.app_type, &self.range).unwrap_or_default();
             self.sync_visible_selection();
             if self.rescan_pending || completed_app != self.app_type {
                 self.trigger_incremental_scan();
@@ -338,11 +300,7 @@ impl TabContent for UsageTab {
                 .areas(area);
             let [search, cards, ranking] = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3),
-                    Constraint::Length(4),
-                    Constraint::Min(3),
-                ])
+                .constraints([Constraint::Length(3), Constraint::Length(4), Constraint::Min(3)])
                 .areas(left);
             self.render_search_box(f, search);
             self.render_summary_cards(f, cards);
@@ -352,12 +310,7 @@ impl TabContent for UsageTab {
             let card_height = 4;
             let [search, cards, ranking, chart] = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3),
-                    Constraint::Length(card_height),
-                    Constraint::Percentage(38),
-                    Constraint::Min(8),
-                ])
+                .constraints([Constraint::Length(3), Constraint::Length(card_height), Constraint::Percentage(38), Constraint::Min(8)])
                 .areas(area);
             self.render_search_box(f, search);
             self.render_summary_cards(f, cards);
@@ -394,10 +347,7 @@ impl TabContent for UsageTab {
             KeyCode::Tab | KeyCode::BackTab => return false,
             KeyCode::Char('j') | KeyCode::Down => {
                 let visible = self.visible_indices();
-                if let Some(position) = visible
-                    .iter()
-                    .position(|index| *index == self.selected_index)
-                {
+                if let Some(position) = visible.iter().position(|index| *index == self.selected_index) {
                     let next = (position + 1).min(visible.len().saturating_sub(1));
                     self.selected_index = visible[next];
                     self.state.select(Some(next));
@@ -405,10 +355,7 @@ impl TabContent for UsageTab {
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 let visible = self.visible_indices();
-                if let Some(position) = visible
-                    .iter()
-                    .position(|index| *index == self.selected_index)
-                {
+                if let Some(position) = visible.iter().position(|index| *index == self.selected_index) {
                     let previous = position.saturating_sub(1);
                     self.selected_index = visible[previous];
                     self.state.select(Some(previous));
@@ -422,11 +369,7 @@ impl TabContent for UsageTab {
                 }
                 .into();
                 self.cached_daily = None;
-                self.summaries = self
-                    .mgr
-                    .db()
-                    .query_usage(&self.app_type, &self.range)
-                    .unwrap_or_default();
+                self.summaries = self.mgr.db().query_usage(&self.app_type, &self.range).unwrap_or_default();
                 self.sync_visible_selection();
             }
             KeyCode::Char('/') => {
@@ -445,26 +388,11 @@ impl TabContent for UsageTab {
 
     fn shortcut_groups(&self) -> Vec<Vec<(String, Color)>> {
         vec![
-            vec![
-                (" J/K ".into(), theme::current().comment),
-                (lang::current().sc_nav.into(), theme::current().comment),
-            ],
-            vec![
-                (" / ".into(), theme::current().comment),
-                (lang::current().sc_search.into(), theme::current().comment),
-            ],
-            vec![
-                (" T ".into(), theme::current().comment),
-                (lang::current().sc_toggle.into(), theme::current().comment),
-            ],
-            vec![
-                (" PgUp/Dn ".into(), theme::current().comment),
-                (lang::current().sc_scroll.into(), theme::current().comment),
-            ],
-            vec![
-                (" Q ".into(), theme::current().comment),
-                (lang::current().sc_quit.into(), theme::current().comment),
-            ],
+            vec![(" J/K ".into(), theme::current().comment), (lang::current().sc_nav.into(), theme::current().comment)],
+            vec![(" / ".into(), theme::current().comment), (lang::current().sc_search.into(), theme::current().comment)],
+            vec![(" T ".into(), theme::current().comment), (lang::current().sc_toggle.into(), theme::current().comment)],
+            vec![(" PgUp/Dn ".into(), theme::current().comment), (lang::current().sc_scroll.into(), theme::current().comment)],
+            vec![(" Q ".into(), theme::current().comment), (lang::current().sc_quit.into(), theme::current().comment)],
         ]
     }
 }
@@ -481,26 +409,16 @@ impl UsageTab {
                 return data.clone();
             }
         }
-        let data = self
-            .mgr
-            .db()
-            .query_daily_usage(&self.app_type, model)
-            .unwrap_or_default();
+        let data = self.mgr.db().query_daily_usage(&self.app_type, model).unwrap_or_default();
         self.cached_daily = Some((key, data.clone()));
         data
     }
 
     fn render_summary_cards(&mut self, f: &mut Frame, area: Rect) {
-        let cards = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Ratio(1, 4); 4])
-            .split(area);
+        let cards = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Ratio(1, 4); 4]).split(area);
 
         let model_name = self.selected_summary().map(|s| s.model.clone());
-        let daily = model_name
-            .as_deref()
-            .map(|m| self.get_daily_cached(m))
-            .unwrap_or_default();
+        let daily = model_name.as_deref().map(|m| self.get_daily_cached(m)).unwrap_or_default();
         let (today, week, total, reqs) = if let Some(s) = self.selected_summary() {
             let today_date = chrono::Local::now().format("%Y-%m-%d").to_string();
             let today_tokens = daily
@@ -508,10 +426,7 @@ impl UsageTab {
                 .find(|(dt, _, _, _, _)| dt == &today_date)
                 .map(|(_, i, o, cr, cc)| i + o + cr + cc)
                 .unwrap_or(0);
-            let week_tokens = daily
-                .iter()
-                .map(|(_, i, o, cr, cc)| i + o + cr + cc)
-                .sum::<i64>();
+            let week_tokens = daily.iter().map(|(_, i, o, cr, cc)| i + o + cr + cc).sum::<i64>();
             let total_tokens = Self::token_total(s);
             (today_tokens, week_tokens, total_tokens, s.request_count)
         } else {
@@ -519,35 +434,15 @@ impl UsageTab {
         };
 
         let card_data = [
-            (
-                lang::current().card_today,
-                &format_tokens(today),
-                theme::current().green,
-            ),
-            (
-                lang::current().card_week,
-                &format_tokens(week),
-                theme::current().cyan,
-            ),
-            (
-                lang::current().card_total,
-                &format_tokens(total),
-                theme::current().purple,
-            ),
-            (
-                lang::current().card_reqs,
-                &format!("{}", reqs),
-                theme::current().yellow,
-            ),
+            (lang::current().card_today, &format_tokens(today), theme::current().green),
+            (lang::current().card_week, &format_tokens(week), theme::current().cyan),
+            (lang::current().card_total, &format_tokens(total), theme::current().purple),
+            (lang::current().card_reqs, &format!("{}", reqs), theme::current().yellow),
         ];
 
         for (i, (label, value, color)) in card_data.iter().enumerate() {
             let lines = vec![
-                Line::from(Span::styled(
-                    *label,
-                    Style::default().fg(theme::current().comment),
-                ))
-                .centered(),
+                Line::from(Span::styled(*label, Style::default().fg(theme::current().comment))).centered(),
                 Line::from(Span::styled(value.to_string(), Style::default().fg(*color))).centered(),
             ];
             let p = Paragraph::new(lines).block(
@@ -562,43 +457,24 @@ impl UsageTab {
     fn render_profile_list(&mut self, f: &mut Frame, area: Rect) {
         self.sync_visible_selection();
         let visible = self.visible_indices();
-        let max = visible
-            .iter()
-            .map(|index| Self::token_total(&self.summaries[*index]))
-            .max()
-            .unwrap_or(1);
+        let max = visible.iter().map(|index| Self::token_total(&self.summaries[*index])).max().unwrap_or(1);
         let items: Vec<ListItem> = visible
             .iter()
             .map(|index| {
                 let s = &self.summaries[*index];
                 let total = Self::token_total(s);
-                let pct = if max > 0 {
-                    (total as f64 / max as f64 * 100.0) as usize
-                } else {
-                    0
-                };
+                let pct = if max > 0 { (total as f64 / max as f64 * 100.0) as usize } else { 0 };
                 let bar_len = if total > 0 { (pct / 4).clamp(1, 20) } else { 0 };
                 let bar = "\u{2500}".repeat(bar_len);
                 let label = chart::title_case(&s.model);
                 let is_sel = *index == self.selected_index;
                 let arrow = if is_sel { "\u{276f} " } else { "  " };
-                let tc = if is_sel {
-                    theme::current().cyan
-                } else {
-                    theme::current().fg
-                };
-                let bar_text = if total > 0 {
-                    format!("{} {}%", bar, pct)
-                } else {
-                    String::new()
-                };
+                let tc = if is_sel { theme::current().cyan } else { theme::current().fg };
+                let bar_text = if total > 0 { format!("{} {}%", bar, pct) } else { String::new() };
                 ListItem::new(vec![
                     Line::from(vec![
                         Span::styled(format!("{}{}", arrow, label), Style::default().fg(tc)),
-                        Span::styled(
-                            format!("  {}", format_tokens(total)),
-                            Style::default().fg(theme::current().dim),
-                        ),
+                        Span::styled(format!("  {}", format_tokens(total)), Style::default().fg(theme::current().dim)),
                     ]),
                     Line::from(vec![
                         Span::styled("  ", Style::default()),
@@ -613,11 +489,7 @@ impl UsageTab {
             .block(
                 Block::bordered()
                     .border_set(ratatui::symbols::border::ROUNDED)
-                    .title(format!(
-                        "{} — \u{3a3} {}",
-                        lang::current().models_title,
-                        format_tokens(self.total_tokens())
-                    ))
+                    .title(format!("{} — \u{3a3} {}", lang::current().models_title, format_tokens(self.total_tokens())))
                     .border_style(Style::default().fg(theme::current().dim)),
             )
             .highlight_style(Style::default());
@@ -626,27 +498,16 @@ impl UsageTab {
 
     fn render_daily_chart(&mut self, f: &mut Frame, area: Rect) {
         let model_name = self.selected_summary().map(|s| s.model.clone());
-        let daily = model_name
-            .as_deref()
-            .map(|m| self.get_daily_cached(m))
-            .unwrap_or_default();
+        let daily = model_name.as_deref().map(|m| self.get_daily_cached(m)).unwrap_or_default();
         if let Some(model) = model_name {
             chart::render_daily_chart(&daily, &model, &mut self.chart_scroll, f, area);
         } else {
             // No data — render empty placeholder
             let p = Paragraph::new(vec![
                 Line::from(""),
-                Line::from(Span::styled(
-                    lang::current().no_usage,
-                    Style::default().fg(theme::current().comment),
-                ))
-                .centered(),
+                Line::from(Span::styled(lang::current().no_usage, Style::default().fg(theme::current().comment))).centered(),
                 Line::from(""),
-                Line::from(Span::styled(
-                    lang::current().no_usage_hint,
-                    Style::default().fg(theme::current().dim),
-                ))
-                .centered(),
+                Line::from(Span::styled(lang::current().no_usage_hint, Style::default().fg(theme::current().dim))).centered(),
             ])
             .block(
                 Block::bordered()

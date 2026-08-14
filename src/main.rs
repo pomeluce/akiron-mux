@@ -31,10 +31,7 @@ fn main() {
                 {
                     use std::os::unix::fs::PermissionsExt;
                     if let Err(error) = f.set_permissions(std::fs::Permissions::from_mode(0o600)) {
-                        eprintln!(
-                            "Warning: failed to restrict log file permissions: {}",
-                            error
-                        );
+                        eprintln!("Warning: failed to restrict log file permissions: {}", error);
                     }
                 }
                 f
@@ -47,10 +44,7 @@ fn main() {
                 }
             },
         };
-        tracing_subscriber::fmt()
-            .with_writer(std::sync::Mutex::new(file))
-            .with_target(false)
-            .init();
+        tracing_subscriber::fmt().with_writer(std::sync::Mutex::new(file)).with_target(false).init();
 
         // Launch TUI
         if let Err(e) = tui::run_tui() {
@@ -83,9 +77,7 @@ fn pre_tui_import() {
     // Check if this is first launch (for progress bar display)
     let is_first_launch: bool = db
         .conn()
-        .query_row("SELECT COUNT(*) FROM session_history", [], |r| {
-            r.get::<_, i64>(0)
-        })
+        .query_row("SELECT COUNT(*) FROM session_history", [], |r| r.get::<_, i64>(0))
         .map(|c| c == 0)
         .unwrap_or(true);
 
@@ -94,29 +86,19 @@ fn pre_tui_import() {
     }
 
     // Always run import — incremental (mtime-based) on subsequent launches
-    let result = crate::core::import::import_claude_sessions_with_progress(
-        &db,
-        |files_done, files_total, imported| {
-            if is_first_launch {
-                let pct = if files_total > 0 {
-                    (files_done as f64 / files_total as f64 * 100.0) as usize
-                } else {
-                    0
-                };
-                let bar_len = (pct / 4).min(25);
-                let bar = format!(
-                    "{}{}",
-                    "█".repeat(bar_len),
-                    "░".repeat(25usize.saturating_sub(bar_len))
-                );
-                eprint!(
-                    "\r  [{}] {:>3}%  {}/{} files  {} sessions imported",
-                    bar, pct, files_done, files_total, imported
-                );
-                std::io::Write::flush(&mut std::io::stderr()).ok();
-            }
-        },
-    );
+    let result = crate::core::import::import_claude_sessions_with_progress(&db, |files_done, files_total, imported| {
+        if is_first_launch {
+            let pct = if files_total > 0 {
+                (files_done as f64 / files_total as f64 * 100.0) as usize
+            } else {
+                0
+            };
+            let bar_len = (pct / 4).min(25);
+            let bar = format!("{}{}", "█".repeat(bar_len), "░".repeat(25usize.saturating_sub(bar_len)));
+            eprint!("\r  [{}] {:>3}%  {}/{} files  {} sessions imported", bar, pct, files_done, files_total, imported);
+            std::io::Write::flush(&mut std::io::stderr()).ok();
+        }
+    });
 
     if is_first_launch {
         match result {

@@ -42,12 +42,7 @@ pub async fn proxy_handler(State(state): State<Arc<ProxyState>>, req: Request<Bo
     let method = req.method().clone();
     let original_headers = req.headers().clone();
     let request_path = req.uri().path().to_string();
-    let path_and_query = req
-        .uri()
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/")
-        .to_string();
+    let path_and_query = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/").to_string();
 
     tracing::info!("Proxy: {} {}", method, request_path);
 
@@ -57,11 +52,7 @@ pub async fn proxy_handler(State(state): State<Arc<ProxyState>>, req: Request<Bo
             Ok(g) => g,
             Err(e) => {
                 tracing::error!("Mutex poisoned: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal error".to_string(),
-                )
-                    .into_response();
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string()).into_response();
             }
         };
         match get_active_upstream(&mgr) {
@@ -74,11 +65,7 @@ pub async fn proxy_handler(State(state): State<Arc<ProxyState>>, req: Request<Bo
     };
 
     // Build upstream URL preserving path + query
-    let upstream_url = format!(
-        "{}{}",
-        upstream.api_url.trim_end_matches('/'),
-        path_and_query
-    );
+    let upstream_url = format!("{}{}", upstream.api_url.trim_end_matches('/'), path_and_query);
     let upstream_log_url = format!("{}{}", upstream.api_url.trim_end_matches('/'), request_path);
 
     // Read entire request body
@@ -92,30 +79,21 @@ pub async fn proxy_handler(State(state): State<Arc<ProxyState>>, req: Request<Bo
 
     let is_v1_messages = request_path == "/v1/messages";
     // ── Transform request body: replace Claude model → actual upstream model ──
-    let (transformed_body, original_model, actual_model) = match transform::transform_request_body(
-        &body_bytes,
-        &upstream.opus_model,
-        &upstream.sonnet_model,
-        &upstream.haiku_model,
-        &upstream.subagent_model,
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            if is_v1_messages {
-                tracing::warn!("Invalid /v1/messages request body: {}", e);
-                return (StatusCode::BAD_REQUEST, "Invalid messages request body").into_response();
+    let (transformed_body, original_model, actual_model) =
+        match transform::transform_request_body(&body_bytes, &upstream.opus_model, &upstream.sonnet_model, &upstream.haiku_model, &upstream.subagent_model) {
+            Ok(v) => v,
+            Err(e) => {
+                if is_v1_messages {
+                    tracing::warn!("Invalid /v1/messages request body: {}", e);
+                    return (StatusCode::BAD_REQUEST, "Invalid messages request body").into_response();
+                }
+                tracing::debug!("Body transform skipped for non-message request: {}", e);
+                (body_bytes.to_vec(), String::new(), String::new())
             }
-            tracing::debug!("Body transform skipped for non-message request: {}", e);
-            (body_bytes.to_vec(), String::new(), String::new())
-        }
-    };
+        };
 
     if is_v1_messages && !original_model.is_empty() {
-        tracing::info!(
-            "Model transform: original={} → actual={}",
-            original_model,
-            actual_model,
-        );
+        tracing::info!("Model transform: original={} → actual={}", original_model, actual_model,);
     }
 
     // Build upstream request
@@ -123,11 +101,7 @@ pub async fn proxy_handler(State(state): State<Arc<ProxyState>>, req: Request<Bo
         Ok(headers) => headers,
         Err(error) => {
             tracing::error!("Invalid upstream authentication header: {}", error);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Invalid upstream authentication configuration",
-            )
-                .into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Invalid upstream authentication configuration").into_response();
         }
     };
     let body_len = transformed_body.len();
@@ -150,11 +124,7 @@ pub async fn proxy_handler(State(state): State<Arc<ProxyState>>, req: Request<Bo
         Ok(r) => r,
         Err(_) => {
             tracing::error!("Failed to build upstream request for {}", request_path);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to build upstream request",
-            )
-                .into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build upstream request").into_response();
         }
     };
 
@@ -163,27 +133,14 @@ pub async fn proxy_handler(State(state): State<Arc<ProxyState>>, req: Request<Bo
         Ok(resp) => {
             let status = resp.status();
             let response_headers = resp.headers().clone();
-            let content_type = response_headers
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("(none)");
-            tracing::info!(
-                "Upstream response: status={} content-type={} upstream_url={}",
-                status,
-                content_type,
-                upstream_log_url,
-            );
+            let content_type = response_headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("(none)");
+            tracing::info!("Upstream response: status={} content-type={} upstream_url={}", status, content_type, upstream_log_url,);
 
             if !status.is_success() {
                 let (body, truncated) = read_limited_response_body(resp, MAX_UPSTREAM_ERROR_BODY)
                     .await
                     .unwrap_or_else(|_| (Bytes::from_static(b"(unreadable)"), false));
-                tracing::error!(
-                    "Upstream error: status={} body_len={} truncated={}",
-                    status,
-                    body.len(),
-                    truncated,
-                );
+                tracing::error!("Upstream error: status={} body_len={} truncated={}", status, body.len(), truncated,);
                 let mut response = Response::new(Body::from(body));
                 *response.status_mut() = status;
                 *response.headers_mut() = sanitize_response_headers(response_headers);
@@ -192,11 +149,7 @@ pub async fn proxy_handler(State(state): State<Arc<ProxyState>>, req: Request<Bo
 
             // ── Transform SSE response stream ──
             let body = if is_v1_messages && !original_model.is_empty() {
-                transform::transform_response_stream(
-                    resp.bytes_stream(),
-                    original_model,
-                    actual_model,
-                )
+                transform::transform_response_stream(resp.bytes_stream(), original_model, actual_model)
             } else {
                 Body::from_stream(resp.bytes_stream())
             };
@@ -218,10 +171,7 @@ pub async fn proxy_handler(State(state): State<Arc<ProxyState>>, req: Request<Bo
     }
 }
 
-async fn read_limited_response_body(
-    response: reqwest::Response,
-    limit: usize,
-) -> Result<(Bytes, bool), reqwest::Error> {
+async fn read_limited_response_body(response: reqwest::Response, limit: usize) -> Result<(Bytes, bool), reqwest::Error> {
     let mut stream = response.bytes_stream();
     let mut body = BytesMut::new();
     let mut truncated = false;
@@ -241,14 +191,8 @@ async fn read_limited_response_body(
 /// Look up the active provider and profile from the database and return
 /// upstream connection info including model mapping.
 fn get_active_upstream(mgr: &ConfigManager) -> anyhow::Result<UpstreamInfo> {
-    let provider_id = mgr
-        .db()
-        .get_setting("active_provider")
-        .ok_or_else(|| anyhow::anyhow!("No active provider set"))?;
-    let profile_id = mgr
-        .db()
-        .get_setting("active_profile")
-        .ok_or_else(|| anyhow::anyhow!("No active profile set"))?;
+    let provider_id = mgr.db().get_setting("active_provider").ok_or_else(|| anyhow::anyhow!("No active provider set"))?;
+    let profile_id = mgr.db().get_setting("active_profile").ok_or_else(|| anyhow::anyhow!("No active profile set"))?;
 
     let (provider, profile) = mgr
         .find_profile(&provider_id, &profile_id)?
@@ -276,12 +220,7 @@ fn prepare_upstream_headers(original: &HeaderMap, new_token: &str) -> anyhow::Re
     let connection_tokens = headers
         .get("connection")
         .and_then(|value| value.to_str().ok())
-        .map(|value| {
-            value
-                .split(',')
-                .map(|token| token.trim().to_ascii_lowercase())
-                .collect::<Vec<_>>()
-        })
+        .map(|value| value.split(',').map(|token| token.trim().to_ascii_lowercase()).collect::<Vec<_>>())
         .unwrap_or_default();
     for name in [
         "authorization",
@@ -313,12 +252,7 @@ fn sanitize_response_headers(mut headers: HeaderMap) -> HeaderMap {
     let connection_tokens = headers
         .get("connection")
         .and_then(|value| value.to_str().ok())
-        .map(|value| {
-            value
-                .split(',')
-                .map(|token| token.trim().to_ascii_lowercase())
-                .collect::<Vec<_>>()
-        })
+        .map(|value| value.split(',').map(|token| token.trim().to_ascii_lowercase()).collect::<Vec<_>>())
         .unwrap_or_default();
     for name in [
         "connection",
@@ -349,10 +283,7 @@ mod tests {
         let mut input = HeaderMap::new();
         input.insert("authorization", HeaderValue::from_static("Bearer dummy"));
         input.insert("x-api-key", HeaderValue::from_static("dummy"));
-        input.insert(
-            "connection",
-            HeaderValue::from_static("keep-alive, x-remove-me"),
-        );
+        input.insert("connection", HeaderValue::from_static("keep-alive, x-remove-me"));
         input.insert("x-remove-me", HeaderValue::from_static("value"));
         input.insert("content-length", HeaderValue::from_static("10"));
         let headers = prepare_upstream_headers(&input, "real-key").unwrap();

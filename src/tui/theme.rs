@@ -15,15 +15,7 @@ pub struct Palette {
 }
 
 /// Available themes (index corresponds to palette array)
-pub const THEMES: &[&str] = &[
-    "ember",
-    "monokai",
-    "nord",
-    "solarized",
-    "gruvbox",
-    "everforest",
-    "catppuccin",
-];
+pub const THEMES: &[&str] = &["ember", "monokai", "nord", "solarized", "gruvbox", "everforest", "catppuccin"];
 
 const PALETTES: &[Palette] = &[
     // Ember

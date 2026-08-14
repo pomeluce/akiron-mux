@@ -89,10 +89,7 @@ default = true
     .unwrap();
     let mgr = ConfigManager::new(&dir.path().join("ccswitch.db"), Some(&defaults_path)).unwrap();
     let providers = mgr.list_providers_for(AppType::Codex).unwrap();
-    assert_eq!(
-        providers[0].codex_catalog,
-        ccswitch::core::models::CodexCatalog::Custom
-    );
+    assert_eq!(providers[0].codex_catalog, ccswitch::core::models::CodexCatalog::Custom);
     assert_eq!(providers[0].models.len(), 1);
     assert_eq!(providers[0].models[0].slug, "third-party-coder");
 }
@@ -131,9 +128,7 @@ codex_catalog = "custom"
     )
     .unwrap();
     let mgr = ConfigManager::new(&db_path, Some(&defaults_path)).unwrap();
-    assert!(mgr.list_providers_for(AppType::Codex).unwrap()[0]
-        .models
-        .is_empty());
+    assert!(mgr.list_providers_for(AppType::Codex).unwrap()[0].models.is_empty());
 }
 
 #[test]

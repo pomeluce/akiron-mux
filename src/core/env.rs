@@ -9,10 +9,7 @@ impl ApiKeyUnavailable {
     pub fn new(provider_id: &str, raw_key: &str, default_var: &str) -> Self {
         Self {
             provider_id: provider_id.to_string(),
-            env_var: raw_key
-                .strip_prefix("env:")
-                .unwrap_or(default_var)
-                .to_string(),
+            env_var: raw_key.strip_prefix("env:").unwrap_or(default_var).to_string(),
         }
     }
 }
@@ -102,10 +99,7 @@ fn read_env_file_value(path: &std::path::Path, name: &str) -> Option<String> {
             continue;
         }
         let value = value.trim();
-        let value = if value.len() >= 2
-            && ((value.starts_with('"') && value.ends_with('"'))
-                || (value.starts_with('\'') && value.ends_with('\'')))
-        {
+        let value = if value.len() >= 2 && ((value.starts_with('"') && value.ends_with('"')) || (value.starts_with('\'') && value.ends_with('\''))) {
             &value[1..value.len() - 1]
         } else {
             value
@@ -171,10 +165,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("env");
         std::fs::write(&path, "# comment\nexport CODEX_KEY=\"from-file\"\n").unwrap();
-        assert_eq!(
-            read_env_file_value(&path, "CODEX_KEY"),
-            Some("from-file".into())
-        );
+        assert_eq!(read_env_file_value(&path, "CODEX_KEY"), Some("from-file".into()));
     }
 
     #[test]
@@ -182,10 +173,7 @@ mod tests {
         let error = ApiKeyUnavailable::new("deepseek", "env:DEEPSEEK_API_KEY", "CLAUDE_API_KEY");
         assert_eq!(error.provider_id, "deepseek");
         assert_eq!(error.env_var, "DEEPSEEK_API_KEY");
-        assert_eq!(
-            error.to_string(),
-            "API key unavailable for 'deepseek'. Set DEEPSEEK_API_KEY or use a literal key."
-        );
+        assert_eq!(error.to_string(), "API key unavailable for 'deepseek'. Set DEEPSEEK_API_KEY or use a literal key.");
     }
 
     #[test]
@@ -193,16 +181,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let secrets_path = dir.path().join("secrets.env");
         std::fs::write(&secrets_path, "CUSTOM_KEY=from-custom-file\n").unwrap();
-        std::fs::write(
-            dir.path().join("env-path"),
-            format!("{}\n", secrets_path.display()),
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("env-path"), format!("{}\n", secrets_path.display())).unwrap();
 
-        assert_eq!(
-            lookup_env_files(dir.path(), "CUSTOM_KEY"),
-            Some("from-custom-file".into())
-        );
+        assert_eq!(lookup_env_files(dir.path(), "CUSTOM_KEY"), Some("from-custom-file".into()));
     }
 
     #[test]
@@ -211,15 +192,8 @@ mod tests {
         let secrets_path = dir.path().join("secrets.env");
         std::fs::write(&secrets_path, "OTHER_KEY=other-value\n").unwrap();
         std::fs::write(dir.path().join("env"), "DEFAULT_KEY=default-value\n").unwrap();
-        std::fs::write(
-            dir.path().join("env-path"),
-            format!("{}\n", secrets_path.display()),
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("env-path"), format!("{}\n", secrets_path.display())).unwrap();
 
-        assert_eq!(
-            lookup_env_files(dir.path(), "DEFAULT_KEY"),
-            Some("default-value".into())
-        );
+        assert_eq!(lookup_env_files(dir.path(), "DEFAULT_KEY"), Some("default-value".into()));
     }
 }

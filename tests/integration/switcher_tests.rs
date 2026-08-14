@@ -1,8 +1,6 @@
 use ccswitch::core::config::ConfigManager;
 use ccswitch::core::models::{CodexCatalog, CodexModel, Provider, Source, SwitchMode};
-use ccswitch::core::switcher::{
-    remove_codex_provider, switch_codex_model, switch_codex_provider, switch_profile,
-};
+use ccswitch::core::switcher::{remove_codex_provider, switch_codex_model, switch_codex_provider, switch_profile};
 use ccswitch::db::Db;
 use std::fs;
 use tempfile::tempdir;
@@ -35,8 +33,7 @@ default = true
     let db_path = dir.path().join("test.db");
     let settings_path = dir.path().join("settings.json");
     let mgr = ConfigManager::new(&db_path, Some(&defaults_path)).unwrap();
-    let config =
-        switch_profile(&mgr, "p1", "prof1", SwitchMode::Local, Some(&settings_path)).unwrap();
+    let config = switch_profile(&mgr, "p1", "prof1", SwitchMode::Local, Some(&settings_path)).unwrap();
 
     assert_eq!(config.opus, "opus-model");
     assert_eq!(config.sonnet, "sonnet-model");
@@ -48,26 +45,14 @@ default = true
     let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
     assert_eq!(parsed["env"]["ANTHROPIC_MODEL"], "sonnet-model");
     assert_eq!(parsed["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "opus-model");
-    assert_eq!(
-        parsed["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"],
-        "sonnet-model"
-    );
-    assert_eq!(
-        parsed["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
-        "haiku-model"
-    );
-    assert_eq!(
-        parsed["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
-        "subagent-model"
-    );
+    assert_eq!(parsed["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "sonnet-model");
+    assert_eq!(parsed["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "haiku-model");
+    assert_eq!(parsed["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "subagent-model");
     assert_eq!(parsed["env"]["ANTHROPIC_BASE_URL"], "https://api.test.com");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            fs::metadata(&settings_path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        assert_eq!(fs::metadata(&settings_path).unwrap().permissions().mode() & 0o777, 0o600);
     }
 }
 
@@ -110,27 +95,16 @@ fn custom_codex_model_writes_aggregated_catalog_and_model_config() {
     let mgr = ConfigManager::new(&db_path, Some(&defaults_path)).unwrap();
     let config_path = dir.path().join("codex/config.toml");
     let auth_path = dir.path().join("codex/auth.json");
-    switch_codex_model(
-        &mgr,
-        &provider.id,
-        Some(&model.slug),
-        Some(&config_path),
-        Some(&auth_path),
-    )
-    .unwrap();
+    switch_codex_model(&mgr, &provider.id, Some(&model.slug), Some(&config_path), Some(&auth_path)).unwrap();
 
     let config: toml::Value = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     assert_eq!(config["model"].as_str(), Some("third-party-coder"));
     assert_eq!(config["model_reasoning_effort"].as_str(), Some("high"));
     let catalog_path = config["model_catalog_json"].as_str().unwrap();
-    let catalog: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(catalog_path).unwrap()).unwrap();
+    let catalog: serde_json::Value = serde_json::from_str(&fs::read_to_string(catalog_path).unwrap()).unwrap();
     assert_eq!(catalog["models"][0]["slug"], "third-party-coder");
     assert_eq!(catalog["models"][0]["context_window"], 128_000);
-    assert_eq!(
-        mgr.get_setting("active_codex_model").as_deref(),
-        Some("third-party-coder")
-    );
+    assert_eq!(mgr.get_setting("active_codex_model").as_deref(), Some("third-party-coder"));
 }
 
 #[test]
@@ -185,14 +159,7 @@ fn switching_from_custom_to_builtin_removes_ccswitch_model_fields() {
     let mgr = ConfigManager::new(&db_path, Some(&defaults_path)).unwrap();
     let config_path = dir.path().join("codex/config.toml");
     let auth_path = dir.path().join("codex/auth.json");
-    switch_codex_model(
-        &mgr,
-        "custom",
-        Some("custom-coder"),
-        Some(&config_path),
-        Some(&auth_path),
-    )
-    .unwrap();
+    switch_codex_model(&mgr, "custom", Some("custom-coder"), Some(&config_path), Some(&auth_path)).unwrap();
     switch_codex_model(&mgr, "builtin", None, Some(&config_path), Some(&auth_path)).unwrap();
     let config: toml::Value = toml::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
     assert!(config.get("model_catalog_json").is_none());
@@ -227,15 +194,9 @@ subagent = "subagent"
     fs::write(&settings_path, "{ invalid json").unwrap();
     let mgr = ConfigManager::new(&dir.path().join("ccswitch.db"), Some(&defaults_path)).unwrap();
 
-    let error =
-        switch_profile(&mgr, "p1", "prof1", SwitchMode::Local, Some(&settings_path)).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("Failed to parse Claude settings.json"));
-    assert_eq!(
-        fs::read_to_string(&settings_path).unwrap(),
-        "{ invalid json"
-    );
+    let error = switch_profile(&mgr, "p1", "prof1", SwitchMode::Local, Some(&settings_path)).unwrap_err();
+    assert!(error.to_string().contains("Failed to parse Claude settings.json"));
+    assert_eq!(fs::read_to_string(&settings_path).unwrap(), "{ invalid json");
 }
 
 #[test]
@@ -267,8 +228,7 @@ subagent = "subagent-model"
     let settings_path = dir.path().join("settings.json");
 
     let mgr = ConfigManager::new(&db_path, Some(&defaults_path)).unwrap();
-    let config =
-        switch_profile(&mgr, "p1", "prof1", SwitchMode::Proxy, Some(&settings_path)).unwrap();
+    let config = switch_profile(&mgr, "p1", "prof1", SwitchMode::Proxy, Some(&settings_path)).unwrap();
 
     assert_eq!(config.base_url, "http://127.0.0.1:15721");
     assert_eq!(mgr.get_setting("active_provider"), Some("p1".into()));
@@ -277,10 +237,7 @@ subagent = "subagent-model"
 
     let content = fs::read_to_string(&settings_path).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-    assert_eq!(
-        parsed["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
-        "ccswitch-subagent"
-    );
+    assert_eq!(parsed["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "ccswitch-subagent");
 }
 
 #[test]
@@ -342,125 +299,54 @@ requires_openai_auth = true
     let config: toml::Value = toml::from_str(&config_text).unwrap();
     assert_eq!(config["model"].as_str(), Some("gpt-test"));
     assert_eq!(config["model_provider"].as_str(), Some("ccs"));
-    assert_eq!(
-        config["model_providers"]["existing"]["name"].as_str(),
-        Some("Existing")
-    );
-    assert_eq!(
-        config["model_providers"]["ccs"]["name"].as_str(),
-        Some("Codex Proxy")
-    );
-    assert_eq!(
-        config["model_providers"]["ccs"]["base_url"].as_str(),
-        Some("https://codex.example.com/v1")
-    );
-    assert_eq!(
-        config["model_providers"]["ccs"]["wire_api"].as_str(),
-        Some("responses")
-    );
-    assert_eq!(
-        config["model_providers"]["ccs"]["requires_openai_auth"].as_bool(),
-        Some(true)
-    );
-    assert_eq!(
-        config["model_providers"]["codex-proxy"]["base_url"].as_str(),
-        Some("https://legacy.example.com/v1")
-    );
-    assert_eq!(
-        config["ccswitch"]["last_switch"]["source"].as_str(),
-        Some("codex-proxy")
-    );
+    assert_eq!(config["model_providers"]["existing"]["name"].as_str(), Some("Existing"));
+    assert_eq!(config["model_providers"]["ccs"]["name"].as_str(), Some("Codex Proxy"));
+    assert_eq!(config["model_providers"]["ccs"]["base_url"].as_str(), Some("https://codex.example.com/v1"));
+    assert_eq!(config["model_providers"]["ccs"]["wire_api"].as_str(), Some("responses"));
+    assert_eq!(config["model_providers"]["ccs"]["requires_openai_auth"].as_bool(), Some(true));
+    assert_eq!(config["model_providers"]["codex-proxy"]["base_url"].as_str(), Some("https://legacy.example.com/v1"));
+    assert_eq!(config["ccswitch"]["last_switch"]["source"].as_str(), Some("codex-proxy"));
 
-    let auth: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&auth_path).unwrap()).unwrap();
+    let auth: serde_json::Value = serde_json::from_str(&fs::read_to_string(&auth_path).unwrap()).unwrap();
     assert_eq!(auth["OPENAI_API_KEY"], "sk-codex");
     assert_eq!(auth["other"], "preserved");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            fs::metadata(&auth_path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        assert_eq!(fs::metadata(&auth_path).unwrap().permissions().mode() & 0o777, 0o600);
     }
-    assert_eq!(
-        mgr.get_setting("active_codex_provider"),
-        Some("codex-proxy".into())
-    );
+    assert_eq!(mgr.get_setting("active_codex_provider"), Some("codex-proxy".into()));
 
     remove_codex_provider(&mgr, "codex-proxy", Some(&config_path)).unwrap();
     let removed_text = fs::read_to_string(&config_path).unwrap();
     let removed: toml::Value = toml::from_str(&removed_text).unwrap();
     assert_eq!(removed["model_provider"].as_str(), Some("ccs"));
-    assert_eq!(
-        removed["model_providers"]["ccs"]["base_url"].as_str(),
-        Some("https://codex.example.com/v1")
-    );
-    assert_eq!(
-        removed["model_providers"]["codex-proxy"]["base_url"].as_str(),
-        Some("https://legacy.example.com/v1")
-    );
-    assert_eq!(
-        removed["model_providers"]["existing"]["name"].as_str(),
-        Some("Existing")
-    );
-    assert!(removed
-        .get("ccswitch")
-        .and_then(|item| item.get("last_switch"))
-        .is_none());
-    assert_eq!(
-        mgr.get_setting("active_codex_provider"),
-        Some(String::new())
-    );
+    assert_eq!(removed["model_providers"]["ccs"]["base_url"].as_str(), Some("https://codex.example.com/v1"));
+    assert_eq!(removed["model_providers"]["codex-proxy"]["base_url"].as_str(), Some("https://legacy.example.com/v1"));
+    assert_eq!(removed["model_providers"]["existing"]["name"].as_str(), Some("Existing"));
+    assert!(removed.get("ccswitch").and_then(|item| item.get("last_switch")).is_none());
+    assert_eq!(mgr.get_setting("active_codex_provider"), Some(String::new()));
 
     let new_config_path = dir.path().join("new/config.toml");
     let new_auth_path = dir.path().join("new/auth.json");
-    switch_codex_provider(
-        &mgr,
-        "codex-proxy",
-        Some(&new_config_path),
-        Some(&new_auth_path),
-    )
-    .unwrap();
+    switch_codex_provider(&mgr, "codex-proxy", Some(&new_config_path), Some(&new_auth_path)).unwrap();
     assert!(new_config_path.exists());
     assert!(new_auth_path.exists());
-    let new_config: toml::Value =
-        toml::from_str(&fs::read_to_string(&new_config_path).unwrap()).unwrap();
+    let new_config: toml::Value = toml::from_str(&fs::read_to_string(&new_config_path).unwrap()).unwrap();
     assert_eq!(new_config["model_provider"].as_str(), Some("ccs"));
-    assert_eq!(
-        new_config["model_providers"]["ccs"]["base_url"].as_str(),
-        Some("https://codex.example.com/v1")
-    );
+    assert_eq!(new_config["model_providers"]["ccs"]["base_url"].as_str(), Some("https://codex.example.com/v1"));
 
     let guarded_config_path = dir.path().join("guarded-config.toml");
     let corrupt_auth_path = dir.path().join("corrupt-auth.json");
     let original_config = "model = \"preserved\"\n";
     fs::write(&guarded_config_path, original_config).unwrap();
     fs::write(&corrupt_auth_path, "{ invalid json").unwrap();
-    assert!(switch_codex_provider(
-        &mgr,
-        "codex-proxy",
-        Some(&guarded_config_path),
-        Some(&corrupt_auth_path),
-    )
-    .is_err());
-    assert_eq!(
-        fs::read_to_string(&guarded_config_path).unwrap(),
-        original_config
-    );
+    assert!(switch_codex_provider(&mgr, "codex-proxy", Some(&guarded_config_path), Some(&corrupt_auth_path),).is_err());
+    assert_eq!(fs::read_to_string(&guarded_config_path).unwrap(), original_config);
 
     let invalid_table_path = dir.path().join("invalid-table.toml");
     let invalid_table = "model_providers = \"do not overwrite\"\n";
     fs::write(&invalid_table_path, invalid_table).unwrap();
-    assert!(switch_codex_provider(
-        &mgr,
-        "codex-proxy",
-        Some(&invalid_table_path),
-        Some(&new_auth_path),
-    )
-    .is_err());
-    assert_eq!(
-        fs::read_to_string(&invalid_table_path).unwrap(),
-        invalid_table
-    );
+    assert!(switch_codex_provider(&mgr, "codex-proxy", Some(&invalid_table_path), Some(&new_auth_path),).is_err());
+    assert_eq!(fs::read_to_string(&invalid_table_path).unwrap(), invalid_table);
 }

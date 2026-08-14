@@ -27,11 +27,7 @@ pub enum ScanEvent {
         records: Vec<UsageRecord>,
     },
     /// Progress update (files done / files total, cumulative records)
-    Progress {
-        files_done: usize,
-        files_total: usize,
-        records: usize,
-    },
+    Progress { files_done: usize, files_total: usize, records: usize },
     /// All files parsed.
     Done {},
 }
@@ -56,11 +52,7 @@ pub struct ScanContext {
 }
 
 impl Db {
-    pub fn query_usage(
-        &self,
-        app_type: &str,
-        range: &str,
-    ) -> Result<Vec<UsageSummary>, rusqlite::Error> {
+    pub fn query_usage(&self, app_type: &str, range: &str) -> Result<Vec<UsageSummary>, rusqlite::Error> {
         let date_filter = match range {
             "day" => "date(timestamp) = date('now')",
             "week" => "date(timestamp) >= date('now', '-6 days')",
@@ -87,11 +79,7 @@ impl Db {
     }
 
     /// Query per-day usage breakdown for a specific model
-    pub fn query_daily_usage(
-        &self,
-        app_type: &str,
-        model: &str,
-    ) -> Result<Vec<DailyUsage>, rusqlite::Error> {
+    pub fn query_daily_usage(&self, app_type: &str, model: &str) -> Result<Vec<DailyUsage>, rusqlite::Error> {
         let sql = "SELECT date(timestamp) as day,
                           SUM(prompt_tokens), SUM(completion_tokens),
                           SUM(cache_read_tokens), SUM(cache_creation_tokens)
@@ -113,36 +101,25 @@ impl Db {
     }
 
     /// Query token usage for a specific session (by session ID)
-    pub fn query_session_tokens(
-        &self,
-        app_type: &str,
-        session_id: &str,
-    ) -> Result<(i64, i64), rusqlite::Error> {
+    pub fn query_session_tokens(&self, app_type: &str, session_id: &str) -> Result<(i64, i64), rusqlite::Error> {
         let mut stmt = self.conn().prepare(
             "SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0)
              FROM usage_logs WHERE app_type = ?1 AND session_id = ?2",
         )?;
-        stmt.query_row(params![app_type, session_id], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
+        stmt.query_row(params![app_type, session_id], |row| Ok((row.get(0)?, row.get(1)?)))
     }
 
     /// Prepare scan context: load the file sync index from session_log_sync.
     /// Called from main thread. Fast — no filesystem walk.
     pub fn prepare_scan_context(&self) -> Result<ScanContext, anyhow::Error> {
         // Cleanup synthetic entries
-        if let Err(e) = self
-            .conn()
-            .execute("DELETE FROM usage_logs WHERE model = '<synthetic>'", [])
-        {
+        if let Err(e) = self.conn().execute("DELETE FROM usage_logs WHERE model = '<synthetic>'", []) {
             tracing::warn!("synthetic cleanup failed: {}", e);
         }
 
         // Load stored file index from session_log_sync
         let file_index: std::collections::HashMap<String, i64> = {
-            let mut stmt = self.conn().prepare(
-                "SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type = 'usage'",
-            )?;
+            let mut stmt = self.conn().prepare("SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type = 'usage'")?;
             let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
             rows.filter_map(|r| r.ok()).collect()
         };
@@ -151,13 +128,7 @@ impl Db {
     }
 
     /// Insert a batch of parsed records into usage_logs (single transaction for speed).
-    pub fn insert_usage_batch(
-        &self,
-        app_type: &str,
-        sid: &str,
-        file_path: &PathBuf,
-        records: &[UsageRecord],
-    ) -> Result<usize, anyhow::Error> {
+    pub fn insert_usage_batch(&self, app_type: &str, sid: &str, file_path: &PathBuf, records: &[UsageRecord]) -> Result<usize, anyhow::Error> {
         let mut imported = 0usize;
         let result: Result<usize, anyhow::Error> = (|| {
             self.conn().execute("BEGIN", [])?;
@@ -179,10 +150,7 @@ impl Db {
                         r.output,
                         r.cr,
                         r.cc,
-                        r.input
-                            .saturating_add(r.output)
-                            .saturating_add(r.cr)
-                            .saturating_add(r.cc),
+                        r.input.saturating_add(r.output).saturating_add(r.cr).saturating_add(r.cc),
                         r.date
                     ],
                 )?;

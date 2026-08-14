@@ -35,9 +35,7 @@ struct FileWatcher {
 
 impl FileWatcher {
     fn new() -> Self {
-        FileWatcher {
-            known: HashMap::new(),
-        }
+        FileWatcher { known: HashMap::new() }
     }
 
     /// Poll directory and record baseline without signalling
@@ -77,10 +75,7 @@ impl FileWatcher {
 fn collect_jsonl_mtimes() -> HashMap<PathBuf, i64> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let mut map = HashMap::new();
-    for dir in [
-        PathBuf::from(&home).join(".claude/projects"),
-        PathBuf::from(&home).join(".codex/sessions"),
-    ] {
+    for dir in [PathBuf::from(&home).join(".claude/projects"), PathBuf::from(&home).join(".codex/sessions")] {
         if dir.exists() {
             walk_dir(&dir, &mut map);
         }

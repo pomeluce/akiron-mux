@@ -17,19 +17,13 @@ pub fn default_catalog_path() -> PathBuf {
 
 pub fn build_catalog(providers: &[Provider]) -> Result<Value> {
     let mut models = BTreeMap::<String, Value>::new();
-    for provider in providers
-        .iter()
-        .filter(|provider| provider.codex_catalog == CodexCatalog::Custom)
-    {
+    for provider in providers.iter().filter(|provider| provider.codex_catalog == CodexCatalog::Custom) {
         validate_codex_provider_models(provider)?;
         for model in &provider.models {
             let entry = model_entry(model);
             if let Some(existing) = models.get(&model.slug) {
                 if existing != &entry {
-                    anyhow::bail!(
-                        "Model slug '{}' has conflicting definitions across providers",
-                        model.slug
-                    );
+                    anyhow::bail!("Model slug '{}' has conflicting definitions across providers", model.slug);
                 }
             } else {
                 models.insert(model.slug.clone(), entry);
@@ -48,8 +42,7 @@ pub fn catalog_status(path: &Path, providers: &[Provider]) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
-    let existing: Value = serde_json::from_str(&std::fs::read_to_string(path)?)
-        .context("Failed to parse CCSwitch models.json")?;
+    let existing: Value = serde_json::from_str(&std::fs::read_to_string(path)?).context("Failed to parse CCSwitch models.json")?;
     Ok(existing == build_catalog(providers)?)
 }
 
@@ -120,10 +113,7 @@ fn write_private_json(path: &Path, value: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("models.json");
+    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("models.json");
     let temporary = path.with_file_name(format!(".{}.ccswitch.tmp", file_name));
     let mut options = std::fs::OpenOptions::new();
     options.create(true).truncate(true).write(true);

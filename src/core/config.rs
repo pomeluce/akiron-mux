@@ -1,7 +1,4 @@
-use crate::core::models::{
-    validate_codex_provider_models, validate_profile, validate_provider, AppType, CodexCatalog,
-    CodexModel, Profile, Provider, Source,
-};
+use crate::core::models::{validate_codex_provider_models, validate_profile, validate_provider, AppType, CodexCatalog, CodexModel, Profile, Provider, Source};
 use crate::db::Db;
 use anyhow::Context;
 use serde::Deserialize;
@@ -10,17 +7,13 @@ use std::path::{Path, PathBuf};
 /// Config directory for ccswitch: XDG_CONFIG_HOME on Linux, AppData on Windows,
 /// Library/Application Support on macOS.
 pub fn config_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("ccswitch")
+    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("ccswitch")
 }
 
 /// Data directory for ccswitch (logs, runtime data).
 #[allow(dead_code)]
 pub fn data_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("ccswitch")
+    dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("ccswitch")
 }
 
 /// Config DB path.
@@ -107,16 +100,8 @@ fn into_provider(p: ProviderToml, include_profiles: bool) -> Provider {
             p.profiles
                 .into_iter()
                 .map(|pr| {
-                    let sonnet = if pr.sonnet.is_empty() {
-                        pr.opus.clone()
-                    } else {
-                        pr.sonnet
-                    };
-                    let subagent = if pr.subagent.is_empty() {
-                        pr.haiku.clone()
-                    } else {
-                        pr.subagent
-                    };
+                    let sonnet = if pr.sonnet.is_empty() { pr.opus.clone() } else { pr.sonnet };
+                    let subagent = if pr.subagent.is_empty() { pr.haiku.clone() } else { pr.subagent };
                     Profile {
                         id: pr.id,
                         name: pr.name,
@@ -157,16 +142,8 @@ impl ConfigManager {
             let content = std::fs::read_to_string(defaults_path)?;
             let defaults: DefaultsFile = toml::from_str(&content)?;
             (
-                defaults
-                    .providers
-                    .into_iter()
-                    .map(|p| into_provider(p, true))
-                    .collect(),
-                defaults
-                    .codex_providers
-                    .into_iter()
-                    .map(|p| into_provider(p, false))
-                    .collect(),
+                defaults.providers.into_iter().map(|p| into_provider(p, true)).collect(),
+                defaults.codex_providers.into_iter().map(|p| into_provider(p, false)).collect(),
             )
         } else {
             (vec![], vec![])
@@ -174,27 +151,13 @@ impl ConfigManager {
 
         validate_default_provider_ids("Claude", &system_claude_providers)?;
         validate_default_provider_ids("Codex", &system_codex_providers)?;
-        for provider in system_claude_providers
-            .iter()
-            .chain(&system_codex_providers)
-        {
-            validate_provider(provider)
-                .with_context(|| format!("Invalid provider '{}' in defaults.toml", provider.id))?;
+        for provider in system_claude_providers.iter().chain(&system_codex_providers) {
+            validate_provider(provider).with_context(|| format!("Invalid provider '{}' in defaults.toml", provider.id))?;
             for profile in &provider.profiles {
-                validate_profile(profile).with_context(|| {
-                    format!(
-                        "Invalid profile '{}/{}' in defaults.toml",
-                        provider.id, profile.id
-                    )
-                })?;
+                validate_profile(profile).with_context(|| format!("Invalid profile '{}/{}' in defaults.toml", provider.id, profile.id))?;
             }
             if !provider.models.is_empty() {
-                validate_codex_provider_models(provider).with_context(|| {
-                    format!(
-                        "Invalid Codex models for '{}' in defaults.toml",
-                        provider.id
-                    )
-                })?;
+                validate_codex_provider_models(provider).with_context(|| format!("Invalid Codex models for '{}' in defaults.toml", provider.id))?;
             }
         }
 
@@ -202,10 +165,8 @@ impl ConfigManager {
         // Always call — even when empty, to demote stale system providers.
         db.sync_system_providers("claude", &system_claude_providers)
             .context("Failed to sync Claude defaults to DB")?;
-        db.sync_system_providers("codex", &system_codex_providers)
-            .context("Failed to sync Codex defaults to DB")?;
-        db.sync_system_codex_models(&system_codex_providers)
-            .context("Failed to sync Codex models to DB")?;
+        db.sync_system_providers("codex", &system_codex_providers).context("Failed to sync Codex defaults to DB")?;
+        db.sync_system_codex_models(&system_codex_providers).context("Failed to sync Codex models to DB")?;
 
         Ok(ConfigManager {
             db,
@@ -252,11 +213,7 @@ impl ConfigManager {
                 provider.profiles.clear();
                 let db_models = self.db.get_codex_models(&provider.id)?;
                 for model in db_models {
-                    if let Some(existing) = provider
-                        .models
-                        .iter_mut()
-                        .find(|item| item.slug == model.slug)
-                    {
+                    if let Some(existing) = provider.models.iter_mut().find(|item| item.slug == model.slug) {
                         *existing = model;
                     } else {
                         provider.models.push(model);
@@ -279,11 +236,7 @@ impl ConfigManager {
         Ok(result)
     }
 
-    pub fn find_profile(
-        &self,
-        provider_id: &str,
-        profile_id: &str,
-    ) -> Result<Option<(Provider, Profile)>, anyhow::Error> {
+    pub fn find_profile(&self, provider_id: &str, profile_id: &str) -> Result<Option<(Provider, Profile)>, anyhow::Error> {
         for p in self.list_providers()? {
             if p.id == provider_id {
                 for pr in &p.profiles {
@@ -296,15 +249,8 @@ impl ConfigManager {
         Ok(None)
     }
 
-    pub fn find_provider_for(
-        &self,
-        app: AppType,
-        provider_id: &str,
-    ) -> Result<Option<Provider>, anyhow::Error> {
-        Ok(self
-            .list_providers_for(app)?
-            .into_iter()
-            .find(|provider| provider.id == provider_id))
+    pub fn find_provider_for(&self, app: AppType, provider_id: &str) -> Result<Option<Provider>, anyhow::Error> {
+        Ok(self.list_providers_for(app)?.into_iter().find(|provider| provider.id == provider_id))
     }
 }
 
@@ -312,20 +258,12 @@ fn validate_default_provider_ids(app: &str, providers: &[Provider]) -> anyhow::R
     let mut provider_ids = std::collections::HashSet::new();
     for provider in providers {
         if !provider_ids.insert(provider.id.as_str()) {
-            anyhow::bail!(
-                "Duplicate {} provider ID '{}' in defaults.toml",
-                app,
-                provider.id
-            );
+            anyhow::bail!("Duplicate {} provider ID '{}' in defaults.toml", app, provider.id);
         }
         let mut profile_ids = std::collections::HashSet::new();
         for profile in &provider.profiles {
             if !profile_ids.insert(profile.id.as_str()) {
-                anyhow::bail!(
-                    "Duplicate profile ID '{}/{}' in defaults.toml",
-                    provider.id,
-                    profile.id
-                );
+                anyhow::bail!("Duplicate profile ID '{}/{}' in defaults.toml", provider.id, profile.id);
             }
         }
     }

@@ -1,7 +1,5 @@
 use super::super::super::theme;
-use super::super::super::widgets::shared::{
-    centered_rect, clear_popup_area, display_width, pad_label,
-};
+use super::super::super::widgets::shared::{centered_rect, clear_popup_area, display_width, pad_label};
 use crate::tui::lang;
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -22,14 +20,7 @@ pub struct EditForm {
 
 pub fn edit_labels() -> [&'static str; 6] {
     let l = lang::current();
-    [
-        l.label_profile_id,
-        l.label_profile_name,
-        l.label_opus,
-        l.label_sonnet,
-        l.label_haiku,
-        l.label_subagent,
-    ]
+    [l.label_profile_id, l.label_profile_name, l.label_opus, l.label_sonnet, l.label_haiku, l.label_subagent]
 }
 
 impl EditForm {
@@ -43,20 +34,12 @@ impl EditForm {
                 return;
             }
             KeyCode::BackTab => {
-                self.focused = if self.focused == 0 {
-                    5
-                } else {
-                    self.focused - 1
-                };
+                self.focused = if self.focused == 0 { 5 } else { self.focused - 1 };
                 return;
             }
             _ => {}
         }
-        edit_text_field(
-            &mut self.fields[self.focused],
-            &mut self.cursors[self.focused],
-            code,
-        );
+        edit_text_field(&mut self.fields[self.focused], &mut self.cursors[self.focused], code);
     }
 }
 
@@ -79,9 +62,7 @@ pub fn render_edit_form(form: &EditForm, f: &mut Frame, area: Rect) {
         let cur = (pos - vis.skip).min(vis.text.len());
         let (left, right) = vis.text.split_at(cur);
         let cursor = if i == form.focused { "▌" } else { "" };
-        let tail = " ".repeat(
-            value_w.saturating_sub(display_width(&vis.text) + usize::from(i == form.focused)),
-        );
+        let tail = " ".repeat(value_w.saturating_sub(display_width(&vis.text) + usize::from(i == form.focused)));
         let style = if form.is_edit && i == 0 {
             Style::default().fg(theme::current().dim)
         } else if i == form.focused {
@@ -90,10 +71,7 @@ pub fn render_edit_form(form: &EditForm, f: &mut Frame, area: Rect) {
             Style::default().fg(theme::current().fg)
         };
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("{}{}", pad, pad_label(label, 15)),
-                Style::default().fg(theme::current().fg),
-            ),
+            Span::styled(format!("{}{}", pad, pad_label(label, 15)), Style::default().fg(theme::current().fg)),
             Span::styled(left.to_string(), style),
             Span::styled(cursor.to_string(), style),
             Span::styled(right.to_string(), style),
@@ -106,20 +84,11 @@ pub fn render_edit_form(form: &EditForm, f: &mut Frame, area: Rect) {
     lines.push(Line::from(""));
     lines.push(
         Line::from(vec![
-            Span::styled(
-                lang::current().sc_save,
-                Style::default().fg(theme::current().comment),
-            ),
+            Span::styled(lang::current().sc_save, Style::default().fg(theme::current().comment)),
             Span::styled("  ", Style::default()),
-            Span::styled(
-                lang::current().sc_cancel,
-                Style::default().fg(theme::current().comment),
-            ),
+            Span::styled(lang::current().sc_cancel, Style::default().fg(theme::current().comment)),
             Span::styled("  ", Style::default()),
-            Span::styled(
-                lang::current().sc_next_field,
-                Style::default().fg(theme::current().comment),
-            ),
+            Span::styled(lang::current().sc_next_field, Style::default().fg(theme::current().comment)),
         ])
         .centered(),
     );
@@ -154,12 +123,7 @@ pub struct ProviderForm {
 
 fn provider_labels() -> [&'static str; 4] {
     let l = lang::current();
-    [
-        l.label_prov_name,
-        l.label_prov_id,
-        l.label_api_url,
-        l.label_api_key,
-    ]
+    [l.label_prov_name, l.label_prov_id, l.label_api_url, l.label_api_key]
 }
 
 impl ProviderForm {
@@ -192,11 +156,7 @@ impl ProviderForm {
             _ => {}
         }
         if self.focused < 4 {
-            edit_text_field(
-                &mut self.fields[self.focused],
-                &mut self.cursors[self.focused],
-                code,
-            );
+            edit_text_field(&mut self.fields[self.focused], &mut self.cursors[self.focused], code);
         }
     }
 }
@@ -219,9 +179,7 @@ pub fn render_provider_form(form: &ProviderForm, is_codex: bool, f: &mut Frame, 
         let cur = (pos - vis.skip).min(vis.text.len());
         let (left, right) = vis.text.split_at(cur);
         let cursor = if i == form.focused { "\u{258c}" } else { "" };
-        let tail = " ".repeat(
-            value_w.saturating_sub(display_width(&vis.text) + usize::from(i == form.focused)),
-        );
+        let tail = " ".repeat(value_w.saturating_sub(display_width(&vis.text) + usize::from(i == form.focused)));
         let style = if form.is_edit && i == 1 {
             // Readonly ID in edit mode
             Style::default().fg(theme::current().dim)
@@ -231,10 +189,7 @@ pub fn render_provider_form(form: &ProviderForm, is_codex: bool, f: &mut Frame, 
             Style::default().fg(theme::current().fg)
         };
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("{}{}", pad, pad_label(label, 10)),
-                Style::default().fg(theme::current().fg),
-            ),
+            Span::styled(format!("{}{}", pad, pad_label(label, 10)), Style::default().fg(theme::current().fg)),
             Span::styled(left.to_string(), style),
             Span::styled(cursor.to_string(), style),
             Span::styled(right.to_string(), style),
@@ -251,25 +206,11 @@ pub fn render_provider_form(form: &ProviderForm, is_codex: bool, f: &mut Frame, 
         };
         lines.push(Line::from(vec![
             Span::styled(
-                format!(
-                    "{}{}",
-                    pad,
-                    pad_label(lang::pick("Catalog", "模型来源"), 10)
-                ),
+                format!("{}{}", pad, pad_label(lang::pick("Catalog", "模型来源"), 10)),
                 Style::default().fg(theme::current().fg),
             ),
-            Span::styled(
-                selected,
-                Style::default().fg(if form.focused == 4 {
-                    theme::current().cyan
-                } else {
-                    theme::current().fg
-                }),
-            ),
-            Span::styled(
-                "  Space toggle",
-                Style::default().fg(theme::current().comment),
-            ),
+            Span::styled(selected, Style::default().fg(if form.focused == 4 { theme::current().cyan } else { theme::current().fg })),
+            Span::styled("  Space toggle", Style::default().fg(theme::current().comment)),
         ]));
         lines.push(Line::from(""));
     }
@@ -277,20 +218,11 @@ pub fn render_provider_form(form: &ProviderForm, is_codex: bool, f: &mut Frame, 
     lines.push(Line::from(""));
     lines.push(
         Line::from(vec![
-            Span::styled(
-                lang::current().sc_save,
-                Style::default().fg(theme::current().comment),
-            ),
+            Span::styled(lang::current().sc_save, Style::default().fg(theme::current().comment)),
             Span::styled("  ", Style::default()),
-            Span::styled(
-                lang::current().sc_cancel,
-                Style::default().fg(theme::current().comment),
-            ),
+            Span::styled(lang::current().sc_cancel, Style::default().fg(theme::current().comment)),
             Span::styled("  ", Style::default()),
-            Span::styled(
-                lang::current().sc_next_field,
-                Style::default().fg(theme::current().comment),
-            ),
+            Span::styled(lang::current().sc_next_field, Style::default().fg(theme::current().comment)),
         ])
         .centered(),
     );
@@ -326,9 +258,7 @@ pub struct CodexModelForm {
     pub supports_search: bool,
 }
 
-pub const REASONING_EFFORTS: [&str; 8] = [
-    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-];
+pub const REASONING_EFFORTS: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
 
 impl CodexModelForm {
     pub fn supported_reasoning_efforts(&self) -> Vec<String> {
@@ -364,39 +294,17 @@ impl CodexModelForm {
         }
         match code {
             KeyCode::Tab => self.focused = (self.focused + 1) % 13,
-            KeyCode::BackTab => {
-                self.focused = if self.focused == 0 {
-                    12
-                } else {
-                    self.focused - 1
-                }
-            }
-            KeyCode::Left | KeyCode::Char('h') if self.focused == 6 => {
-                self.cycle_default_effort(false)
-            }
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') if self.focused == 6 => {
-                self.cycle_default_effort(true)
-            }
-            KeyCode::Left | KeyCode::Char('h') if self.focused == 7 => {
-                self.effort_cursor = self
-                    .effort_cursor
-                    .checked_sub(1)
-                    .unwrap_or(REASONING_EFFORTS.len() - 1)
-            }
-            KeyCode::Right | KeyCode::Char('l') if self.focused == 7 => {
-                self.effort_cursor = (self.effort_cursor + 1) % REASONING_EFFORTS.len()
-            }
+            KeyCode::BackTab => self.focused = if self.focused == 0 { 12 } else { self.focused - 1 },
+            KeyCode::Left | KeyCode::Char('h') if self.focused == 6 => self.cycle_default_effort(false),
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') if self.focused == 6 => self.cycle_default_effort(true),
+            KeyCode::Left | KeyCode::Char('h') if self.focused == 7 => self.effort_cursor = self.effort_cursor.checked_sub(1).unwrap_or(REASONING_EFFORTS.len() - 1),
+            KeyCode::Right | KeyCode::Char('l') if self.focused == 7 => self.effort_cursor = (self.effort_cursor + 1) % REASONING_EFFORTS.len(),
             KeyCode::Char(' ') if self.focused == 7 => {
-                let selected = self
-                    .supported_efforts
-                    .iter()
-                    .filter(|value| **value)
-                    .count();
+                let selected = self.supported_efforts.iter().filter(|value| **value).count();
                 if self.supported_efforts[self.effort_cursor] && selected == 1 {
                     return;
                 }
-                self.supported_efforts[self.effort_cursor] =
-                    !self.supported_efforts[self.effort_cursor];
+                self.supported_efforts[self.effort_cursor] = !self.supported_efforts[self.effort_cursor];
                 if !self.supported_efforts[self.default_effort] {
                     self.default_effort = self
                         .supported_efforts
@@ -413,18 +321,14 @@ impl CodexModelForm {
                 12 => self.supports_search = !self.supports_search,
                 _ => {}
             },
-            _ if self.focused < 6 => edit_text_field(
-                &mut self.fields[self.focused],
-                &mut self.cursors[self.focused],
-                code,
-            ),
+            _ if self.focused < 6 => edit_text_field(&mut self.fields[self.focused], &mut self.cursors[self.focused], code),
             _ => {}
         }
     }
 }
 
 pub fn render_codex_model_form(form: &CodexModelForm, f: &mut Frame, area: Rect) {
-    let popup = centered_rect(82, 20, area);
+    let popup = centered_rect(82, 21, area);
     let block = Block::bordered()
         .border_set(ratatui::symbols::border::ROUNDED)
         .title(
@@ -458,7 +362,7 @@ pub fn render_codex_model_form(form: &CodexModelForm, f: &mut Frame, area: Rect)
         .max()
         .unwrap_or(18);
     let value_width = inner.width as usize - (label_width + 4).min(inner.width as usize);
-    let mut lines = Vec::new();
+    let mut lines = vec![Line::from(""), Line::from("")];
     for (index, label) in labels.iter().enumerate() {
         let value = &form.fields[index];
         let cursor_pos = form.cursors[index].min(value.len());
@@ -466,87 +370,48 @@ pub fn render_codex_model_form(form: &CodexModelForm, f: &mut Frame, area: Rect)
         let cursor = (cursor_pos - visible.skip).min(visible.text.len());
         let (left, right) = visible.text.split_at(cursor);
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {}", pad_label(label, label_width)),
-                Style::default().fg(theme::current().purple),
-            ),
+            Span::styled(format!("  {}", pad_label(label, label_width)), Style::default().fg(theme::current().purple)),
             Span::styled(
                 left.to_string(),
-                Style::default().fg(if form.focused == index {
-                    theme::current().cyan
-                } else {
-                    theme::current().fg
-                }),
+                Style::default().fg(if form.focused == index { theme::current().cyan } else { theme::current().fg }),
             ),
-            if form.focused == index {
-                Span::raw("▌")
-            } else {
-                Span::raw("")
-            },
+            if form.focused == index { Span::raw("▌") } else { Span::raw("") },
             Span::styled(
                 right.to_string(),
-                Style::default().fg(if form.focused == index {
-                    theme::current().cyan
-                } else {
-                    theme::current().fg
-                }),
+                Style::default().fg(if form.focused == index { theme::current().cyan } else { theme::current().fg }),
             ),
         ]));
     }
     lines.push(Line::from(vec![
         Span::styled(
-            format!(
-                "  {}",
-                pad_label(lang::pick("Default effort", "默认推理强度"), label_width)
-            ),
+            format!("  {}", pad_label(lang::pick("Default effort", "默认推理强度"), label_width)),
             Style::default().fg(theme::current().purple),
         ),
         Span::styled(
             format!("< {} >", form.default_reasoning_effort()),
-            Style::default().fg(if form.focused == 6 {
+            Style::default().fg(if form.focused == 6 { theme::current().cyan } else { theme::current().fg }),
+        ),
+    ]));
+    let mut effort_spans = vec![Span::styled(
+        format!("  {}", pad_label(lang::pick("Supported efforts", "支持的推理强度"), label_width)),
+        Style::default().fg(theme::current().purple),
+    )];
+    effort_spans.extend(REASONING_EFFORTS.iter().enumerate().map(|(index, effort)| {
+        let marker = if form.supported_efforts[index] { "x" } else { " " };
+        Span::styled(
+            format!("{}[{}] {}", if index == 0 { "" } else { " " }, marker, effort),
+            Style::default().fg(if form.focused == 7 && form.effort_cursor == index {
                 theme::current().cyan
             } else {
                 theme::current().fg
             }),
-        ),
-    ]));
-    lines.push(Line::from(Span::styled(
-        format!(
-            "  {}",
-            pad_label(
-                lang::pick("Supported efforts", "支持的推理强度"),
-                label_width
-            )
-        ),
-        Style::default().fg(theme::current().purple),
-    )));
-    for indices in [0..4, 4..8] {
-        let mut spans = vec![Span::raw("  ")];
-        spans.extend(indices.map(|index| {
-            let effort = REASONING_EFFORTS[index];
-            let marker = if form.supported_efforts[index] {
-                "x"
-            } else {
-                " "
-            };
-            Span::styled(
-                format!(" [{}] {:<7}", marker, effort),
-                Style::default().fg(if form.focused == 7 && form.effort_cursor == index {
-                    theme::current().cyan
-                } else {
-                    theme::current().fg
-                }),
-            )
-        }));
-        lines.push(Line::from(spans));
-    }
+        )
+    }));
+    lines.push(Line::from(effort_spans));
     for (offset, (label, value)) in [
         (lang::pick("Default model", "默认模型"), form.default_model),
         (lang::pick("Image input", "图片输入"), form.supports_images),
-        (
-            lang::pick("Parallel tools", "并行工具"),
-            form.supports_parallel_tools,
-        ),
+        (lang::pick("Parallel tools", "并行工具"), form.supports_parallel_tools),
         (lang::pick("Verbosity", "详细程度"), form.support_verbosity),
         (lang::pick("Web search", "网络搜索"), form.supports_search),
     ]
@@ -554,20 +419,14 @@ pub fn render_codex_model_form(form: &CodexModelForm, f: &mut Frame, area: Rect)
     .enumerate()
     {
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {}", pad_label(label, label_width)),
-                Style::default().fg(theme::current().purple),
-            ),
+            Span::styled(format!("  {}", pad_label(label, label_width)), Style::default().fg(theme::current().purple)),
             Span::styled(
                 if value { "[x]" } else { "[ ]" },
-                Style::default().fg(if form.focused == offset + 8 {
-                    theme::current().cyan
-                } else {
-                    theme::current().fg
-                }),
+                Style::default().fg(if form.focused == offset + 8 { theme::current().cyan } else { theme::current().fg }),
             ),
         ]));
     }
+    lines.push(Line::from(""));
     lines.push(
         Line::from(lang::pick(
             "Enter Save · Esc Cancel · Tab Next · ←/→ Select · Space Toggle",
@@ -575,6 +434,8 @@ pub fn render_codex_model_form(form: &CodexModelForm, f: &mut Frame, area: Rect)
         ))
         .centered(),
     );
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
     clear_popup_area(f, popup);
     f.render_widget(block, popup);
     f.render_widget(Paragraph::new(lines), inner);
@@ -587,25 +448,16 @@ struct VisSlice {
 
 fn slice_value(text: &str, cursor: usize, max_w: usize) -> VisSlice {
     if display_width(text) <= max_w || max_w < 4 {
-        return VisSlice {
-            text: text.to_string(),
-            skip: 0,
-        };
+        return VisSlice { text: text.to_string(), skip: 0 };
     }
     let mut boundaries: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
     boundaries.push(text.len());
     let cursor = previous_char_boundary(text, cursor.min(text.len()));
-    let cursor_index = boundaries
-        .iter()
-        .position(|index| *index == cursor)
-        .unwrap_or(0);
+    let cursor_index = boundaries.iter().position(|index| *index == cursor).unwrap_or(0);
     let mut start_index = cursor_index;
     let mut before_width = 0usize;
     while start_index > 0 {
-        let ch = text[boundaries[start_index - 1]..boundaries[start_index]]
-            .chars()
-            .next()
-            .unwrap();
+        let ch = text[boundaries[start_index - 1]..boundaries[start_index]].chars().next().unwrap();
         let width = display_width(&ch.to_string());
         if before_width + width > max_w / 2 {
             break;
@@ -616,10 +468,7 @@ fn slice_value(text: &str, cursor: usize, max_w: usize) -> VisSlice {
     let mut end_index = start_index;
     let mut visible_width = 0usize;
     while end_index + 1 < boundaries.len() {
-        let ch = text[boundaries[end_index]..boundaries[end_index + 1]]
-            .chars()
-            .next()
-            .unwrap();
+        let ch = text[boundaries[end_index]..boundaries[end_index + 1]].chars().next().unwrap();
         let width = display_width(&ch.to_string());
         if visible_width + width > max_w {
             break;
@@ -680,7 +529,7 @@ fn next_char_boundary(text: &str, index: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{edit_text_field, slice_value, CodexModelForm};
+    use super::{edit_text_field, slice_value, CodexModelForm, REASONING_EFFORTS};
     use crossterm::event::KeyCode;
 
     #[test]
@@ -704,9 +553,9 @@ mod tests {
             focused: 7,
             is_edit: false,
             provider_id: "test".into(),
-            supported_efforts: [false, false, true, true, true, false, false, false],
-            effort_cursor: 4,
-            default_effort: 3,
+            supported_efforts: [true, true, true, false, false, false],
+            effort_cursor: 2,
+            default_effort: 1,
             default_model: false,
             supports_images: false,
             supports_parallel_tools: true,
@@ -717,6 +566,7 @@ mod tests {
 
     #[test]
     fn reasoning_efforts_are_selected_and_default_stays_supported() {
+        assert_eq!(REASONING_EFFORTS, ["low", "medium", "high", "xhigh", "max", "ultra"]);
         let mut form = model_form();
         form.handle_key(KeyCode::Char(' '));
         assert_eq!(form.supported_reasoning_efforts(), vec!["low", "medium"]);

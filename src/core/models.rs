@@ -200,54 +200,26 @@ pub fn validate_codex_model(model: &CodexModel) -> anyhow::Result<()> {
     if model.context_window == 0 {
         anyhow::bail!("Context window must be greater than zero");
     }
-    if model.context_window > i64::MAX as u64
-        || model
-            .max_context_window
-            .is_some_and(|value| value > i64::MAX as u64)
-    {
+    if model.context_window > i64::MAX as u64 || model.max_context_window.is_some_and(|value| value > i64::MAX as u64) {
         anyhow::bail!("Context windows exceed the supported storage range");
     }
-    if model
-        .max_context_window
-        .is_some_and(|max| max < model.context_window)
-    {
+    if model.max_context_window.is_some_and(|max| max < model.context_window) {
         anyhow::bail!("Maximum context window must not be smaller than context window");
     }
     if !(1..=100).contains(&model.effective_context_window_percent) {
         anyhow::bail!("Effective context window percent must be between 1 and 100");
     }
-    let allowed_efforts = [
-        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-    ];
-    if model.supported_reasoning_efforts.is_empty()
-        || model
-            .supported_reasoning_efforts
-            .iter()
-            .any(|effort| !allowed_efforts.contains(&effort.as_str()))
-    {
+    let allowed_efforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+    if model.supported_reasoning_efforts.is_empty() || model.supported_reasoning_efforts.iter().any(|effort| !allowed_efforts.contains(&effort.as_str())) {
         anyhow::bail!("Supported reasoning efforts contain an invalid value");
     }
-    if model
-        .supported_reasoning_efforts
-        .iter()
-        .collect::<HashSet<_>>()
-        .len()
-        != model.supported_reasoning_efforts.len()
-    {
+    if model.supported_reasoning_efforts.iter().collect::<HashSet<_>>().len() != model.supported_reasoning_efforts.len() {
         anyhow::bail!("Supported reasoning efforts must not contain duplicates");
     }
-    if !model
-        .supported_reasoning_efforts
-        .contains(&model.default_reasoning_effort)
-    {
+    if !model.supported_reasoning_efforts.contains(&model.default_reasoning_effort) {
         anyhow::bail!("Default reasoning effort must be supported by the model");
     }
-    if model.input_modalities.is_empty()
-        || model
-            .input_modalities
-            .iter()
-            .any(|modality| !matches!(modality.as_str(), "text" | "image"))
-    {
+    if model.input_modalities.is_empty() || model.input_modalities.iter().any(|modality| !matches!(modality.as_str(), "text" | "image")) {
         anyhow::bail!("Input modalities must contain text and/or image");
     }
     if model.input_modalities.iter().collect::<HashSet<_>>().len() != model.input_modalities.len() {
@@ -265,11 +237,7 @@ pub fn validate_codex_provider_models(provider: &Provider) -> anyhow::Result<()>
     for model in &provider.models {
         validate_codex_model(model)?;
         if !slugs.insert(model.slug.as_str()) {
-            anyhow::bail!(
-                "Provider '{}' contains duplicate model slug '{}'",
-                provider.id,
-                model.slug
-            );
+            anyhow::bail!("Provider '{}' contains duplicate model slug '{}'", provider.id, model.slug);
         }
         default_count += usize::from(model.default);
     }
@@ -282,8 +250,7 @@ pub fn validate_codex_provider_models(provider: &Provider) -> anyhow::Result<()>
 pub fn validate_provider(provider: &Provider) -> anyhow::Result<()> {
     validate_id("Provider ID", &provider.id)?;
     validate_text("Provider name", &provider.name, 100)?;
-    let url = reqwest::Url::parse(provider.api_url.trim())
-        .map_err(|error| anyhow::anyhow!("Invalid provider URL: {}", error))?;
+    let url = reqwest::Url::parse(provider.api_url.trim()).map_err(|error| anyhow::anyhow!("Invalid provider URL: {}", error))?;
     if !matches!(url.scheme(), "http" | "https") {
         anyhow::bail!("Provider URL must use http or https");
     }
@@ -300,11 +267,7 @@ pub fn validate_provider(provider: &Provider) -> anyhow::Result<()> {
         anyhow::bail!("API key must not exceed 4096 characters");
     }
     if let Some(variable) = provider.api_key.strip_prefix("env:") {
-        if variable.is_empty()
-            || !variable
-                .chars()
-                .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-        {
+        if variable.is_empty() || !variable.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
             anyhow::bail!("Environment variable references must use env:VARIABLE_NAME");
         }
     }
@@ -348,14 +311,8 @@ fn validate_id(label: &str, value: &str) -> anyhow::Result<()> {
     if value.is_empty() || value.len() > 64 {
         anyhow::bail!("{} must be 1-64 characters", label);
     }
-    if !value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-    {
-        anyhow::bail!(
-            "{} may only contain letters, numbers, '.', '_' and '-'",
-            label
-        );
+    if !value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')) {
+        anyhow::bail!("{} may only contain letters, numbers, '.', '_' and '-'", label);
     }
     Ok(())
 }

@@ -15,10 +15,7 @@ fn test_db_open_and_migrate() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(&db_path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        assert_eq!(std::fs::metadata(&db_path).unwrap().permissions().mode() & 0o777, 0o600);
     }
 }
 
@@ -30,9 +27,7 @@ fn rejects_database_from_a_newer_schema_version() {
     conn.pragma_update(None, "user_version", 999).unwrap();
     drop(conn);
 
-    let error = Db::open(&db_path)
-        .err()
-        .expect("future schema must be rejected");
+    let error = Db::open(&db_path).err().expect("future schema must be rejected");
     assert!(error.to_string().contains("newer than this CCSwitch build"));
 }
 
@@ -81,24 +76,18 @@ fn test_v2_profile_migrates_to_four_models() {
          );
          CREATE UNIQUE INDEX idx_usage_msg_id ON usage_logs(message_id) WHERE message_id IS NOT NULL;
          PRAGMA user_version = 2;",
-    ).unwrap();
+    )
+    .unwrap();
     drop(conn);
 
     let db = Db::open(&db_path).unwrap();
-    let values: (String, String, String, String) = db.conn().query_row(
-        "SELECT opus_model, sonnet_model, haiku_model, subagent_model FROM profiles WHERE id='legacy'",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    ).unwrap();
-    assert_eq!(
-        values,
-        (
-            "reasoning".into(),
-            "reasoning".into(),
-            "task".into(),
-            "task".into()
-        )
-    );
+    let values: (String, String, String, String) = db
+        .conn()
+        .query_row("SELECT opus_model, sonnet_model, haiku_model, subagent_model FROM profiles WHERE id='legacy'", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap();
+    assert_eq!(values, ("reasoning".into(), "reasoning".into(), "task".into(), "task".into()));
 }
 
 #[test]
@@ -128,11 +117,7 @@ fn provider_scoped_profiles_and_app_scoped_sessions_do_not_collide() {
         id: "same-id".into(),
         project_path: format!("/tmp/{}", app),
         profile_id: None,
-        mode: if app == "codex" {
-            "direct".into()
-        } else {
-            "local".into()
-        },
+        mode: if app == "codex" { "direct".into() } else { "local".into() },
         start_time: "2026-07-27 00:00:00".into(),
         end_time: None,
         prompt_tokens: 0,
@@ -145,10 +130,7 @@ fn provider_scoped_profiles_and_app_scoped_sessions_do_not_collide() {
     };
     db.insert_session(&session("claude"), "claude").unwrap();
     db.insert_session(&session("codex"), "codex").unwrap();
-    assert_eq!(
-        db.query_sessions("claude", None, None, 10).unwrap().len(),
-        1
-    );
+    assert_eq!(db.query_sessions("claude", None, None, 10).unwrap().len(), 1);
     assert_eq!(db.query_sessions("codex", None, None, 10).unwrap().len(), 1);
 }
 
@@ -178,10 +160,7 @@ fn selecting_a_default_codex_model_clears_the_previous_default_atomically() {
 
     let models = db.get_codex_models("provider").unwrap();
     assert_eq!(models.iter().filter(|model| model.default).count(), 1);
-    assert_eq!(
-        models.iter().find(|model| model.default).unwrap().slug,
-        "two"
-    );
+    assert_eq!(models.iter().find(|model| model.default).unwrap().slug, "two");
 }
 
 #[test]

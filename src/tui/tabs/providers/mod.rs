@@ -1054,29 +1054,15 @@ impl TabContent for ProvidersTab {
     fn render(&mut self, f: &mut Frame, area: Rect) {
         let popup_area = f.area();
         let (provider_area, profile_area, detail_area) = if self.app == AppType::Codex {
-            if area.width >= 112 {
-                let [providers, models, detail] = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(30), Constraint::Percentage(34), Constraint::Percentage(36)])
-                    .areas(area);
-                (providers, models, detail)
-            } else if area.width >= 86 {
-                let [providers, right] = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-                    .areas(area);
-                let [models, detail] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Percentage(50), Constraint::Min(10)])
-                    .areas(right);
-                (providers, models, detail)
-            } else {
-                let [providers, models, detail] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Percentage(32), Constraint::Percentage(32), Constraint::Min(10)])
-                    .areas(area);
-                (providers, models, detail)
-            }
+            let [providers, right] = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .areas(area);
+            let [models, detail] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(52), Constraint::Min(10)])
+                .areas(right);
+            (providers, models, detail)
         } else if area.width >= 96 {
             let [providers, right] = Layout::default()
                 .direction(Direction::Horizontal)

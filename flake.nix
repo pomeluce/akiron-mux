@@ -46,7 +46,7 @@
               src = ./web/session-ui;
               pnpm = pkgs.pnpm_11;
               fetcherVersion = 4;
-              hash = "sha256-0waT+Kvwk5CB8+LJcps4EdZZn0EZsHLFJu2D3MOHF1A=";
+              hash = "sha256-K2SgrFhyH2Pf4gvyy+QdV5hRzmKjOSlC0M3ND+pi/eo=";
             };
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [
@@ -82,7 +82,7 @@
               src = ./web/session-ui;
               pnpm = pkgs.pnpm_11;
               fetcherVersion = 4;
-              hash = "sha256-0waT+Kvwk5CB8+LJcps4EdZZn0EZsHLFJu2D3MOHF1A=";
+              hash = "sha256-K2SgrFhyH2Pf4gvyy+QdV5hRzmKjOSlC0M3ND+pi/eo=";
             };
             nativeBuildInputs = [
               pkgs.nodejs

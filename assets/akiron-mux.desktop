@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=AkironMux
+Comment=Unified Claude Code and Codex session workspace
+Exec=akiron-mux
+Icon=akiron-mux
+Terminal=false
+Categories=Development;

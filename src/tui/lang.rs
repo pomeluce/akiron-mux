@@ -101,6 +101,7 @@ pub struct Lang {
     pub setting_theme: &'static str,
     pub setting_mode: &'static str,
     pub setting_language: &'static str,
+    pub setting_session_service: &'static str,
 
     // App bar
 
@@ -206,6 +207,7 @@ const LANG_ZH: Lang = Lang {
     setting_theme: "主题",
     setting_mode: "模式",
     setting_language: "语言",
+    setting_session_service: "会话后端",
 
     profiles_count: "个配置",
 };
@@ -305,6 +307,7 @@ const LANG_EN: Lang = Lang {
     setting_theme: "Theme",
     setting_mode: "Mode",
     setting_language: "Language",
+    setting_session_service: "Session backend",
 
     profiles_count: "profiles",
 };

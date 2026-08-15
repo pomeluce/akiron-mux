@@ -3,22 +3,47 @@ use crate::db::Db;
 use anyhow::Context;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-/// Config directory for ccswitch: XDG_CONFIG_HOME on Linux, AppData on Windows,
+const APP_DIRECTORY: &str = "akmux";
+const LEGACY_APP_DIRECTORIES: [&str; 2] = ["akiron-mux", "ccswitch"];
+static CONFIG_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+static DATA_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+
+/// Config directory for AkironMux: XDG_CONFIG_HOME on Linux, AppData on Windows,
 /// Library/Application Support on macOS.
 pub fn config_dir() -> PathBuf {
-    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("ccswitch")
+    CONFIG_DIRECTORY
+        .get_or_init(|| {
+            let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+            let current = base.join(APP_DIRECTORY);
+            for legacy in LEGACY_APP_DIRECTORIES {
+                migrate_legacy_directory(&base.join(legacy), &current);
+            }
+            migrate_legacy_file(&current.join("ccswitch.db"), &current.join("akmux.db"));
+            current
+        })
+        .clone()
 }
 
-/// Data directory for ccswitch (logs, runtime data).
+/// Data directory for AkironMux (logs, runtime data).
 #[allow(dead_code)]
 pub fn data_dir() -> PathBuf {
-    dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("ccswitch")
+    DATA_DIRECTORY
+        .get_or_init(|| {
+            let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+            let current = base.join(APP_DIRECTORY);
+            for legacy in LEGACY_APP_DIRECTORIES {
+                migrate_legacy_directory(&base.join(legacy), &current);
+            }
+            current
+        })
+        .clone()
 }
 
 /// Config DB path.
 pub fn db_path() -> PathBuf {
-    config_dir().join("ccswitch.db")
+    config_dir().join("akmux.db")
 }
 
 /// System defaults path (for TOML overrides). Uses XDG config + /etc fallback.
@@ -27,9 +52,11 @@ pub fn defaults_path() -> Option<PathBuf> {
     if user.exists() {
         return Some(user);
     }
-    let system = PathBuf::from("/etc/ccswitch/defaults.toml");
-    if system.exists() {
-        return Some(system);
+    for system in ["/etc/akmux/defaults.toml", "/etc/akiron-mux/defaults.toml", "/etc/ccswitch/defaults.toml"] {
+        let path = PathBuf::from(system);
+        if path.exists() {
+            return Some(path);
+        }
     }
     None
 }
@@ -39,7 +66,46 @@ fn default_config_path() -> PathBuf {
     if user.exists() {
         return user;
     }
-    PathBuf::from("/etc/ccswitch/defaults.toml")
+    for system in ["/etc/akmux/defaults.toml", "/etc/akiron-mux/defaults.toml", "/etc/ccswitch/defaults.toml"] {
+        let path = PathBuf::from(system);
+        if path.exists() {
+            return path;
+        }
+    }
+    PathBuf::from("/etc/akmux/defaults.toml")
+}
+
+fn migrate_legacy_directory(legacy: &Path, current: &Path) {
+    if !legacy.is_dir() {
+        return;
+    }
+    if let Err(error) = copy_missing_directory(legacy, current) {
+        eprintln!("Warning: failed to migrate {} to {}: {error}", legacy.display(), current.display());
+    }
+}
+
+fn copy_missing_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_missing_directory(&source_path, &destination_path)?;
+        } else if !destination_path.exists() {
+            std::fs::copy(source_path, destination_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn migrate_legacy_file(legacy: &Path, current: &Path) {
+    if current.exists() || !legacy.is_file() {
+        return;
+    }
+    if let Err(error) = std::fs::copy(legacy, current) {
+        eprintln!("Warning: failed to migrate {} to {}: {error}", legacy.display(), current.display());
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,7 +201,7 @@ fn into_provider(p: ProviderToml, include_profiles: bool) -> Provider {
 
 impl ConfigManager {
     pub fn new(db_path: &Path, defaults_path: Option<&Path>) -> Result<Self, anyhow::Error> {
-        let db = Db::open(db_path).context("Failed to open ccswitch.db")?;
+        let db = Db::open(db_path).context("Failed to open akmux.db")?;
 
         let default_path = default_config_path();
         let defaults_path = defaults_path.unwrap_or_else(|| &default_path);
@@ -269,4 +335,39 @@ fn validate_default_provider_ids(app: &str, providers: &[Provider]) -> anyhow::R
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn migration_copies_missing_files_without_overwriting_new_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = directory.path().join("ccswitch");
+        let current = directory.path().join("akmux");
+        std::fs::create_dir_all(legacy.join("nested")).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(legacy.join("ccswitch.db"), "legacy-db").unwrap();
+        std::fs::write(legacy.join("nested/settings.toml"), "legacy-settings").unwrap();
+        std::fs::write(current.join("ccswitch.db"), "current-db").unwrap();
+
+        migrate_legacy_directory(&legacy, &current);
+
+        assert_eq!(std::fs::read_to_string(current.join("ccswitch.db")).unwrap(), "current-db");
+        assert_eq!(std::fs::read_to_string(current.join("nested/settings.toml")).unwrap(), "legacy-settings");
+    }
+
+    #[test]
+    fn legacy_database_is_copied_to_the_new_filename() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = directory.path().join("ccswitch.db");
+        let current = directory.path().join("akmux.db");
+        std::fs::write(&legacy, "database").unwrap();
+
+        migrate_legacy_file(&legacy, &current);
+
+        assert_eq!(std::fs::read_to_string(current).unwrap(), "database");
+        assert!(legacy.exists());
+    }
 }

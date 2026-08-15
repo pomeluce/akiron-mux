@@ -1,8 +1,8 @@
 use crate::core::config::ConfigManager;
 use crate::core::models::AppType;
 
-/// Sync active provider/profile from Claude Code's settings.json (last_switch.source).
-/// Called on app startup to align CCSwitch's active selection with the last switch.
+/// Sync active provider/profile from Claude Code's settings.json (akmux.last_switch.source).
+/// Called on app startup to align AkironMux's active selection with the last switch.
 pub fn sync_active_from_settings(mgr: &ConfigManager) {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let settings_path = std::path::PathBuf::from(&home).join(".claude/settings.json");
@@ -23,7 +23,12 @@ pub fn sync_active_from_settings(mgr: &ConfigManager) {
             return;
         }
     };
-    let source = parsed.get("last_switch").and_then(|v| v.get("source")).and_then(|v| v.as_str()).unwrap_or("");
+    let managed_switch = parsed
+        .get("akmux")
+        .and_then(|value| value.get("last_switch"))
+        .or_else(|| parsed.get("ccswitch").and_then(|value| value.get("last_switch")))
+        .or_else(|| parsed.get("last_switch"));
+    let source = managed_switch.and_then(|value| value.get("source")).and_then(|value| value.as_str()).unwrap_or("");
     if let Some((pid, pfid)) = source.split_once('/') {
         let providers = match mgr.list_providers() {
             Ok(p) => p,
@@ -42,7 +47,7 @@ pub fn sync_active_from_settings(mgr: &ConfigManager) {
         }
 
         // Restore proxy_mode from last switch
-        let mode = parsed.get("last_switch").and_then(|v| v.get("mode")).and_then(|v| v.as_str()).unwrap_or("local");
+        let mode = managed_switch.and_then(|value| value.get("mode")).and_then(|value| value.as_str()).unwrap_or("local");
         let is_proxy = mode == "proxy";
         if let Err(e) = mgr.set_setting("proxy_mode", &is_proxy.to_string()) {
             tracing::warn!("sync: failed to save proxy_mode: {}", e);
@@ -69,7 +74,11 @@ fn sync_codex_active_from_path(mgr: &ConfigManager, config_path: &std::path::Pat
             return;
         }
     };
-    let managed_switch = parsed.get("ccswitch").and_then(|value| value.get("last_switch")).and_then(toml::Value::as_table);
+    let managed_switch = parsed
+        .get("akmux")
+        .and_then(|value| value.get("last_switch"))
+        .or_else(|| parsed.get("ccswitch").and_then(|value| value.get("last_switch")))
+        .and_then(toml::Value::as_table);
     let provider_id = managed_switch
         .and_then(|switch| switch.get("source"))
         .and_then(toml::Value::as_str)
@@ -130,7 +139,7 @@ mod tests {
             r#"model_provider = "ccs"
 model = "user-model"
 
-[ccswitch.last_switch]
+[akmux.last_switch]
 source = "builtin"
 "#,
         )
@@ -139,5 +148,39 @@ source = "builtin"
         sync_codex_active_from_path(&mgr, &config_path);
         assert_eq!(mgr.get_setting("active_codex_provider").as_deref(), Some("builtin"));
         assert_eq!(mgr.get_setting("active_codex_model").as_deref(), Some(""));
+    }
+
+    #[test]
+    fn legacy_codex_switch_namespace_is_still_read() {
+        let dir = tempdir().unwrap();
+        let defaults_path = dir.path().join("missing-defaults.toml");
+        let mgr = ConfigManager::new(&dir.path().join("akmux.db"), Some(&defaults_path)).unwrap();
+        mgr.db()
+            .insert_provider(
+                &Provider {
+                    id: "legacy".into(),
+                    name: "Legacy".into(),
+                    api_url: "https://api.example.com".into(),
+                    api_key: "key".into(),
+                    codex_catalog: Default::default(),
+                    profiles: vec![],
+                    models: vec![],
+                    source: Source::User,
+                },
+                AppType::Codex.as_str(),
+            )
+            .unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"[ccswitch.last_switch]
+source = "legacy"
+"#,
+        )
+        .unwrap();
+
+        sync_codex_active_from_path(&mgr, &config_path);
+
+        assert_eq!(mgr.get_setting("active_codex_provider").as_deref(), Some("legacy"));
     }
 }

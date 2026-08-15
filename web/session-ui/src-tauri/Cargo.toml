@@ -1,0 +1,22 @@
+[package]
+name = "akiron-mux"
+version = "1.11.0"
+description = "Unified Claude Code and Codex session workspace"
+authors = ["AkironMux contributors"]
+edition = "2021"
+rust-version = "1.80"
+license = "GPL-3.0"
+
+[lib]
+name = "akiron_mux_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5", features = [] }
+
+[dependencies]
+tauri = { version = "2.10", features = [] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

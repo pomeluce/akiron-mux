@@ -24,7 +24,7 @@ pub fn run_cli(args: CliArgs) -> Result<()> {
         Some(cmd) => cmd,
         None => {
             // No subcommand — TUI is launched from main.rs, this branch is unreachable
-            eprintln!("Usage: ccs <command>. Run 'ccs' without arguments to launch TUI.");
+            eprintln!("Usage: akmux <command>. Run 'akmux' without arguments to launch TUI.");
             std::process::exit(0);
         }
     };
@@ -89,7 +89,7 @@ fn handle_switch(mgr: &ConfigManager, target: Option<String>, mode: SwitchMode) 
                     }
                 }
             }
-            anyhow::bail!("No target specified and no default profile found. Use 'ccs switch <provider>/<profile>'.");
+            anyhow::bail!("No target specified and no default profile found. Use 'akmux switch <provider>/<profile>'.");
         },
         Ok,
     )?;
@@ -157,13 +157,13 @@ fn handle_add(mgr: &ConfigManager, what: &str, parent_provider: Option<&str>) ->
             println!("Provider added.");
         }
         "profile" => {
-            let provider_id = parent_provider.context("Usage: ccs add profile <provider_id>")?;
+            let provider_id = parent_provider.context("Usage: akmux add profile <provider_id>")?;
             // Ensure provider exists
             let providers = mgr.list_providers()?;
             let provider = providers
                 .iter()
                 .find(|p| p.id == provider_id)
-                .with_context(|| format!("Provider '{}' not found. Create it first: ccs add provider", provider_id))?;
+                .with_context(|| format!("Provider '{}' not found. Create it first: akmux add provider", provider_id))?;
             use dialoguer::Input;
             let id: String = Input::new().with_prompt("Profile ID").interact_text()?;
             let name: String = Input::new().with_prompt("Name").interact_text()?;
@@ -188,7 +188,7 @@ fn handle_add(mgr: &ConfigManager, what: &str, parent_provider: Option<&str>) ->
             mgr.db().insert_profile(provider_id, &pr)?;
             println!("Profile added to provider '{}'.", provider.name);
         }
-        _ => anyhow::bail!("Usage: ccs add <provider|profile> [parent_provider]"),
+        _ => anyhow::bail!("Usage: akmux add <provider|profile> [parent_provider]"),
     }
     Ok(())
 }
@@ -335,9 +335,9 @@ fn handle_completions(shell: &str) -> Result<()> {
     use clap_complete::{generate, shells};
     let mut cmd = CliArgs::command();
     match shell {
-        "zsh" => generate(shells::Zsh, &mut cmd, "ccs", &mut std::io::stdout()),
-        "bash" => generate(shells::Bash, &mut cmd, "ccs", &mut std::io::stdout()),
-        "fish" => generate(shells::Fish, &mut cmd, "ccs", &mut std::io::stdout()),
+        "zsh" => generate(shells::Zsh, &mut cmd, "akmux", &mut std::io::stdout()),
+        "bash" => generate(shells::Bash, &mut cmd, "akmux", &mut std::io::stdout()),
+        "fish" => generate(shells::Fish, &mut cmd, "akmux", &mut std::io::stdout()),
         _ => anyhow::bail!("Unsupported shell: {}. Use zsh, bash, or fish.", shell),
     }
     Ok(())

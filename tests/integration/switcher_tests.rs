@@ -32,6 +32,16 @@ default = true
 
     let db_path = dir.path().join("test.db");
     let settings_path = dir.path().join("settings.json");
+    fs::write(
+        &settings_path,
+        r#"{
+  "ccswitch": {
+    "last_switch": { "source": "legacy/profile" }
+  },
+  "last_switch": { "source": "older/profile" }
+}"#,
+    )
+    .unwrap();
     let mgr = ConfigManager::new(&db_path, Some(&defaults_path)).unwrap();
     let config = switch_profile(&mgr, "p1", "prof1", SwitchMode::Local, Some(&settings_path)).unwrap();
 
@@ -49,6 +59,9 @@ default = true
     assert_eq!(parsed["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "haiku-model");
     assert_eq!(parsed["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "subagent-model");
     assert_eq!(parsed["env"]["ANTHROPIC_BASE_URL"], "https://api.test.com");
+    assert_eq!(parsed["akmux"]["last_switch"]["source"], "p1/prof1");
+    assert!(parsed.get("ccswitch").is_none());
+    assert!(parsed.get("last_switch").is_none());
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -285,6 +298,9 @@ name = "Old CCSwitch Provider"
 base_url = "https://old.example.com/v1"
 wire_api = "responses"
 requires_openai_auth = true
+
+[ccswitch.last_switch]
+source = "legacy-provider"
 "#,
     )
     .unwrap();
@@ -294,8 +310,9 @@ requires_openai_auth = true
 
     let config_text = fs::read_to_string(&config_path).unwrap();
     assert!(config_text.contains("# keep this comment"));
-    assert!(!config_text.contains("\n[ccswitch]\n"));
-    assert!(config_text.contains("[ccswitch.last_switch]"));
+    assert!(!config_text.contains("\n[akmux]\n"));
+    assert!(config_text.contains("[akmux.last_switch]"));
+    assert!(!config_text.contains("[ccswitch.last_switch]"));
     let config: toml::Value = toml::from_str(&config_text).unwrap();
     assert_eq!(config["model"].as_str(), Some("gpt-test"));
     assert_eq!(config["model_provider"].as_str(), Some("ccs"));
@@ -305,7 +322,7 @@ requires_openai_auth = true
     assert_eq!(config["model_providers"]["ccs"]["wire_api"].as_str(), Some("responses"));
     assert_eq!(config["model_providers"]["ccs"]["requires_openai_auth"].as_bool(), Some(true));
     assert_eq!(config["model_providers"]["codex-proxy"]["base_url"].as_str(), Some("https://legacy.example.com/v1"));
-    assert_eq!(config["ccswitch"]["last_switch"]["source"].as_str(), Some("codex-proxy"));
+    assert_eq!(config["akmux"]["last_switch"]["source"].as_str(), Some("codex-proxy"));
 
     let auth: serde_json::Value = serde_json::from_str(&fs::read_to_string(&auth_path).unwrap()).unwrap();
     assert_eq!(auth["OPENAI_API_KEY"], "sk-codex");
@@ -324,7 +341,7 @@ requires_openai_auth = true
     assert_eq!(removed["model_providers"]["ccs"]["base_url"].as_str(), Some("https://codex.example.com/v1"));
     assert_eq!(removed["model_providers"]["codex-proxy"]["base_url"].as_str(), Some("https://legacy.example.com/v1"));
     assert_eq!(removed["model_providers"]["existing"]["name"].as_str(), Some("Existing"));
-    assert!(removed.get("ccswitch").and_then(|item| item.get("last_switch")).is_none());
+    assert!(removed.get("akmux").and_then(|item| item.get("last_switch")).is_none());
     assert_eq!(mgr.get_setting("active_codex_provider"), Some(String::new()));
 
     let new_config_path = dir.path().join("new/config.toml");

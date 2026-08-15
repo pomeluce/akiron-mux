@@ -3,7 +3,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-const SERVICE_NAME: &str = "ccs-proxy";
+const SERVICE_NAME: &str = "akmux-proxy";
 
 // ── Linux systemd ──────────────────────────────────────────────────
 
@@ -12,7 +12,7 @@ pub fn install_service(system: bool) -> Result<()> {
     let exe = std::env::current_exe()?;
     let unit = format!(
         r#"[Unit]
-Description=CCSwitch Proxy Server
+Description=AkironMux Proxy Server
 After=network.target
 
 [Service]
@@ -77,14 +77,14 @@ pub fn install_service(_system: bool) -> Result<()> {
     let exe = std::env::current_exe()?;
     let log_dir = crate::core::config::data_dir();
     std::fs::create_dir_all(&log_dir)?;
-    let log_path = log_dir.join("ccs-proxy.log");
+    let log_path = log_dir.join("akmux-proxy.log");
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.ccswitch.{0}</string>
+    <string>dev.akiron.mux.{0}</string>
     <key>ProgramArguments</key>
     <array>
         <string>{1}</string>
@@ -108,7 +108,7 @@ pub fn install_service(_system: bool) -> Result<()> {
 
     let dir = launchd_agent_dir()?;
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("com.ccswitch.{}.plist", SERVICE_NAME));
+    let path = dir.join(format!("dev.akiron.mux.{}.plist", SERVICE_NAME));
     std::fs::write(&path, plist)?;
 
     let uid = get_uid()?;
@@ -117,14 +117,14 @@ pub fn install_service(_system: bool) -> Result<()> {
     run_cmd("launchctl", &["bootout", &domain, &path.display().to_string()]).ok();
     run_cmd("launchctl", &["bootstrap", &domain, &path.display().to_string()])?;
 
-    println!("Service installed: launchctl list | grep ccswitch");
+    println!("Service installed: launchctl list | grep akmux");
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 pub fn uninstall_service(_system: bool) -> Result<()> {
     let dir = launchd_agent_dir()?;
-    let path = dir.join(format!("com.ccswitch.{}.plist", SERVICE_NAME));
+    let path = dir.join(format!("dev.akiron.mux.{}.plist", SERVICE_NAME));
 
     let uid = get_uid().unwrap_or(0);
     let domain = format!("gui/{}", uid);
@@ -288,7 +288,7 @@ fn write_systemd_unit() -> Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let unit = format!(
         r#"[Unit]
-Description=CCSwitch Proxy Server
+Description=AkironMux Proxy Server
 After=network.target
 
 [Service]
@@ -327,7 +327,7 @@ fn systemd_quote(path: &std::path::Path) -> String {
 }
 
 fn proxy_pid_path() -> PathBuf {
-    crate::core::config::data_dir().join("ccs-proxy.pid")
+    crate::core::config::data_dir().join("akmux-proxy.pid")
 }
 
 fn write_pid_file(pid: u32) -> Result<()> {

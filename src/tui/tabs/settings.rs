@@ -21,6 +21,7 @@ pub struct SettingsTab {
     theme_idx: usize,
     mode_idx: usize,
     lang_idx: usize,
+    session_service_enabled: bool,
 }
 
 impl SettingsTab {
@@ -43,12 +44,17 @@ impl SettingsTab {
         };
 
         let mode_idx = if mgr.get_setting("proxy_mode").map(|v| v == "true").unwrap_or(false) { 1 } else { 0 };
+        let session_service_enabled = crate::session_service::control::enabled(&mgr);
+        if let Err(error) = crate::session_service::control::reconcile(&mgr) {
+            tracing::warn!("Failed to reconcile AkironMux session service: {error:#}");
+        }
         SettingsTab {
             mgr,
             selected: 0,
             theme_idx,
             mode_idx,
             lang_idx,
+            session_service_enabled,
         }
     }
 
@@ -58,16 +64,28 @@ impl SettingsTab {
             (l.setting_theme, THEMES[self.theme_idx].to_string()),
             (l.setting_language, lang::current_lang().to_string()),
             (l.setting_mode, MODES[self.mode_idx].to_string()),
+            (
+                l.setting_session_service,
+                lang::pick(
+                    if self.session_service_enabled { "Enabled" } else { "Disabled" },
+                    if self.session_service_enabled { "开启" } else { "关闭" },
+                )
+                .to_string(),
+            ),
         ]
     }
 
     pub fn status_text(&self) -> String {
         format!(
-            "{} · {} · {} · {}",
+            "{} · {} · {} · {} · {}",
             lang::pick("Shared settings", "共享设置"),
             THEMES[self.theme_idx],
             lang::current_lang(),
-            MODES[self.mode_idx]
+            MODES[self.mode_idx],
+            lang::pick(
+                if self.session_service_enabled { "backend on" } else { "backend off" },
+                if self.session_service_enabled { "后端开启" } else { "后端关闭" }
+            )
         )
     }
 
@@ -126,6 +144,14 @@ impl SettingsTab {
             tracing::warn!("Failed to save language: {}", e);
         }
     }
+
+    fn toggle_session_service(&mut self) {
+        let next = !self.session_service_enabled;
+        match crate::session_service::control::set_enabled(&self.mgr, next) {
+            Ok(()) => self.session_service_enabled = next,
+            Err(error) => tracing::warn!("Failed to update AkironMux session service: {error:#}"),
+        }
+    }
 }
 
 impl TabContent for SettingsTab {
@@ -141,7 +167,7 @@ impl TabContent for SettingsTab {
             .unwrap_or(0);
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(7), Constraint::Length(5), Constraint::Min(5)])
+            .constraints([Constraint::Length(7), Constraint::Length(5), Constraint::Length(5), Constraint::Min(5)])
             .split(area);
 
         let appearance = vec![
@@ -157,12 +183,15 @@ impl TabContent for SettingsTab {
         let claude = vec![setting_line(2, self.selected, items[2].0, &items[2].1, max_label_dw)];
         f.render_widget(section("Claude".into(), claude), sections[1]);
 
+        let backend = vec![setting_line(3, self.selected, items[3].0, &items[3].1, max_label_dw)];
+        f.render_widget(section(lang::pick("Services", "服务").into(), backend), sections[2]);
+
         let database = shorten_home(&config::db_path().display().to_string());
         let data = vec![
             readonly_line(refresh_label, lang::pick("Real-time", "实时"), max_label_dw),
             readonly_line(database_label, &database, max_label_dw),
         ];
-        f.render_widget(section(lang::pick("Data", "数据").into(), data), sections[2]);
+        f.render_widget(section(lang::pick("Data", "数据").into(), data), sections[3]);
     }
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
@@ -179,12 +208,14 @@ impl TabContent for SettingsTab {
                 0 => self.cycle_theme(true),
                 1 => self.cycle_lang(true),
                 2 => self.cycle_mode(true),
+                3 => self.toggle_session_service(),
                 _ => {}
             },
             KeyCode::Char('h') | KeyCode::Left => match self.selected {
                 0 => self.cycle_theme(false),
                 1 => self.cycle_lang(false),
                 2 => self.cycle_mode(false),
+                3 => self.toggle_session_service(),
                 _ => {}
             },
             _ => return false,

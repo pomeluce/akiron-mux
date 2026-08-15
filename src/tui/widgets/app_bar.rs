@@ -45,7 +45,7 @@ pub fn render_app_bar(f: &mut Frame, area: Rect, app: AppType, proxy_mode: bool,
         .areas(inner);
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!(" CCSwitch {}", env!("CARGO_PKG_VERSION")),
+            format!(" AkironMux {}", env!("CARGO_PKG_VERSION")),
             Style::default().fg(theme::current().comment),
         )),
         left,

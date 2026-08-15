@@ -1,0 +1,12 @@
+[Unit]
+Description=AkironMux Proxy Server
+After=network.target
+Documentation=https://github.com/pomeluce/akiron-mux
+
+[Service]
+ExecStart=/usr/bin/akmux proxy serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

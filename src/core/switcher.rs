@@ -118,11 +118,24 @@ fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Pa
     }
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    existing["last_switch"] = json!({
+    if !existing.get("akmux").map_or(true, serde_json::Value::is_object) {
+        anyhow::bail!("Claude settings.json 'akmux' must be an object");
+    }
+    if existing.get("akmux").is_none() {
+        existing["akmux"] = json!({});
+    }
+    existing["akmux"]["last_switch"] = json!({
         "source": format!("{}/{}", config.provider_id, config.profile_id),
         "mode": match mode { SwitchMode::Local => "local", SwitchMode::Proxy => "proxy" },
         "at": now,
     });
+    existing.as_object_mut().expect("root object validated above").remove("last_switch");
+    if let Some(legacy) = existing.get_mut("ccswitch").and_then(serde_json::Value::as_object_mut) {
+        legacy.remove("last_switch");
+        if legacy.is_empty() {
+            existing.as_object_mut().expect("root object validated above").remove("ccswitch");
+        }
+    }
 
     write_private_file(&settings_path, serde_json::to_string_pretty(&existing)?.as_bytes())?;
     tracing::debug!("write_settings_json: wrote to {}", settings_path.display());
@@ -172,7 +185,7 @@ pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Op
     let codex_dir = Path::new(&home).join(".codex");
     let config_path = config_path.map(Path::to_path_buf).unwrap_or_else(|| codex_dir.join("config.toml"));
     let auth_path = auth_path.map(Path::to_path_buf).unwrap_or_else(|| codex_dir.join("auth.json"));
-    let catalog_path = config_path.parent().map(|dir| dir.join("ccswitch/models.json")).unwrap_or_else(default_catalog_path);
+    let catalog_path = config_path.parent().map(|dir| dir.join("akmux/models.json")).unwrap_or_else(default_catalog_path);
 
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -198,11 +211,7 @@ pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Op
     }
 
     config["model_provider"] = toml_edit::value(CODEX_MANAGED_PROVIDER_ID);
-    let previous_managed_model = config
-        .get("ccswitch")
-        .and_then(toml_edit::Item::as_table)
-        .and_then(|table| table.get("last_switch"))
-        .and_then(toml_edit::Item::as_table)
+    let previous_managed_model = managed_last_switch(&config)
         .and_then(|table| table.get("model"))
         .and_then(toml_edit::Item::as_str)
         .map(str::to_owned);
@@ -249,20 +258,20 @@ pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Op
     provider_table.insert("requires_openai_auth", toml_edit::value(true));
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    if config.as_table().get("ccswitch").is_some_and(|item| !item.is_table()) {
-        anyhow::bail!("Codex config.toml 'ccswitch' must be a table");
+    if config.as_table().get("akmux").is_some_and(|item| !item.is_table()) {
+        anyhow::bail!("Codex config.toml 'akmux' must be a table");
     }
-    if config.as_table().get("ccswitch").is_none() {
-        config.as_table_mut().insert("ccswitch", toml_edit::Item::Table(toml_edit::Table::new()));
+    if config.as_table().get("akmux").is_none() {
+        config.as_table_mut().insert("akmux", toml_edit::Item::Table(toml_edit::Table::new()));
     }
-    let ccswitch = config["ccswitch"].as_table_mut().expect("table created above");
-    if ccswitch.get("last_switch").is_some_and(|item| !item.is_table()) {
-        anyhow::bail!("Codex config.toml 'ccswitch.last_switch' must be a table");
+    let akmux = config["akmux"].as_table_mut().expect("table created above");
+    if akmux.get("last_switch").is_some_and(|item| !item.is_table()) {
+        anyhow::bail!("Codex config.toml 'akmux.last_switch' must be a table");
     }
-    if ccswitch.get("last_switch").is_none() {
-        ccswitch.insert("last_switch", toml_edit::Item::Table(toml_edit::Table::new()));
+    if akmux.get("last_switch").is_none() {
+        akmux.insert("last_switch", toml_edit::Item::Table(toml_edit::Table::new()));
     }
-    let last_switch = ccswitch
+    let last_switch = akmux
         .get_mut("last_switch")
         .and_then(toml_edit::Item::as_table_mut)
         .expect("last_switch table created above");
@@ -273,8 +282,14 @@ pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Op
         last_switch.remove("model");
     }
     last_switch.insert("at", toml_edit::value(now));
-    if ccswitch.iter().all(|(key, item)| key == "last_switch" && item.is_table()) {
-        ccswitch.set_implicit(true);
+    if akmux.iter().all(|(key, item)| key == "last_switch" && item.is_table()) {
+        akmux.set_implicit(true);
+    }
+    if let Some(legacy) = config.as_table_mut().get_mut("ccswitch").and_then(toml_edit::Item::as_table_mut) {
+        legacy.remove("last_switch");
+        if legacy.is_empty() {
+            config.as_table_mut().remove("ccswitch");
+        }
     }
     auth["OPENAI_API_KEY"] = json!(auth_token);
     write_private_file(&auth_path, serde_json::to_string_pretty(&auth)?.as_bytes())?;
@@ -285,7 +300,7 @@ pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Op
     Ok(provider)
 }
 
-/// Remove CCSwitch's association with a Codex provider. Provider definitions
+/// Remove AkironMux's association with a Codex provider. Provider definitions
 /// remain in config.toml because existing Codex sessions refer to them by ID.
 pub fn remove_codex_provider(mgr: &ConfigManager, provider_id: &str, config_path: Option<&Path>) -> Result<()> {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -293,18 +308,12 @@ pub fn remove_codex_provider(mgr: &ConfigManager, provider_id: &str, config_path
     if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)?;
         let mut config: toml_edit::DocumentMut = content.parse().context("Failed to parse Codex config.toml")?;
-        let last_source_matches = config
-            .as_table()
-            .get("ccswitch")
-            .and_then(toml_edit::Item::as_table)
-            .and_then(|table| table.get("last_switch"))
-            .and_then(toml_edit::Item::as_table)
-            .and_then(|table| table.get("source"))
-            .and_then(toml_edit::Item::as_str)
-            == Some(provider_id);
+        let last_source_matches = managed_last_switch(&config).and_then(|table| table.get("source")).and_then(toml_edit::Item::as_str) == Some(provider_id);
         if last_source_matches {
-            if let Some(ccswitch) = config.as_table_mut().get_mut("ccswitch").and_then(toml_edit::Item::as_table_mut) {
-                ccswitch.remove("last_switch");
+            for namespace in ["akmux", "ccswitch"] {
+                if let Some(table) = config.as_table_mut().get_mut(namespace).and_then(toml_edit::Item::as_table_mut) {
+                    table.remove("last_switch");
+                }
             }
         }
         write_private_file(&config_path, config.to_string().as_bytes())?;
@@ -315,12 +324,23 @@ pub fn remove_codex_provider(mgr: &ConfigManager, provider_id: &str, config_path
     Ok(())
 }
 
+fn managed_last_switch(config: &toml_edit::DocumentMut) -> Option<&toml_edit::Table> {
+    ["akmux", "ccswitch"].into_iter().find_map(|namespace| {
+        config
+            .as_table()
+            .get(namespace)
+            .and_then(toml_edit::Item::as_table)
+            .and_then(|table| table.get("last_switch"))
+            .and_then(toml_edit::Item::as_table)
+    })
+}
+
 fn write_private_file(path: &Path, content: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("config");
-    let temporary = path.with_file_name(format!(".{}.{}.ccswitch.tmp", file_name, std::process::id()));
+    let temporary = path.with_file_name(format!(".{}.{}.akmux.tmp", file_name, std::process::id()));
     let mut options = std::fs::OpenOptions::new();
     options.create(true).truncate(true).write(true);
     #[cfg(unix)]

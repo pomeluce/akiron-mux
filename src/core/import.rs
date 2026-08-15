@@ -5,9 +5,11 @@
 //! layer focused on CRUD operations.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const MAX_USAGE_TOKENS: i64 = 1_000_000_000_000;
+const CLAUDE_IMPORT_REVISION_KEY: &str = "claude_import_revision";
+const CLAUDE_IMPORT_REVISION: &str = "1";
 const CODEX_IMPORT_REVISION_KEY: &str = "codex_import_revision";
 const CODEX_IMPORT_REVISION: &str = "2";
 
@@ -57,6 +59,11 @@ struct MessageContent {
 fn claude_projects_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".claude").join("projects")
+}
+
+fn claude_config_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".claude.json")
 }
 
 fn codex_sessions_dir() -> PathBuf {
@@ -145,14 +152,18 @@ fn ts_to_iso(ts_ms: i64) -> String {
 /// mtime differs from the stored index in session_log_sync.
 pub fn import_claude_sessions_with_progress(db: &Db, on_progress: impl Fn(usize, usize, usize)) -> Result<usize, anyhow::Error> {
     let projects_dir = claude_projects_dir();
-    let file_index: HashMap<String, i64> = {
+    let mut file_index: HashMap<String, i64> = {
         let mut stmt = db.conn().prepare("SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type = 'session'")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         rows.filter_map(|r| r.ok()).collect()
     };
     cleanup_removed_session_files(db, &projects_dir, "claude", &file_index)?;
+    if prepare_claude_import_revision(db, &projects_dir)? {
+        file_index.retain(|path, _| !Path::new(path).starts_with(&projects_dir));
+    }
 
     let jsonl_files = collect_jsonl_files(&projects_dir);
+    let project_paths = load_claude_project_paths(&claude_config_path());
     let total = jsonl_files.len();
     let mut imported = 0usize;
     let mut updated = 0usize;
@@ -174,7 +185,7 @@ pub fn import_claude_sessions_with_progress(db: &Db, on_progress: impl Fn(usize,
             }
         }
 
-        match parse_session_file(path) {
+        match parse_session_file(path, &projects_dir, &project_paths) {
             Ok(Some(record)) => {
                 db.insert_session(&record, APP_TYPE)?;
                 if file_index.contains_key(&file_path_str) {
@@ -209,6 +220,44 @@ pub fn import_claude_sessions_with_progress(db: &Db, on_progress: impl Fn(usize,
 
 pub fn import_claude_sessions(db: &Db) -> Result<usize, anyhow::Error> {
     import_claude_sessions_with_progress(db, |_, _, _| {})
+}
+
+fn claude_project_directory_name(path: &str) -> String {
+    path.chars().map(|character| if matches!(character, '/' | '\\' | ':') { '-' } else { character }).collect()
+}
+
+fn load_claude_project_paths(config_path: &Path) -> HashMap<String, PathBuf> {
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(_) => return HashMap::new(),
+    };
+    let config: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(config) => config,
+        Err(_) => return HashMap::new(),
+    };
+    let Some(projects) = config.get("projects").and_then(serde_json::Value::as_object) else {
+        return HashMap::new();
+    };
+
+    let mut candidates = HashMap::<String, Option<PathBuf>>::new();
+    for project_path in projects.keys().map(PathBuf::from).filter(|path| path.is_dir()) {
+        let directory_name = claude_project_directory_name(&project_path.to_string_lossy());
+        candidates
+            .entry(directory_name)
+            .and_modify(|candidate| {
+                if candidate.as_ref() != Some(&project_path) {
+                    *candidate = None;
+                }
+            })
+            .or_insert(Some(project_path));
+    }
+
+    candidates.into_iter().filter_map(|(directory, path)| path.map(|path| (directory, path))).collect()
+}
+
+fn project_path_for_claude_session<'a>(path: &Path, projects_dir: &Path, project_paths: &'a HashMap<String, PathBuf>) -> Option<&'a PathBuf> {
+    let directory = path.strip_prefix(projects_dir).ok()?.components().next()?.as_os_str().to_str()?;
+    project_paths.get(directory)
 }
 
 #[derive(Debug, Deserialize)]
@@ -286,6 +335,29 @@ fn prepare_codex_import_revision(db: &Db, sessions_dir: &std::path::Path) -> Res
     Ok(())
 }
 
+fn prepare_claude_import_revision(db: &Db, projects_dir: &Path) -> Result<bool, anyhow::Error> {
+    if db.get_setting(CLAUDE_IMPORT_REVISION_KEY).as_deref() == Some(CLAUDE_IMPORT_REVISION) {
+        return Ok(false);
+    }
+
+    let claude_sync_paths = {
+        let mut statement = db.conn().prepare("SELECT file_path FROM session_log_sync WHERE scan_type = 'session'")?;
+        let paths = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        paths.into_iter().filter(|path| Path::new(path).starts_with(projects_dir)).collect::<Vec<_>>()
+    };
+
+    let transaction = db.conn().unchecked_transaction()?;
+    for path in claude_sync_paths {
+        transaction.execute("DELETE FROM session_log_sync WHERE file_path = ?1 AND scan_type = 'session'", [path])?;
+    }
+    transaction.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        rusqlite::params![CLAUDE_IMPORT_REVISION_KEY, CLAUDE_IMPORT_REVISION],
+    )?;
+    transaction.commit()?;
+    Ok(true)
+}
+
 fn cleanup_removed_session_files(db: &Db, root: &std::path::Path, app_type: &str, file_index: &HashMap<String, i64>) -> Result<usize, anyhow::Error> {
     let stale_paths = file_index
         .keys()
@@ -358,6 +430,15 @@ fn apply_codex_session_index(db: &Db, index: &HashMap<String, String>) -> Result
         db.conn()
             .execute("UPDATE session_history SET title = ?1 WHERE id = ?2 AND app_type = 'codex'", rusqlite::params![title, id])?;
     }
+    Ok(())
+}
+
+/// Incrementally refresh native session titles without re-importing Codex rollouts.
+#[allow(dead_code)]
+pub fn refresh_session_titles(db: &Db) -> Result<(), anyhow::Error> {
+    import_claude_sessions(db)?;
+    let index = load_codex_session_index(&codex_session_index_path());
+    apply_codex_session_index(db, &index)?;
     Ok(())
 }
 
@@ -495,7 +576,7 @@ fn detect_mode(lines: &[&str]) -> String {
     "local".to_string()
 }
 
-fn parse_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, anyhow::Error> {
+fn parse_session_file(path: &PathBuf, projects_dir: &Path, project_paths: &HashMap<String, PathBuf>) -> Result<Option<SessionRecord>, anyhow::Error> {
     let meta = std::fs::metadata(path)?;
     let size_bytes = meta.len() as i64;
     let file_mtime = meta
@@ -616,7 +697,10 @@ fn parse_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, anyhow::E
         return Ok(None);
     }
 
-    let cwd = cwd.unwrap_or_default();
+    let cwd = project_path_for_claude_session(path, projects_dir, project_paths)
+        .map(|project_path| project_path.display().to_string())
+        .or(cwd)
+        .unwrap_or_default();
     let start_time = created_at.map(ts_to_iso).unwrap_or_default();
     let project_name = std::path::Path::new(&cwd).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let title = custom_title.or(ai_title).or(last_prompt).or(fallback_title).unwrap_or(project_name);
@@ -891,6 +975,106 @@ pub fn file_mtime(path: &PathBuf) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_project_directory_overrides_stale_or_missing_jsonl_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let projects_dir = root.path().join("claude-projects");
+        let current_project = root.path().join("current-project");
+        let encoded_project = "encoded-current-project";
+        let session_dir = projects_dir.join(encoded_project);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::create_dir(&current_project).unwrap();
+        let project_paths = HashMap::from([(encoded_project.to_string(), current_project.clone())]);
+
+        for (session_id, cwd_field) in [("stale-cwd", r#", "cwd":"/old/project/path""#), ("missing-cwd", "")] {
+            let path = session_dir.join(format!("{session_id}.jsonl"));
+            std::fs::write(&path, format!(r#"{{"type":"ai-title","sessionId":"{session_id}","aiTitle":"Session"{cwd_field}}}"#)).unwrap();
+
+            let session = parse_session_file(&path, &projects_dir, &project_paths).unwrap().unwrap();
+
+            assert_eq!(session.project_path, current_project.display().to_string());
+        }
+    }
+
+    #[test]
+    fn loads_unique_existing_claude_project_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let config_path = root.path().join(".claude.json");
+        std::fs::write(
+            &config_path,
+            serde_json::json!({
+                "projects": {
+                    project.display().to_string(): {},
+                    root.path().join("missing").display().to_string(): {}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let projects = load_claude_project_paths(&config_path);
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects.get(&claude_project_directory_name(&project.to_string_lossy())), Some(&project));
+    }
+
+    #[test]
+    fn claude_import_revision_invalidates_only_session_scan_once() {
+        let root = tempfile::tempdir().unwrap();
+        let projects_dir = root.path().join("projects");
+        let claude_path = projects_dir.join("session.jsonl");
+        let unrelated_path = root.path().join("codex.jsonl");
+        std::fs::create_dir(&projects_dir).unwrap();
+        let db = Db::open(&root.path().join("ccswitch.db")).unwrap();
+        for (path, scan_type) in [(&claude_path, "session"), (&claude_path, "usage"), (&unrelated_path, "session")] {
+            db.conn()
+                .execute(
+                    "INSERT INTO session_log_sync (file_path, file_mtime, scan_type) VALUES (?1, 1, ?2)",
+                    rusqlite::params![path.to_string_lossy(), scan_type],
+                )
+                .unwrap();
+        }
+
+        assert!(prepare_claude_import_revision(&db, &projects_dir).unwrap());
+        let scan_rows = {
+            let mut statement = db
+                .conn()
+                .prepare("SELECT file_path, scan_type FROM session_log_sync ORDER BY file_path, scan_type")
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            scan_rows,
+            vec![
+                (unrelated_path.to_string_lossy().to_string(), "session".into()),
+                (claude_path.to_string_lossy().to_string(), "usage".into()),
+            ]
+        );
+
+        db.conn()
+            .execute(
+                "INSERT INTO session_log_sync (file_path, file_mtime, scan_type) VALUES (?1, 1, 'session')",
+                [claude_path.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        assert!(!prepare_claude_import_revision(&db, &projects_dir).unwrap());
+        let session_scan_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM session_log_sync WHERE file_path = ?1 AND scan_type = 'session'",
+                [claude_path.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_scan_count, 1);
+    }
 
     #[test]
     fn parses_codex_session_and_usage() {

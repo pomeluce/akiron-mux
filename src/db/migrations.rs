@@ -11,7 +11,7 @@ pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), anyhow::Error> {
     if version > CURRENT_USER_VERSION {
         anyhow::bail!(
             "Database version {} is newer than this app (max {}). \
-             Please upgrade CCSwitch.",
+             Please upgrade AkironMux.",
             version,
             CURRENT_USER_VERSION
         );

@@ -1,11 +1,5 @@
-mod cli;
-mod core;
-mod db;
-mod proxy;
-mod tui;
-
+use ccswitch::{cli, cli::args::CliArgs, db, tui};
 use clap::Parser;
-use cli::args::CliArgs;
 
 fn main() {
     let args = CliArgs::parse();
@@ -17,7 +11,7 @@ fn main() {
         // Init tracing to file in TUI mode — stderr output corrupts the terminal.
         let log_dir = ccswitch::core::config::data_dir();
         std::fs::create_dir_all(&log_dir).ok();
-        let log_path = log_dir.join("ccs.log");
+        let log_path = log_dir.join("akmux.log");
         let mut log_options = std::fs::OpenOptions::new();
         log_options.create(true).append(true);
         #[cfg(unix)]
@@ -64,7 +58,7 @@ fn main() {
 /// If this is the first launch (no session data yet), run session import
 /// with a terminal progress bar before the TUI starts.
 fn pre_tui_import() {
-    let db_path = crate::core::config::db_path();
+    let db_path = ccswitch::core::config::db_path();
 
     let db = match db::Db::open(&db_path) {
         Ok(db) => db,
@@ -86,7 +80,7 @@ fn pre_tui_import() {
     }
 
     // Always run import — incremental (mtime-based) on subsequent launches
-    let result = crate::core::import::import_claude_sessions_with_progress(&db, |files_done, files_total, imported| {
+    let result = ccswitch::core::import::import_claude_sessions_with_progress(&db, |files_done, files_total, imported| {
         if is_first_launch {
             let pct = if files_total > 0 {
                 (files_done as f64 / files_total as f64 * 100.0) as usize
@@ -102,7 +96,7 @@ fn pre_tui_import() {
 
     if is_first_launch {
         match result {
-            Ok(n) => eprintln!("\n\n✅ Imported {} sessions. Launching CCSwitch...\n", n),
+            Ok(n) => eprintln!("\n\n✅ Imported {} sessions. Launching AkironMux...\n", n),
             Err(e) => eprintln!("\n\n⚠️  Import finished with errors: {}\n", e),
         }
     } else if let Err(e) = result {

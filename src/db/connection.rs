@@ -33,7 +33,7 @@ impl Db {
             .map_err(|e| anyhow::anyhow!("Failed to read DB user_version: {}", e))?;
         if version > migrations::CURRENT_USER_VERSION {
             anyhow::bail!(
-                "Database schema version {} is newer than this CCSwitch build supports ({})",
+                "Database schema version {} is newer than this AkironMux build supports ({})",
                 version,
                 migrations::CURRENT_USER_VERSION
             );

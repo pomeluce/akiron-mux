@@ -141,4 +141,46 @@ impl Db {
         }
         Ok(rows)
     }
+
+    /// Query the unified Claude and Codex history index for the session workbench.
+    #[allow(dead_code)]
+    pub fn query_all_sessions(&self, search: Option<&str>, limit: usize) -> Result<Vec<(String, SessionRecord)>, rusqlite::Error> {
+        let pattern = search.map(|value| format!("%{}%", value));
+        let mut stmt = self.conn().prepare(
+            "SELECT id, app_type, project_path, profile_id, mode, start_time, end_time,
+                    prompt_tokens, completion_tokens, message_count, title, size_bytes, file_mtime
+             FROM session_history
+             WHERE (?1 IS NULL OR title LIKE ?1 OR project_path LIKE ?1 OR id LIKE ?1)
+             ORDER BY file_mtime DESC, start_time DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], |row| {
+            let app_type: String = row.get(1)?;
+            let title: Option<String> = row.get(10)?;
+            let project_path: String = row.get(2)?;
+            Ok((
+                app_type,
+                SessionRecord {
+                    id: row.get(0)?,
+                    project_path: project_path.clone(),
+                    profile_id: row.get(3)?,
+                    mode: row.get(4)?,
+                    start_time: row.get(5)?,
+                    end_time: row.get(6)?,
+                    prompt_tokens: row.get(7)?,
+                    completion_tokens: row.get(8)?,
+                    message_count: row.get(9)?,
+                    title,
+                    size_bytes: row.get::<_, i64>(11).unwrap_or(0),
+                    file_mtime: row.get::<_, String>(12).unwrap_or_default(),
+                    search_text: String::new(),
+                },
+            ))
+        })?;
+        let mut sessions = rows.collect::<Result<Vec<_>, _>>()?;
+        for (_, session) in &mut sessions {
+            session.search_text = format!("{} {}", session.title.as_deref().unwrap_or(""), session.project_path).to_lowercase();
+        }
+        Ok(sessions)
+    }
 }

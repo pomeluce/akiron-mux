@@ -12,7 +12,20 @@ Keep the user informed with concise progress updates while working. Lead the fin
 
 pub fn default_catalog_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    Path::new(&home).join(".codex/ccswitch/models.json")
+    let current = Path::new(&home).join(".codex/akmux/models.json");
+    if !current.exists() {
+        for legacy in [".codex/akiron-mux/models.json", ".codex/ccswitch/models.json"] {
+            let legacy = Path::new(&home).join(legacy);
+            if legacy.is_file() {
+                if let Some(parent) = current.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::copy(legacy, &current);
+                break;
+            }
+        }
+    }
+    current
 }
 
 pub fn build_catalog(providers: &[Provider]) -> Result<Value> {
@@ -42,7 +55,7 @@ pub fn catalog_status(path: &Path, providers: &[Provider]) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
-    let existing: Value = serde_json::from_str(&std::fs::read_to_string(path)?).context("Failed to parse CCSwitch models.json")?;
+    let existing: Value = serde_json::from_str(&std::fs::read_to_string(path)?).context("Failed to parse AkironMux models.json")?;
     Ok(existing == build_catalog(providers)?)
 }
 
@@ -114,7 +127,7 @@ fn write_private_json(path: &Path, value: &Value) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("models.json");
-    let temporary = path.with_file_name(format!(".{}.ccswitch.tmp", file_name));
+    let temporary = path.with_file_name(format!(".{}.akmux.tmp", file_name));
     let mut options = std::fs::OpenOptions::new();
     options.create(true).truncate(true).write(true);
     #[cfg(unix)]

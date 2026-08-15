@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Akiron icon</title>
+  <desc id="desc">A refined angular Akiron letter mark with a rising translucent tail on a blue rounded square.</desc>
+
+  <defs>
+    <linearGradient id="tail-fade" x1="116" y1="170.5" x2="203.5" y2="139" gradientUnits="userSpaceOnUse">
+      <stop offset="0.55" stop-color="#FFFFFF"/>
+      <stop offset="0.78" stop-color="#FFFFFF" stop-opacity="0.84"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.52"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="4" y="4" width="248" height="248" rx="60" fill="#3A56C8"/>
+
+  <path fill="#FFFFFF" d="M134.5 60 72.5 162l46-4 27-53 44 57-55-102Z"/>
+  <path fill="url(#tail-fade)" d="M93.5 165 138.5 176 203.5 139 93.5 165Z"/>
+</svg>

@@ -1,13 +1,17 @@
 [package]
-name = "ccswitch"
-version = "1.10.4"
+name = "akiron-mux"
+version = "1.11.0"
 edition = "2021"
 rust-version = "1.80"
 license = "GPL-3.0"
 
 [[bin]]
-name = "ccs"
+name = "akmux"
 path = "src/main.rs"
+
+[[bin]]
+name = "akmux-sessiond"
+path = "src/bin/akmux-sessiond.rs"
 
 [lib]
 name = "ccswitch"
@@ -25,12 +29,16 @@ clap_mangen = "0.2"
 dialoguer = "0.11"
 
 # HTTP proxy
-axum = "0.7"
+axum = { version = "0.7", features = [ "ws" ] }
 reqwest = { version = "0.12", default-features = false, features = [ "stream", "json", "rustls-tls" ] }
 tokio = { version = "1", features = [ "full" ] }
 tokio-stream = "0.1"
 bytes = "1"
 futures-core = "0.3"
+futures-util = "0.3"
+
+# Managed terminal sessions
+portable-pty = "0.9"
 
 # Database
 rusqlite = { version = "0.31", features = [ "bundled" ] }
@@ -58,44 +66,57 @@ tracing-subscriber = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+tower = { version = "0.5", features = [ "util" ] }
 
 [package.metadata.deb]
-name = "ccswitch"
+name = "akiron-mux"
 maintainer = "pomeluce <pomeluce+ccswitch@outlook.com>"
-extended-description = "Claude Code model configuration manager"
+extended-description = "Unified Claude Code and Codex configuration manager"
 section = "utils"
 priority = "optional"
 assets = [
   [
-    "target/release/ccs",
-    "usr/bin/ccs",
+    "target/release/akmux",
+    "usr/bin/akmux",
+    "755",
+  ],
+  [
+    "target/release/akmux-sessiond",
+    "usr/bin/akmux-sessiond",
     "755",
   ],
   [
     "README.md",
-    "usr/share/doc/ccswitch/README.md",
+    "usr/share/doc/akiron-mux/README.md",
     "644",
   ],
   [
     "LICENSE",
-    "usr/share/doc/ccswitch/LICENSE",
+    "usr/share/doc/akiron-mux/LICENSE",
     "644",
   ],
   [
-    "assets/ccs-proxy.service",
-    "usr/lib/systemd/user/ccs-proxy.service",
+    "assets/akmux-proxy.service",
+    "usr/lib/systemd/user/akmux-proxy.service",
+    "644",
+  ],
+  [
+    "assets/akmux-sessiond.service",
+    "usr/lib/systemd/user/akmux-sessiond.service",
     "644",
   ],
 ]
 depends = ""
 
 [package.metadata.generate-rpm]
-name = "ccswitch"
+name = "akiron-mux"
 license = "GPL-3.0"
-summary = "Claude Code model configuration manager"
+summary = "Unified Claude Code and Codex configuration manager"
 assets = [
-  { source = "target/release/ccs", dest = "/usr/bin/ccs", mode = "755" },
-  { source = "README.md", dest = "/usr/share/doc/ccswitch/README.md", mode = "644" },
-  { source = "LICENSE", dest = "/usr/share/doc/ccswitch/LICENSE", mode = "644" },
-  { source = "assets/ccs-proxy.service", dest = "/usr/lib/systemd/user/ccs-proxy.service", mode = "644" },
+  { source = "target/release/akmux", dest = "/usr/bin/akmux", mode = "755" },
+  { source = "target/release/akmux-sessiond", dest = "/usr/bin/akmux-sessiond", mode = "755" },
+  { source = "README.md", dest = "/usr/share/doc/akiron-mux/README.md", mode = "644" },
+  { source = "LICENSE", dest = "/usr/share/doc/akiron-mux/LICENSE", mode = "644" },
+  { source = "assets/akmux-proxy.service", dest = "/usr/lib/systemd/user/akmux-proxy.service", mode = "644" },
+  { source = "assets/akmux-sessiond.service", dest = "/usr/lib/systemd/user/akmux-sessiond.service", mode = "644" },
 ]

@@ -100,7 +100,7 @@ impl App {
                     if let Err(e) = cmd.status() {
                         eprintln!("Failed to launch Claude: {}", e);
                     }
-                    print!("\n  Returning to CCSwitch...\n");
+                    print!("\n  Returning to AkironMux...\n");
                 }
                 *terminal = ratatui::init();
                 self.history_tab.needs_terminal_reinit = false;

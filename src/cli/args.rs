@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 
-/// CCSwitch — Claude Code model configuration manager
+/// AkironMux — unified Claude Code and Codex configuration manager
 #[derive(Parser, Debug)]
-#[command(name = "ccs", version, about, long_about = None)]
+#[command(name = "akmux", version, about, long_about = None)]
 pub struct CliArgs {
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -10,7 +10,7 @@ pub struct CliArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Switch to a model profile (usage: ccs switch <provider>/<profile>)
+    /// Switch to a model profile (usage: akmux switch <provider>/<profile>)
     Switch {
         /// Target profile as "provider_id/profile_id" or just "profile_id"
         target: Option<String>,

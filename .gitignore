@@ -3,3 +3,6 @@ docs/superpowers
 target/
 require.md
 .direnv/
+node_modules/
+dist/
+test-results/

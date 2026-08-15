@@ -1,0 +1,1509 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CCSwitch Session TUI Prototype</title>
+    <!-- Three variants of the Sessions surface, switchable via ?variant=A|B|C. -->
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0d1117;
+        --panel: #121820;
+        --panel-2: #171f29;
+        --line: #303944;
+        --line-strong: #4b5968;
+        --text: #e6edf3;
+        --muted: #8b98a7;
+        --green: #56d364;
+        --cyan: #58c8e8;
+        --yellow: #e3b341;
+        --red: #f47067;
+        --blue: #79a7ff;
+        --purple: #c297ff;
+        --shadow: 0 12px 32px rgb(0 0 0 / 38%);
+        font-family: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        min-width: 320px;
+        min-height: 100%;
+        margin: 0;
+        background: #080b0f;
+        color: var(--text);
+      }
+
+      body {
+        min-height: 100vh;
+        padding: 22px 22px 92px;
+      }
+
+      button {
+        font: inherit;
+      }
+
+      .prototype-note {
+        max-width: 1500px;
+        margin: 0 auto 10px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .tui-shell {
+        width: min(1500px, 100%);
+        min-height: 760px;
+        margin: 0 auto;
+        overflow: hidden;
+        border: 1px solid var(--line-strong);
+        border-radius: 6px;
+        background: var(--bg);
+        box-shadow: var(--shadow);
+      }
+
+      .app-nav {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto auto;
+        align-items: center;
+        min-height: 45px;
+        border-bottom: 1px solid var(--line);
+        background: #10161d;
+      }
+
+      .brand {
+        padding: 0 16px;
+        color: var(--text);
+        font-weight: 800;
+      }
+
+      .brand-mark {
+        color: var(--green);
+      }
+
+      .nav-items {
+        display: flex;
+        min-width: 0;
+        height: 100%;
+        overflow-x: auto;
+        overflow-y: hidden;
+      }
+
+      .nav-item {
+        display: inline-flex;
+        align-items: center;
+        padding: 0 13px;
+        border: 0;
+        color: var(--muted);
+        background: transparent;
+        border-bottom: 2px solid transparent;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+
+      .nav-item.active {
+        color: var(--text);
+        border-bottom-color: var(--cyan);
+      }
+
+      .workspace-name {
+        max-width: 270px;
+        padding: 0 16px;
+        overflow: hidden;
+        color: var(--muted);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .agent-scope {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        height: 30px;
+        margin-right: 10px;
+        padding: 2px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: #0b1016;
+      }
+
+      .scope-label {
+        padding: 0 6px;
+        color: var(--muted);
+        font-size: 10px;
+        text-transform: uppercase;
+      }
+
+      .scope-option {
+        height: 24px;
+        padding: 0 8px;
+        border: 0;
+        border-radius: 3px;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 11px;
+      }
+
+      .scope-option.active {
+        background: #26313d;
+        color: var(--text);
+      }
+
+      .scope-option[data-agent="claude"].active {
+        color: var(--purple);
+      }
+
+      .scope-option[data-agent="codex"].active {
+        color: var(--green);
+      }
+
+      .variant {
+        display: none;
+      }
+
+      .variant.active {
+        display: block;
+      }
+
+      .utility-page {
+        display: none;
+        min-height: 714px;
+        background: var(--bg);
+      }
+
+      .utility-page.active {
+        display: block;
+      }
+
+      .page-heading {
+        display: flex;
+        align-items: center;
+        min-height: 54px;
+        padding: 0 16px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      .page-heading h1 {
+        margin: 0;
+        font-size: 15px;
+      }
+
+      .page-heading-meta {
+        margin-left: 12px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .page-heading-actions {
+        display: flex;
+        gap: 8px;
+        margin-left: auto;
+      }
+
+      .providers-layout {
+        display: grid;
+        grid-template-columns: 280px 300px minmax(0, 1fr);
+        min-height: 660px;
+      }
+
+      .data-column {
+        min-width: 0;
+        border-right: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      .data-column:last-child {
+        border-right: 0;
+        background: var(--bg);
+      }
+
+      .data-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        min-height: 47px;
+        padding: 8px 12px;
+        border-bottom: 1px solid #242d37;
+        color: var(--muted);
+      }
+
+      .data-row.active {
+        border-left: 3px solid var(--cyan);
+        background: #1a2530;
+        color: var(--text);
+      }
+
+      .row-title,
+      .row-subtitle {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .row-subtitle {
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 10px;
+      }
+
+      .row-tag {
+        align-self: center;
+        color: var(--green);
+        font-size: 10px;
+      }
+
+      .detail-sheet {
+        padding: 18px;
+      }
+
+      .detail-title {
+        margin: 0 0 18px;
+        font-size: 16px;
+      }
+
+      .field-grid {
+        display: grid;
+        grid-template-columns: 130px minmax(0, 1fr);
+        gap: 12px;
+        max-width: 720px;
+        font-size: 12px;
+      }
+
+      .field-name {
+        color: var(--muted);
+      }
+
+      .field-value {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--text);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .agent-view {
+        display: none;
+      }
+
+      .agent-view.active {
+        display: contents;
+      }
+
+      .usage-layout {
+        min-height: 660px;
+      }
+
+      .metric-strip {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      .metric {
+        min-width: 0;
+        padding: 17px;
+        border-right: 1px solid var(--line);
+      }
+
+      .metric:last-child {
+        border-right: 0;
+      }
+
+      .metric-label {
+        color: var(--muted);
+        font-size: 10px;
+        text-transform: uppercase;
+      }
+
+      .metric-value {
+        margin-top: 8px;
+        overflow: hidden;
+        color: var(--text);
+        font-size: 20px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .usage-body {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 360px;
+        min-height: 510px;
+      }
+
+      .usage-chart {
+        padding: 18px;
+        border-right: 1px solid var(--line);
+      }
+
+      .chart-area {
+        display: flex;
+        align-items: end;
+        gap: 10px;
+        height: 300px;
+        margin-top: 30px;
+        padding: 0 12px 20px;
+        border-bottom: 1px solid var(--line-strong);
+      }
+
+      .bar {
+        flex: 1;
+        min-width: 12px;
+        max-width: 54px;
+        border-top: 2px solid var(--cyan);
+        background: #263847;
+      }
+
+      .usage-models {
+        background: var(--panel);
+      }
+
+      .history-layout {
+        display: grid;
+        grid-template-columns: minmax(330px, 42%) minmax(0, 1fr);
+        min-height: 660px;
+      }
+
+      .history-list {
+        border-right: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      .search-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 130px;
+        gap: 8px;
+        padding: 10px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .search-input,
+      .select-input {
+        min-width: 0;
+        height: 32px;
+        padding: 0 9px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        outline: none;
+        background: #0b1016;
+        color: var(--text);
+        font: inherit;
+        font-size: 11px;
+      }
+
+      .history-detail {
+        padding: 20px;
+      }
+
+      .settings-list {
+        display: grid;
+        grid-template-columns: 240px minmax(0, 1fr);
+        min-height: 660px;
+      }
+
+      .settings-menu {
+        border-right: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      .section-label {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .session-row {
+        width: 100%;
+        min-width: 0;
+        height: 58px;
+        padding: 8px 10px;
+        border: 0;
+        border-left: 3px solid transparent;
+        background: transparent;
+        color: var(--text);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .session-row:hover {
+        background: #19212b;
+      }
+
+      .session-row.active {
+        border-left-color: var(--cyan);
+        background: #1a2530;
+      }
+
+      .session-main,
+      .session-meta {
+        display: flex;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .session-main {
+        gap: 8px;
+      }
+
+      .session-meta {
+        gap: 6px;
+        margin-top: 5px;
+        padding-left: 18px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .session-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .session-count {
+        flex: none;
+        min-width: 18px;
+        margin-left: auto;
+        color: var(--yellow);
+        text-align: right;
+      }
+
+      .state-running {
+        color: var(--green);
+      }
+
+      .state-activity {
+        color: var(--yellow);
+      }
+
+      .state-exited {
+        color: var(--muted);
+      }
+
+      .state-error {
+        color: var(--red);
+      }
+
+      .agent-codex {
+        color: var(--green);
+      }
+
+      .agent-claude {
+        color: var(--purple);
+      }
+
+      .terminal-header {
+        display: flex;
+        align-items: center;
+        min-width: 0;
+        height: 48px;
+        padding: 0 14px;
+        border-bottom: 1px solid var(--line);
+        background: #10161d;
+      }
+
+      .terminal-title {
+        min-width: 0;
+      }
+
+      .terminal-title strong,
+      .terminal-title span {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .terminal-title span {
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .terminal-actions {
+        display: flex;
+        gap: 8px;
+        margin-left: auto;
+      }
+
+      .icon-button,
+      .text-button {
+        min-height: 30px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: var(--panel-2);
+        color: var(--muted);
+        cursor: pointer;
+      }
+
+      .icon-button {
+        width: 32px;
+      }
+
+      .text-button {
+        padding: 0 10px;
+      }
+
+      .icon-button:hover,
+      .text-button:hover {
+        border-color: var(--line-strong);
+        color: var(--text);
+      }
+
+      .terminal-screen {
+        min-height: 0;
+        padding: 18px;
+        overflow: hidden;
+        background: #0a0e13;
+        color: #d7dee7;
+        font-size: 13px;
+        line-height: 1.65;
+      }
+
+      .line-muted {
+        color: var(--muted);
+      }
+
+      .line-green {
+        color: var(--green);
+      }
+
+      .line-cyan {
+        color: var(--cyan);
+      }
+
+      .line-yellow {
+        color: var(--yellow);
+      }
+
+      .line-red {
+        color: var(--red);
+      }
+
+      .cursor {
+        display: inline-block;
+        width: 8px;
+        height: 16px;
+        vertical-align: -3px;
+        background: var(--text);
+      }
+
+      .footer {
+        display: flex;
+        align-items: center;
+        min-height: 34px;
+        padding: 0 12px;
+        border-top: 1px solid var(--line);
+        background: #10161d;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .footer-mode {
+        margin-right: 14px;
+        color: var(--cyan);
+        font-weight: 800;
+      }
+
+      .footer-spacer {
+        flex: 1;
+      }
+
+      .footer-item {
+        margin-left: 15px;
+        white-space: nowrap;
+      }
+
+      .key {
+        padding: 2px 5px;
+        border: 1px solid var(--line-strong);
+        border-radius: 3px;
+        color: var(--text);
+      }
+
+      .a-body {
+        display: grid;
+        grid-template-columns: 246px minmax(420px, 1fr) 220px;
+        min-height: 680px;
+      }
+
+      .a-sessions,
+      .a-context {
+        min-width: 0;
+        background: var(--panel);
+      }
+
+      .a-sessions {
+        border-right: 1px solid var(--line);
+      }
+
+      .a-context {
+        border-left: 1px solid var(--line);
+      }
+
+      .panel-heading {
+        display: flex;
+        align-items: center;
+        height: 48px;
+        padding: 0 12px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .new-session {
+        width: calc(100% - 20px);
+        height: 34px;
+        margin: 12px 10px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: transparent;
+        color: var(--cyan);
+        cursor: pointer;
+      }
+
+      .a-terminal {
+        display: grid;
+        min-width: 0;
+        grid-template-rows: 48px minmax(0, 1fr);
+      }
+
+      .context-section {
+        padding: 13px 12px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .context-grid {
+        display: grid;
+        grid-template-columns: 56px minmax(0, 1fr);
+        gap: 8px 7px;
+        margin-top: 11px;
+        font-size: 11px;
+      }
+
+      .context-key {
+        color: var(--muted);
+      }
+
+      .context-value {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .activity-line {
+        display: grid;
+        grid-template-columns: 43px minmax(0, 1fr);
+        gap: 7px;
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .b-body {
+        display: grid;
+        grid-template-columns: 300px minmax(0, 1fr);
+        min-height: 680px;
+      }
+
+      .b-tree {
+        border-right: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      .workspace-block {
+        border-bottom: 1px solid var(--line);
+      }
+
+      .workspace-row {
+        display: flex;
+        align-items: center;
+        min-height: 42px;
+        padding: 0 12px;
+        color: var(--text);
+      }
+
+      .workspace-path {
+        min-width: 0;
+        margin-left: auto;
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .tree-session {
+        padding-left: 24px;
+      }
+
+      .b-main {
+        display: grid;
+        min-width: 0;
+        grid-template-rows: minmax(0, 1fr) 142px;
+      }
+
+      .b-terminal {
+        display: grid;
+        min-height: 0;
+        grid-template-rows: 48px minmax(0, 1fr);
+      }
+
+      .activity-table {
+        overflow: hidden;
+        border-top: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      .activity-table .panel-heading {
+        height: 36px;
+      }
+
+      .activity-row {
+        display: grid;
+        grid-template-columns: 70px 92px 110px minmax(0, 1fr);
+        gap: 8px;
+        padding: 7px 12px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .c-session-tabs {
+        display: flex;
+        min-height: 48px;
+        overflow-x: auto;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      .c-tab {
+        display: grid;
+        flex: 0 0 210px;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 7px;
+        padding: 0 12px;
+        border-right: 1px solid var(--line);
+        border-bottom: 2px solid transparent;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+      }
+
+      .c-tab.active {
+        border-bottom-color: var(--cyan);
+        background: #18212b;
+        color: var(--text);
+      }
+
+      .c-tab-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .c-main {
+        display: grid;
+        min-height: 632px;
+        grid-template-rows: 48px minmax(0, 1fr);
+      }
+
+      .c-quick-switcher {
+        position: absolute;
+        top: 142px;
+        left: 50%;
+        width: min(520px, calc(100% - 48px));
+        overflow: hidden;
+        border: 1px solid var(--line-strong);
+        border-radius: 6px;
+        background: #121820;
+        box-shadow: var(--shadow);
+        transform: translateX(-50%);
+      }
+
+      .c-quick-input {
+        width: 100%;
+        height: 42px;
+        padding: 0 12px;
+        border: 0;
+        border-bottom: 1px solid var(--line);
+        outline: none;
+        background: #0e141b;
+        color: var(--text);
+      }
+
+      .quick-row {
+        display: grid;
+        grid-template-columns: 22px minmax(0, 1fr) auto;
+        gap: 8px;
+        padding: 10px 12px;
+        color: var(--muted);
+      }
+
+      .quick-row.active {
+        background: #1a2530;
+        color: var(--text);
+      }
+
+      .prototype-switcher {
+        position: fixed;
+        z-index: 30;
+        bottom: 22px;
+        left: 50%;
+        display: grid;
+        grid-template-columns: 42px minmax(190px, auto) 42px;
+        align-items: center;
+        overflow: hidden;
+        border: 1px solid #718092;
+        border-radius: 6px;
+        background: #eef2f6;
+        color: #111820;
+        box-shadow: var(--shadow);
+        transform: translateX(-50%);
+      }
+
+      .prototype-switcher button {
+        height: 40px;
+        border: 0;
+        background: transparent;
+        color: #111820;
+        cursor: pointer;
+        font-size: 19px;
+      }
+
+      .prototype-switcher button:hover {
+        background: #d7e0e9;
+      }
+
+      .variant-label {
+        padding: 0 12px;
+        text-align: center;
+        font-family: system-ui, sans-serif;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .prototype-state {
+        position: fixed;
+        right: 18px;
+        bottom: 22px;
+        max-width: calc(50vw - 190px);
+        overflow: hidden;
+        color: #9ba8b6;
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      @media (max-width: 1120px) {
+        .a-body {
+          grid-template-columns: 228px minmax(0, 1fr);
+        }
+
+        .a-context {
+          display: none;
+        }
+
+        .providers-layout {
+          grid-template-columns: 240px 260px minmax(0, 1fr);
+        }
+
+        .workspace-name {
+          display: none;
+        }
+      }
+
+      @media (max-width: 780px) {
+        body {
+          padding: 0 0 78px;
+        }
+
+        .prototype-note {
+          display: none;
+        }
+
+        .tui-shell {
+          min-height: calc(100vh - 78px);
+          border-right: 0;
+          border-left: 0;
+          border-radius: 0;
+        }
+
+        .workspace-name {
+          max-width: 120px;
+        }
+
+        .agent-scope {
+          margin-right: 5px;
+        }
+
+        .scope-label {
+          display: none;
+        }
+
+        .scope-option {
+          padding: 0 6px;
+        }
+
+        .a-body,
+        .b-body {
+          display: block;
+          min-height: 680px;
+        }
+
+        .a-sessions,
+        .b-tree {
+          display: none;
+        }
+
+        .a-terminal,
+        .b-main {
+          min-height: 680px;
+        }
+
+        .activity-table {
+          display: none;
+        }
+
+        .c-tab {
+          flex-basis: 170px;
+        }
+
+        .providers-layout,
+        .history-layout,
+        .settings-list {
+          display: block;
+        }
+
+        .providers-layout .data-column:first-child,
+        .history-list,
+        .settings-menu {
+          display: none;
+        }
+
+        .providers-layout .data-column:nth-child(2) {
+          border-right: 0;
+        }
+
+        .usage-body {
+          display: block;
+        }
+
+        .usage-models {
+          display: none;
+        }
+
+        .metric-strip {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .footer-item.optional,
+        .terminal-actions .optional {
+          display: none;
+        }
+
+        .prototype-state {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="prototype-note">PROTOTYPE ONLY · Compare session information architecture; production remains a Rust TUI.</div>
+
+    <main class="tui-shell" aria-label="CCSwitch TUI prototype">
+      <header class="app-nav">
+        <div class="brand"><span class="brand-mark">CC</span>Switch</div>
+        <nav class="nav-items" aria-label="Product navigation">
+          <button class="nav-item active" data-page-target="sessions">Sessions</button>
+          <button class="nav-item" data-page-target="providers">Providers</button>
+          <button class="nav-item" data-page-target="usage">Usage</button>
+          <button class="nav-item" data-page-target="history">History</button>
+          <button class="nav-item" data-page-target="settings">Settings</button>
+        </nav>
+        <div class="workspace-name">Workspace: ccswitch</div>
+        <div class="agent-scope" id="agent-scope" aria-label="Agent scope">
+          <span class="scope-label" id="scope-label">Filter</span>
+          <button class="scope-option active" data-agent="all">All</button>
+          <button class="scope-option" data-agent="claude">Claude</button>
+          <button class="scope-option" data-agent="codex">Codex</button>
+        </div>
+      </header>
+
+      <section class="variant" data-variant="A">
+        <div class="a-body">
+          <aside class="a-sessions">
+            <div class="panel-heading"><span class="section-label">Sessions · 3</span></div>
+            <button class="session-row active" data-session="implementation" data-agent-type="codex">
+              <span class="session-main">
+                <span class="state-running">●</span>
+                <span class="session-title">implementation</span>
+                <span class="session-count"></span>
+              </span>
+              <span class="session-meta"><span class="agent-codex">Codex</span><span>·</span><span>Running</span></span>
+            </button>
+            <button class="session-row" data-session="review" data-agent-type="claude">
+              <span class="session-main">
+                <span class="state-activity">◐</span>
+                <span class="session-title">review</span>
+                <span class="session-count">1</span>
+              </span>
+              <span class="session-meta"><span class="agent-claude">Claude</span><span>·</span><span>Activity</span></span>
+            </button>
+            <button class="session-row" data-session="tests" data-agent-type="codex">
+              <span class="session-main">
+                <span class="state-exited">○</span>
+                <span class="session-title">tests</span>
+                <span class="session-count"></span>
+              </span>
+              <span class="session-meta"><span class="agent-codex">Codex</span><span>·</span><span>Exited</span></span>
+            </button>
+            <button class="new-session">+ New session</button>
+          </aside>
+
+          <section class="a-terminal">
+            <div class="terminal-header">
+              <div class="terminal-title">
+                <strong>implementation</strong>
+                <span>Codex · Running · /home/marcus/devspace/code/projects/ccswitch</span>
+              </div>
+              <div class="terminal-actions">
+                <button class="icon-button" title="Search output">/</button>
+                <button class="icon-button optional" title="Toggle context">i</button>
+              </div>
+            </div>
+            <div class="terminal-screen" role="img" aria-label="Native Codex terminal preview">
+              <div class="line-muted">OpenAI Codex CLI</div>
+              <div>&nbsp;</div>
+              <div><span class="line-cyan">›</span> Inspect the current repository and implement the session runtime seam.</div>
+              <div>&nbsp;</div>
+              <div class="line-muted">• Explored</div>
+              <div>&nbsp;&nbsp;└ Read spec.md, src/tui/app.rs, src/db/sessions.rs</div>
+              <div>&nbsp;</div>
+              <div><span class="line-green">•</span> I found the current history launcher blocks the TUI. I am adding a channel-based runtime.</div>
+              <div>&nbsp;</div>
+              <div class="line-muted">• Ran cargo test</div>
+              <div><span class="line-green">&nbsp;&nbsp;└ 42 passed; 0 failed</span></div>
+              <div>&nbsp;</div>
+              <div><span class="line-cyan">›</span> <span class="cursor"></span></div>
+            </div>
+          </section>
+
+          <aside class="a-context">
+            <div class="panel-heading"><span class="section-label">Context</span></div>
+            <div class="context-section">
+              <span class="section-label">Session</span>
+              <div class="context-grid">
+                <span class="context-key">Agent</span><span class="context-value agent-codex">Codex</span>
+                <span class="context-key">Model</span><span class="context-value">gpt-5</span>
+                <span class="context-key">CWD</span><span class="context-value">.../ccswitch</span>
+                <span class="context-key">Native</span><span class="context-value">a13f9c2...</span>
+              </div>
+            </div>
+            <div class="context-section">
+              <span class="section-label">Activity</span>
+              <div class="activity-line"><span>12:41</span><span>Tests passed</span></div>
+              <div class="activity-line"><span>12:39</span><span>Read repository</span></div>
+              <div class="activity-line"><span>12:37</span><span>Session started</span></div>
+            </div>
+          </aside>
+        </div>
+        <footer class="footer">
+          <button class="text-button footer-mode" data-mode-toggle>TERMINAL</button>
+          <span><span class="key">Ctrl+\</span> leader</span>
+          <span class="footer-item optional"><span class="key">Ctrl+Tab</span> next</span>
+          <span class="footer-spacer"></span>
+          <span class="footer-item">3 sessions</span>
+          <span class="footer-item line-yellow">1 unread</span>
+        </footer>
+      </section>
+
+      <section class="variant" data-variant="B">
+        <div class="b-body">
+          <aside class="b-tree">
+            <div class="panel-heading"><span class="section-label">Workspaces</span></div>
+            <div class="workspace-block">
+              <div class="workspace-row"><span>▾ ccswitch</span><span class="workspace-path">~/dev/ccswitch</span></div>
+              <button class="session-row tree-session active" data-session="implementation" data-agent-type="codex">
+                <span class="session-main"><span class="state-running">●</span><span class="session-title">implementation</span></span>
+                <span class="session-meta"><span class="agent-codex">Codex</span><span>Running</span></span>
+              </button>
+              <button class="session-row tree-session" data-session="review" data-agent-type="claude">
+                <span class="session-main"><span class="state-activity">◐</span><span class="session-title">review</span><span class="session-count">1</span></span>
+                <span class="session-meta"><span class="agent-claude">Claude</span><span>Activity</span></span>
+              </button>
+              <button class="session-row tree-session" data-session="tests" data-agent-type="codex">
+                <span class="session-main"><span class="state-exited">○</span><span class="session-title">tests</span></span>
+                <span class="session-meta"><span class="agent-codex">Codex</span><span>Exited</span></span>
+              </button>
+            </div>
+            <div class="workspace-block">
+              <div class="workspace-row"><span>▸ dotfiles</span><span class="workspace-path">~/dev/nixos</span></div>
+            </div>
+            <button class="new-session">+ New workspace or session</button>
+          </aside>
+
+          <section class="b-main">
+            <div class="b-terminal">
+              <div class="terminal-header">
+                <div class="terminal-title"><strong>ccswitch / implementation</strong><span>Codex · gpt-5 · Running</span></div>
+                <div class="terminal-actions"><button class="text-button">Restart</button><button class="icon-button" title="More commands">⋯</button></div>
+              </div>
+              <div class="terminal-screen">
+                <div><span class="line-green">$</span> cargo test</div>
+                <div class="line-muted">Compiling ccswitch v1.10.4</div>
+                <div class="line-green">test result: ok. 42 passed; 0 failed</div>
+                <div>&nbsp;</div>
+                <div><span class="line-cyan">›</span> The runtime interface now isolates PTY ownership from the TUI.</div>
+                <div>&nbsp;</div>
+                <div><span class="line-cyan">›</span> <span class="cursor"></span></div>
+              </div>
+            </div>
+            <div class="activity-table">
+              <div class="panel-heading"><span class="section-label">Workspace activity</span></div>
+              <div class="activity-row"><span>12:42</span><span class="agent-claude">Claude</span><span>review</span><span>New output waiting</span></div>
+              <div class="activity-row"><span>12:41</span><span class="agent-codex">Codex</span><span>implementation</span><span>Tests passed</span></div>
+              <div class="activity-row"><span>12:38</span><span class="agent-codex">Codex</span><span>tests</span><span class="line-red">Exited with code 1</span></div>
+            </div>
+          </section>
+        </div>
+        <footer class="footer">
+          <button class="text-button footer-mode" data-mode-toggle>TERMINAL</button>
+          <span><span class="key">Ctrl+\</span> leader</span>
+          <span class="footer-spacer"></span>
+          <span class="footer-item">2 workspaces</span>
+          <span class="footer-item">3 active sessions</span>
+        </footer>
+      </section>
+
+      <section class="variant" data-variant="C">
+        <div class="c-session-tabs">
+          <button class="c-tab active" data-session="implementation" data-agent-type="codex"><span class="state-running">●</span><span class="c-tab-title">implementation</span><span></span></button>
+          <button class="c-tab" data-session="review" data-agent-type="claude"><span class="state-activity">◐</span><span class="c-tab-title">review</span><span class="line-yellow">1</span></button>
+          <button class="c-tab" data-session="tests" data-agent-type="codex"><span class="state-exited">○</span><span class="c-tab-title">tests</span><span></span></button>
+          <button class="c-tab"><span class="line-cyan">+</span><span class="c-tab-title">New session</span><span></span></button>
+        </div>
+        <div class="c-main">
+          <div class="terminal-header">
+            <div class="terminal-title"><strong>implementation</strong><span>/home/marcus/devspace/code/projects/ccswitch</span></div>
+            <div class="terminal-actions"><span class="agent-codex">Codex</span><button class="icon-button" title="Open quick switcher">⌘</button></div>
+          </div>
+          <div class="terminal-screen">
+            <div class="line-muted">OpenAI Codex CLI · gpt-5</div>
+            <div>&nbsp;</div>
+            <div><span class="line-cyan">›</span> Implement the new SessionRuntime interface.</div>
+            <div>&nbsp;</div>
+            <div><span class="line-green">•</span> Added command and event channels.</div>
+            <div><span class="line-green">•</span> Added bounded terminal snapshots.</div>
+            <div><span class="line-yellow">•</span> Waiting for the PTY resize integration test.</div>
+            <div>&nbsp;</div>
+            <div><span class="line-cyan">›</span> <span class="cursor"></span></div>
+          </div>
+        </div>
+        <div class="c-quick-switcher" aria-label="Quick switcher preview">
+          <input class="c-quick-input" value="" placeholder="Switch session or run a command..." />
+          <div class="quick-row active"><span class="state-running">●</span><span>implementation</span><span class="agent-codex">Codex</span></div>
+          <div class="quick-row"><span class="state-activity">◐</span><span>review</span><span class="agent-claude">Claude · 1 unread</span></div>
+          <div class="quick-row"><span class="state-exited">○</span><span>tests</span><span>Codex · Exited</span></div>
+        </div>
+        <footer class="footer">
+          <button class="text-button footer-mode" data-mode-toggle>MANAGE</button>
+          <span>Quick switcher open</span>
+          <span class="footer-spacer"></span>
+          <span class="footer-item"><span class="key">Esc</span> close</span>
+          <span class="footer-item"><span class="key">Enter</span> switch</span>
+        </footer>
+      </section>
+
+      <section class="utility-page" data-page="providers">
+        <div class="page-heading">
+          <h1>Providers</h1>
+          <span class="page-heading-meta" data-context-copy>Claude Code provider and profile configuration</span>
+          <div class="page-heading-actions">
+            <button class="text-button">+ Provider</button>
+            <button class="icon-button" title="More provider commands">⋯</button>
+          </div>
+        </div>
+        <div class="providers-layout">
+          <section class="data-column">
+            <div class="panel-heading"><span class="section-label">API providers</span></div>
+            <div class="agent-view" data-agent-view="claude">
+              <div class="data-row active"><span><span class="row-title">Anthropic</span><span class="row-subtitle">api.anthropic.com</span></span><span class="row-tag">ACTIVE</span></div>
+              <div class="data-row"><span><span class="row-title">DeepSeek</span><span class="row-subtitle">Anthropic-compatible</span></span><span></span></div>
+              <div class="data-row"><span><span class="row-title">OpenRouter</span><span class="row-subtitle">Custom endpoint</span></span><span></span></div>
+            </div>
+            <div class="agent-view" data-agent-view="codex">
+              <div class="data-row active"><span><span class="row-title">OpenAI</span><span class="row-subtitle">api.openai.com/v1</span></span><span class="row-tag">ACTIVE</span></div>
+              <div class="data-row"><span><span class="row-title">OpenRouter</span><span class="row-subtitle">Responses API</span></span><span></span></div>
+            </div>
+          </section>
+          <section class="data-column">
+            <div class="panel-heading"><span class="section-label" data-provider-middle-title>Profiles</span></div>
+            <div class="agent-view" data-agent-view="claude">
+              <div class="data-row active"><span><span class="row-title">Default</span><span class="row-subtitle">Opus / Sonnet / Haiku / Subagent</span></span><span class="row-tag">DEFAULT</span></div>
+              <div class="data-row"><span><span class="row-title">Fast</span><span class="row-subtitle">Optimized for routine tasks</span></span><span></span></div>
+            </div>
+            <div class="agent-view" data-agent-view="codex">
+              <div class="data-row active"><span><span class="row-title">gpt-5</span><span class="row-subtitle">Reasoning: high · 200k context</span></span><span class="row-tag">DEFAULT</span></div>
+              <div class="data-row"><span><span class="row-title">gpt-5-mini</span><span class="row-subtitle">Reasoning: medium</span></span><span></span></div>
+              <div class="data-row"><span><span class="row-title">o4-mini</span><span class="row-subtitle">Custom catalog</span></span><span></span></div>
+            </div>
+          </section>
+          <section class="data-column">
+            <div class="agent-view" data-agent-view="claude">
+              <div class="detail-sheet">
+                <h2 class="detail-title">Default profile</h2>
+                <div class="field-grid">
+                  <span class="field-name">Provider</span><span class="field-value">Anthropic</span>
+                  <span class="field-name">Opus model</span><span class="field-value">claude-opus-4-1</span>
+                  <span class="field-name">Sonnet model</span><span class="field-value">claude-sonnet-4</span>
+                  <span class="field-name">Haiku model</span><span class="field-value">claude-3-5-haiku</span>
+                  <span class="field-name">Subagent model</span><span class="field-value">claude-sonnet-4</span>
+                  <span class="field-name">Source</span><span class="field-value">User configuration</span>
+                </div>
+              </div>
+            </div>
+            <div class="agent-view" data-agent-view="codex">
+              <div class="detail-sheet">
+                <h2 class="detail-title">gpt-5</h2>
+                <div class="field-grid">
+                  <span class="field-name">Provider</span><span class="field-value">OpenAI</span>
+                  <span class="field-name">Catalog</span><span class="field-value">Built-in</span>
+                  <span class="field-name">Context</span><span class="field-value">200,000 tokens</span>
+                  <span class="field-name">Reasoning</span><span class="field-value">low / medium / high</span>
+                  <span class="field-name">Input</span><span class="field-value">Text and image</span>
+                  <span class="field-name">Search</span><span class="field-value">Supported</span>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+        <footer class="footer"><span class="footer-mode">MANAGE</span><span><span class="key">Space</span> Claude/Codex</span><span class="footer-spacer"></span><span class="footer-item">Enter edit</span></footer>
+      </section>
+
+      <section class="utility-page" data-page="usage">
+        <div class="page-heading">
+          <h1>Usage</h1>
+          <span class="page-heading-meta" data-context-copy>Claude Code usage · This week</span>
+          <div class="page-heading-actions"><button class="text-button">Day</button><button class="text-button">Week</button><button class="text-button">Month</button></div>
+        </div>
+        <div class="agent-view" data-agent-view="claude">
+          <div class="usage-layout">
+            <div class="metric-strip">
+              <div class="metric"><div class="metric-label">Input tokens</div><div class="metric-value">8.42M</div></div>
+              <div class="metric"><div class="metric-label">Output tokens</div><div class="metric-value">1.17M</div></div>
+              <div class="metric"><div class="metric-label">Cache read</div><div class="metric-value">21.3M</div></div>
+              <div class="metric"><div class="metric-label">Sessions</div><div class="metric-value">38</div></div>
+            </div>
+            <div class="usage-body">
+              <section class="usage-chart"><span class="section-label">Daily tokens</span><div class="chart-area"><div class="bar" style="height: 38%"></div><div class="bar" style="height: 55%"></div><div class="bar" style="height: 48%"></div><div class="bar" style="height: 82%"></div><div class="bar" style="height: 66%"></div><div class="bar" style="height: 92%"></div><div class="bar" style="height: 73%"></div></div></section>
+              <section class="usage-models"><div class="panel-heading"><span class="section-label">Models</span></div><div class="data-row active"><span><span class="row-title">claude-sonnet-4</span><span class="row-subtitle">71% of total tokens</span></span><span>6.8M</span></div><div class="data-row"><span><span class="row-title">claude-opus-4-1</span><span class="row-subtitle">21% of total tokens</span></span><span>2.0M</span></div><div class="data-row"><span><span class="row-title">claude-3-5-haiku</span><span class="row-subtitle">8% of total tokens</span></span><span>0.8M</span></div></section>
+            </div>
+          </div>
+        </div>
+        <div class="agent-view" data-agent-view="codex">
+          <div class="usage-layout">
+            <div class="metric-strip">
+              <div class="metric"><div class="metric-label">Input tokens</div><div class="metric-value">5.91M</div></div>
+              <div class="metric"><div class="metric-label">Output tokens</div><div class="metric-value">824K</div></div>
+              <div class="metric"><div class="metric-label">Cached input</div><div class="metric-value">13.7M</div></div>
+              <div class="metric"><div class="metric-label">Sessions</div><div class="metric-value">24</div></div>
+            </div>
+            <div class="usage-body">
+              <section class="usage-chart"><span class="section-label">Daily tokens</span><div class="chart-area"><div class="bar" style="height: 28%"></div><div class="bar" style="height: 44%"></div><div class="bar" style="height: 72%"></div><div class="bar" style="height: 57%"></div><div class="bar" style="height: 86%"></div><div class="bar" style="height: 62%"></div><div class="bar" style="height: 49%"></div></div></section>
+              <section class="usage-models"><div class="panel-heading"><span class="section-label">Models</span></div><div class="data-row active"><span><span class="row-title">gpt-5</span><span class="row-subtitle">78% of total tokens</span></span><span>5.2M</span></div><div class="data-row"><span><span class="row-title">gpt-5-mini</span><span class="row-subtitle">18% of total tokens</span></span><span>1.2M</span></div><div class="data-row"><span><span class="row-title">o4-mini</span><span class="row-subtitle">4% of total tokens</span></span><span>0.3M</span></div></section>
+            </div>
+          </div>
+        </div>
+        <footer class="footer"><span class="footer-mode">MANAGE</span><span><span class="key">Space</span> Claude/Codex</span><span class="footer-spacer"></span><span class="footer-item">Week</span></footer>
+      </section>
+
+      <section class="utility-page" data-page="history">
+        <div class="page-heading"><h1>History</h1><span class="page-heading-meta" data-context-copy>Claude Code native sessions</span><div class="page-heading-actions"><button class="text-button">Open in Sessions</button></div></div>
+        <div class="history-layout">
+          <section class="history-list">
+            <div class="search-row"><input class="search-input" placeholder="Search sessions..." /><select class="select-input"><option>All projects</option><option>ccswitch</option><option>dotfiles</option></select></div>
+            <div class="agent-view" data-agent-view="claude"><div class="data-row active"><span><span class="row-title">Review SessionRuntime design</span><span class="row-subtitle">ccswitch · 18 minutes ago</span></span><span>42 KB</span></div><div class="data-row"><span><span class="row-title">Fix provider form validation</span><span class="row-subtitle">ccswitch · Yesterday</span></span><span>118 KB</span></div><div class="data-row"><span><span class="row-title">Update Nix module</span><span class="row-subtitle">dotfiles · 3 days ago</span></span><span>76 KB</span></div></div>
+            <div class="agent-view" data-agent-view="codex"><div class="data-row active"><span><span class="row-title">Implement PTY prototype</span><span class="row-subtitle">ccswitch · 9 minutes ago</span></span><span>64 KB</span></div><div class="data-row"><span><span class="row-title">Review database migrations</span><span class="row-subtitle">ccswitch · Yesterday</span></span><span>91 KB</span></div><div class="data-row"><span><span class="row-title">Diagnose release workflow</span><span class="row-subtitle">dotfiles · 5 days ago</span></span><span>53 KB</span></div></div>
+          </section>
+          <section class="history-detail">
+            <div class="agent-view" data-agent-view="claude"><h2 class="detail-title">Review SessionRuntime design</h2><div class="field-grid"><span class="field-name">Agent</span><span class="field-value agent-claude">Claude Code</span><span class="field-name">Project</span><span class="field-value">ccswitch</span><span class="field-name">Working directory</span><span class="field-value">/home/marcus/devspace/code/projects/ccswitch</span><span class="field-name">Native session</span><span class="field-value">56dd9a4...</span><span class="field-name">Messages</span><span class="field-value">27</span><span class="field-name">Tokens</span><span class="field-value">184,230 input · 21,442 output</span></div></div>
+            <div class="agent-view" data-agent-view="codex"><h2 class="detail-title">Implement PTY prototype</h2><div class="field-grid"><span class="field-name">Agent</span><span class="field-value agent-codex">Codex</span><span class="field-name">Project</span><span class="field-value">ccswitch</span><span class="field-name">Working directory</span><span class="field-value">/home/marcus/devspace/code/projects/ccswitch</span><span class="field-name">Native session</span><span class="field-value">a13f9c2...</span><span class="field-name">Messages</span><span class="field-value">19</span><span class="field-name">Tokens</span><span class="field-value">121,705 input · 16,903 output</span></div></div>
+          </section>
+        </div>
+        <footer class="footer"><span class="footer-mode">MANAGE</span><span><span class="key">Space</span> Claude/Codex</span><span class="footer-spacer"></span><span class="footer-item">Enter open details</span></footer>
+      </section>
+
+      <section class="utility-page" data-page="settings">
+        <div class="page-heading"><h1>Settings</h1><span class="page-heading-meta">Application-wide configuration</span></div>
+        <div class="settings-list"><aside class="settings-menu"><div class="data-row active"><span class="row-title">General</span><span></span></div><div class="data-row"><span class="row-title">Appearance</span><span></span></div><div class="data-row"><span class="row-title">Keybindings</span><span></span></div><div class="data-row"><span class="row-title">Session runtime</span><span></span></div></aside><section class="detail-sheet"><h2 class="detail-title">General</h2><div class="field-grid"><span class="field-name">Language</span><span class="field-value">English</span><span class="field-name">Default workspace</span><span class="field-value">Last opened</span><span class="field-name">Session scrollback</span><span class="field-value">10,000 lines</span><span class="field-name">Confirm close</span><span class="field-value">Enabled</span></div></section></div>
+        <footer class="footer"><span class="footer-mode">MANAGE</span><span class="footer-spacer"></span><span class="footer-item">Application settings</span></footer>
+      </section>
+    </main>
+
+    <div class="prototype-switcher" aria-label="Prototype variant switcher">
+      <button id="previous" title="Previous variant">←</button>
+      <div class="variant-label" id="variant-label">A — Session-first</div>
+      <button id="next" title="Next variant">→</button>
+    </div>
+    <div class="prototype-state" id="prototype-state"></div>
+
+    <script>
+      const variants = [
+        { key: "A", name: "Session-first" },
+        { key: "B", name: "Workspace tree" },
+        { key: "C", name: "Terminal tabs" },
+      ];
+
+      const state = {
+        variant: "A",
+        page: "sessions",
+        agent: "claude",
+        sessionScope: "all",
+        activeSession: "implementation",
+        focus: "terminal",
+      };
+
+      const params = new URLSearchParams(window.location.search);
+      const requested = (params.get("variant") || "A").toUpperCase();
+      if (variants.some((item) => item.key === requested)) state.variant = requested;
+      const requestedPage = params.get("page") || "sessions";
+      if (["sessions", "providers", "usage", "history", "settings"].includes(requestedPage)) state.page = requestedPage;
+      const requestedAgent = params.get("agent") || "claude";
+      if (["claude", "codex"].includes(requestedAgent)) state.agent = requestedAgent;
+      const requestedScope = params.get("scope") || "all";
+      if (["all", "claude", "codex"].includes(requestedScope)) state.sessionScope = requestedScope;
+
+      function render() {
+        document.querySelectorAll(".variant").forEach((element) => {
+          element.classList.toggle("active", state.page === "sessions" && element.dataset.variant === state.variant);
+        });
+
+        document.querySelectorAll(".utility-page").forEach((element) => {
+          element.classList.toggle("active", element.dataset.page === state.page);
+        });
+
+        document.querySelectorAll("[data-page-target]").forEach((element) => {
+          element.classList.toggle("active", element.dataset.pageTarget === state.page);
+        });
+
+        document.querySelectorAll("[data-session]").forEach((element) => {
+          element.classList.toggle("active", element.dataset.session === state.activeSession);
+          element.hidden = state.page === "sessions" && state.sessionScope !== "all" && element.dataset.agentType !== state.sessionScope;
+        });
+
+        document.querySelectorAll("[data-mode-toggle]").forEach((element) => {
+          element.textContent = state.focus.toUpperCase();
+        });
+
+        document.querySelectorAll("[data-agent-view]").forEach((element) => {
+          element.classList.toggle("active", element.dataset.agentView === state.agent);
+        });
+
+        const activeScope = state.page === "sessions" ? state.sessionScope : state.agent;
+        document.querySelectorAll("[data-agent]").forEach((element) => {
+          element.classList.toggle("active", element.dataset.agent === activeScope);
+          element.hidden = state.page !== "sessions" && element.dataset.agent === "all";
+        });
+
+        const scope = document.getElementById("agent-scope");
+        scope.hidden = state.page === "settings";
+        document.getElementById("scope-label").textContent = state.page === "sessions" ? "Filter" : "Agent";
+
+        const agentName = state.agent === "claude" ? "Claude Code" : "Codex";
+        const contextCopy = {
+          providers: `${agentName} provider and model configuration`,
+          usage: `${agentName} usage · This week`,
+          history: `${agentName} native sessions`,
+        };
+        document.querySelectorAll("[data-context-copy]").forEach((element) => {
+          if (contextCopy[state.page]) element.textContent = contextCopy[state.page];
+        });
+        document.querySelectorAll("[data-provider-middle-title]").forEach((element) => {
+          element.textContent = state.agent === "claude" ? "Profiles" : "Models";
+        });
+
+        const descriptor = variants.find((item) => item.key === state.variant);
+        document.getElementById("variant-label").textContent = `${descriptor.key} — ${descriptor.name}`;
+        document.getElementById("prototype-state").textContent = JSON.stringify(state);
+
+        const nextParams = new URLSearchParams(window.location.search);
+        nextParams.set("variant", state.variant);
+        nextParams.set("page", state.page);
+        nextParams.set("agent", state.agent);
+        nextParams.set("scope", state.sessionScope);
+        window.history.replaceState({}, "", `${window.location.pathname}?${nextParams}`);
+      }
+
+      function cycle(offset) {
+        const current = variants.findIndex((item) => item.key === state.variant);
+        state.variant = variants[(current + offset + variants.length) % variants.length].key;
+        render();
+      }
+
+      document.getElementById("previous").addEventListener("click", () => cycle(-1));
+      document.getElementById("next").addEventListener("click", () => cycle(1));
+
+      document.querySelectorAll("[data-page-target]").forEach((element) => {
+        element.addEventListener("click", () => {
+          state.page = element.dataset.pageTarget;
+          render();
+        });
+      });
+
+      document.querySelectorAll("[data-agent]").forEach((element) => {
+        element.addEventListener("click", () => {
+          const selected = element.dataset.agent;
+          if (state.page === "sessions") {
+            state.sessionScope = selected;
+            if (selected !== "all") state.agent = selected;
+          } else if (selected !== "all") {
+            state.agent = selected;
+          }
+          render();
+        });
+      });
+
+      document.querySelectorAll("[data-session]").forEach((element) => {
+        element.addEventListener("click", () => {
+          state.activeSession = element.dataset.session;
+          render();
+        });
+      });
+
+      document.querySelectorAll("[data-mode-toggle]").forEach((element) => {
+        element.addEventListener("click", () => {
+          state.focus = state.focus === "terminal" ? "manage" : "terminal";
+          render();
+        });
+      });
+
+      window.addEventListener("keydown", (event) => {
+        const target = event.target;
+        const editing = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable;
+        if (editing) return;
+        if (event.key === "ArrowLeft") cycle(-1);
+        if (event.key === "ArrowRight") cycle(1);
+        if (event.key === " ") {
+          event.preventDefault();
+          const nextAgent = state.agent === "claude" ? "codex" : "claude";
+          state.agent = nextAgent;
+          if (state.page === "sessions") state.sessionScope = nextAgent;
+          render();
+        }
+        if ((event.key === "a" || event.key === "A") && state.page === "sessions") {
+          state.sessionScope = "all";
+          render();
+        }
+      });
+
+      render();
+    </script>
+  </body>
+</html>

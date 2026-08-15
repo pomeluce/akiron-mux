@@ -28,7 +28,7 @@ fn rejects_database_from_a_newer_schema_version() {
     drop(conn);
 
     let error = Db::open(&db_path).err().expect("future schema must be rejected");
-    assert!(error.to_string().contains("newer than this CCSwitch build"));
+    assert!(error.to_string().contains("newer than this AkironMux build"));
 }
 
 #[test]

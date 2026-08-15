@@ -9,7 +9,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  BIN_NAME: ccs
+  BIN_NAME: akmux
+  BACKEND_BIN_NAME: akmux-sessiond
+  PNPM_VERSION: 11
 
 permissions:
   contents: write
@@ -19,22 +21,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/session-ui/pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build embedded WebUI
+        working-directory: web/session-ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
 
       - name: Install packaging tools
         run: cargo install cargo-deb cargo-generate-rpm
 
-      - name: Build release binary
+      - name: Build release binaries
         run: cargo build --release
 
       - name: Package tar.gz
         run: |
           mkdir -p dist
           cp target/release/${{ env.BIN_NAME }} dist/
+          cp target/release/${{ env.BACKEND_BIN_NAME }} dist/
           cp README.md LICENSE dist/
-          cd dist
-          tar -czf ../${{ env.BIN_NAME }}_${{ github.ref_name }}_linux-x86_64.tar.gz *
+          tar -C dist -czf ${{ env.BIN_NAME }}_${{ github.ref_name }}_linux-x86_64.tar.gz .
 
       - name: Package deb
         run: cargo deb --no-build
@@ -42,46 +57,50 @@ jobs:
       - name: Package rpm
         run: cargo generate-rpm
 
-      - name: Upload tar.gz
+      - name: Upload Linux CLI packages
         uses: actions/upload-artifact@v4
         with:
-          name: linux-tarball
-          path: ${{ env.BIN_NAME }}_${{ github.ref_name }}_linux-x86_64.tar.gz
-
-      - name: Upload deb
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-deb
-          path: target/debian/ccswitch_*.deb
-
-      - name: Upload rpm
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-rpm
-          path: target/generate-rpm/ccswitch-*.rpm
+          name: linux-cli
+          path: |
+            ${{ env.BIN_NAME }}_${{ github.ref_name }}_linux-x86_64.tar.gz
+            target/debian/akiron-mux_*.deb
+            target/generate-rpm/akiron-mux-*.rpm
 
   macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/session-ui/pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Build release binary
+      - name: Build embedded WebUI
+        working-directory: web/session-ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Build release binaries
         run: cargo build --release
 
       - name: Package tar.gz
         run: |
           mkdir -p dist
           cp target/release/${{ env.BIN_NAME }} dist/
+          cp target/release/${{ env.BACKEND_BIN_NAME }} dist/
           cp README.md LICENSE dist/
-          cd dist
-          tar -czf ../${{ env.BIN_NAME }}_${{ github.ref_name }}_darwin-arm64.tar.gz *
+          tar -C dist -czf ${{ env.BIN_NAME }}_${{ github.ref_name }}_darwin-arm64.tar.gz .
 
-      - name: Upload tar.gz
+      - name: Upload macOS CLI package
         uses: actions/upload-artifact@v4
         with:
-          name: macos-tarball
+          name: macos-cli
           path: ${{ env.BIN_NAME }}_${{ github.ref_name }}_darwin-arm64.tar.gz
 
       - name: Update Homebrew formula
@@ -97,41 +116,34 @@ jobs:
           cd homebrew-tap
 
           mkdir -p Formula
-          cat > Formula/ccswitch.rb << 'RUBYEOF'
-          class Ccswitch < Formula
-            desc "Claude Code model configuration manager"
-            homepage "https://github.com/pomeluce/ccswitch"
+          cat > Formula/akiron-mux.rb << 'RUBYEOF'
+          class AkironMux < Formula
+            desc "Unified Claude Code and Codex configuration manager"
+            homepage "https://github.com/${{ github.repository }}"
             url "URL_PLACEHOLDER"
             sha256 "SHA_PLACEHOLDER"
             license "GPL-3.0"
             version "VERSION_PLACEHOLDER"
 
             def install
-              bin.install "ccs"
-            end
-
-            service do
-              run [opt_bin/"ccs", "proxy", "serve"]
-              keep_alive true
-              run_at_load true
-              log_path "/tmp/ccs-proxy.log"
-              error_log_path "/tmp/ccs-proxy.log"
+              bin.install "akmux"
+              bin.install "akmux-sessiond"
             end
 
             test do
-              system "#{bin}/ccs", "--version"
+              system "#{bin}/akmux", "--version"
             end
           end
           RUBYEOF
 
-          sed -i '' "s|URL_PLACEHOLDER|https://github.com/pomeluce/ccswitch/releases/download/${{ github.ref_name }}/${TARBALL}|" Formula/ccswitch.rb
-          sed -i '' "s|SHA_PLACEHOLDER|${SHA256}|" Formula/ccswitch.rb
-          sed -i '' "s|VERSION_PLACEHOLDER|${VERSION}|" Formula/ccswitch.rb
+          sed -i '' "s|URL_PLACEHOLDER|https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${TARBALL}|" Formula/akiron-mux.rb
+          sed -i '' "s|SHA_PLACEHOLDER|${SHA256}|" Formula/akiron-mux.rb
+          sed -i '' "s|VERSION_PLACEHOLDER|${VERSION}|" Formula/akiron-mux.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/ccswitch.rb
-          git commit -m "chore: update formula for ${{ github.ref_name }}" || true
+          git add Formula/akiron-mux.rb
+          git commit -m "chore: update AkironMux formula for ${{ github.ref_name }}" || true
           git pull --rebase || true
           git push
 
@@ -139,10 +151,24 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/session-ui/pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Build release binary
+      - name: Build embedded WebUI
+        working-directory: web/session-ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+        shell: bash
+
+      - name: Build release binaries
         run: cargo build --release
         shell: bash
 
@@ -150,25 +176,123 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist -Force
           Copy-Item "target/release/${{ env.BIN_NAME }}.exe" -Destination dist/
+          Copy-Item "target/release/${{ env.BACKEND_BIN_NAME }}.exe" -Destination dist/
           Copy-Item README.md -Destination dist/
           Copy-Item LICENSE -Destination dist/
           Compress-Archive -Path dist/* -DestinationPath "${{ env.BIN_NAME }}_${{ github.ref_name }}_windows-x86_64.zip"
         shell: pwsh
 
-      - name: Upload exe
+      - name: Upload Windows CLI package
         uses: actions/upload-artifact@v4
         with:
-          name: windows-exe
-          path: target/release/${{ env.BIN_NAME }}.exe
-
-      - name: Upload zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-zip
+          name: windows-cli
           path: ${{ env.BIN_NAME }}_${{ github.ref_name }}_windows-x86_64.zip
 
+  gui-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/session-ui/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        working-directory: web/session-ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Linux GUI packages
+        uses: tauri-apps/tauri-action@v0
+        env:
+          CI: true
+        with:
+          projectPath: web/session-ui
+          args: --bundles deb,appimage
+
+      - name: Upload Linux GUI packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-gui
+          path: |
+            web/session-ui/src-tauri/target/release/bundle/deb/*.deb
+            web/session-ui/src-tauri/target/release/bundle/appimage/*.AppImage
+
+  gui-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/session-ui/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        working-directory: web/session-ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Build macOS GUI package
+        uses: tauri-apps/tauri-action@v0
+        env:
+          CI: true
+        with:
+          projectPath: web/session-ui
+          args: --bundles dmg
+
+      - name: Upload macOS GUI package
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-gui
+          path: web/session-ui/src-tauri/target/release/bundle/dmg/*.dmg
+
+  gui-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/session-ui/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        working-directory: web/session-ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Windows GUI installer
+        uses: tauri-apps/tauri-action@v0
+        env:
+          CI: true
+        with:
+          projectPath: web/session-ui
+          args: --bundles nsis
+
+      - name: Upload Windows GUI installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-gui
+          path: web/session-ui/src-tauri/target/release/bundle/nsis/*-setup.exe
+
   publish:
-    needs: [linux, macos, windows]
+    needs: [linux, macos, windows, gui-linux, gui-macos, gui-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -182,7 +306,7 @@ jobs:
           merge-multiple: true
 
       - name: List artifacts
-        run: ls -la artifacts/
+        run: find artifacts -maxdepth 2 -type f -print
 
       - name: Generate changelog
         uses: orhun/git-cliff-action@v4

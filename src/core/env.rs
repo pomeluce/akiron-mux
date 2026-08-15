@@ -45,7 +45,8 @@ fn lookup_env(name: &str) -> Option<String> {
 }
 
 fn lookup_env_files(config_dir: &std::path::Path, name: &str) -> Option<String> {
-    let configured_path = std::env::var("CCSWITCH_ENV_FILE")
+    let configured_path = std::env::var("AKMUX_ENV_FILE")
+        .or_else(|_| std::env::var("CCSWITCH_ENV_FILE"))
         .ok()
         .filter(|path| !path.trim().is_empty())
         .or_else(|| {

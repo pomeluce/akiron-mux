@@ -1,6 +1,6 @@
-# CCSwitch
+# AkironMux
 
-Claude Code 模型配置管理器 — Rust TUI + CLI 工具。
+统一 Claude Code 与 Codex 配置和会话的 Rust TUI、CLI 与桌面 GUI。
 
 管理 Claude Code 与 Codex 的多个 API 供应商配置，支持一键切换、代理转发、会话历史浏览。Claude Code 支持本地/代理模式，Codex 直接维护自身配置文件。
 
@@ -14,6 +14,7 @@ Claude Code 模型配置管理器 — Rust TUI + CLI 工具。
 - **代理服务**：本地 HTTP 代理（端口 15721），自动模型名转换，支持 systemd / launchd / 计划任务后台运行
 - **Token 用量**：按模型统计 Token 消耗，带缓存避免每帧查询
 - **多语言**：内置中文 / English 切换，设置持久化
+- **桌面会话工作区**：通过可选的本地后端，在一个 GUI 中运行和恢复 Claude Code / Codex 会话
 
 ## 安装
 
@@ -25,17 +26,18 @@ Claude Code 模型配置管理器 — Rust TUI + CLI 工具。
 
 ```nix
 {
-  inputs.ccswitch.url = "github:your/ccswitch";
+  inputs.akironMux.url = "github:your/akiron-mux";
 
   homeConfigurations = {
     your-user = home-manager.lib.homeManagerConfiguration {
       modules = [
-        ccswitch.homeModules.default
+        akironMux.homeModules.default
         {
-          programs.ccswitch = {
+          programs.akmux = {
             enable = true;
+            gui = true; # 默认 false，只安装 TUI/CLI
             # 由 sops-nix/agenix 等部署到 Nix store 外；内容如 OPENAI_API_KEY=sk-xxx
-            envVars = "%h/.config/ccswitch/env";
+            envVars = "%h/.config/akmux/env";
             defaults = {
               version = 1;
               claude_providers = [
@@ -75,8 +77,9 @@ Claude Code 模型配置管理器 — Rust TUI + CLI 工具。
 
 Home Manager 会自动：
 
-- 将 `defaults` 写入 `~/.config/ccswitch/defaults.toml`
-- 安装并启用 `ccs-proxy` systemd user service（通过 `envVars` 传入 Nix store 外的环境文件路径）
+- 将 `defaults` 写入 `~/.config/akmux/defaults.toml`
+- `gui = false` 只安装 `akmux` TUI/CLI；`gui = true` 同时安装桌面 GUI
+- 安装并启用 `akmux-proxy` systemd user service（通过 `envVars` 传入 Nix store 外的环境文件路径）
 - 让 CLI/TUI 从同一个 `envVars` 文件解析 `env:VAR_NAME`，无需将密钥导入当前 shell
 
 注意：`defaults` 会进入 Nix store，`api_key` 应只写 `env:VAR_NAME` 引用，不要写明文密钥。
@@ -87,15 +90,16 @@ Home Manager 会自动：
 
 ```nix
 {
-  inputs.ccswitch.url = "github:your/ccswitch";
+  inputs.akironMux.url = "github:your/akiron-mux";
 
-  outputs = { nixpkgs, ccswitch, ... }: {
+  outputs = { nixpkgs, akironMux, ... }: {
     nixosConfigurations.your-host = nixpkgs.lib.nixosSystem {
       modules = [
-        ccswitch.nixosModules.default
+        akironMux.nixosModules.default
         {
-          services.ccswitch = {
+          services.akmux = {
             enable = true;
+            gui = false;
             defaults = {
               version = 1;
               claude_providers = [ ... ];
@@ -116,64 +120,64 @@ Home Manager 会自动：
 }
 ```
 
-NixOS 模块将配置写入 `/etc/ccswitch/defaults.toml`，并安装二进制包。
+NixOS 模块将配置写入 `/etc/akmux/defaults.toml`，并安装二进制包。
 
 #### 命令行直接使用
 
 ```bash
 # 临时启动
-nix run github:your/ccswitch
+nix run github:your/akiron-mux
 
 # 安装到 profile
-nix profile install github:your/ccswitch
+nix profile install github:your/akiron-mux
 ```
 
 ### Homebrew（macOS）
 
 ```bash
 brew tap pomeluce/ccswitch
-brew install ccswitch
+brew install akiron-mux
 ```
 
 ### Cargo（Linux / macOS / Windows WSL2）
 
 ```bash
-cargo install --git https://github.com/pomeluce/ccswitch
+cargo install --git https://github.com/pomeluce/akiron-mux
 ```
 
-首次运行会自动创建 `~/.config/ccswitch/` 目录（包含数据库和配置文件）。
+首次运行会自动创建 `~/.config/akmux/`。如果存在旧的 `~/.config/akiron-mux/` 或 `~/.config/ccswitch/`，缺失文件会被复制迁移，旧目录不会删除或覆盖新数据。
 
 ### 预编译包（Linux）
 
-从 [Releases](https://github.com/pomeluce/ccswitch/releases) 下载：
+从 [Releases](https://github.com/pomeluce/akiron-mux/releases) 下载：
 
 ```bash
 # Debian/Ubuntu
-curl -LO https://github.com/pomeluce/ccswitch/releases/latest/download/ccs_<version>_linux-x86_64.deb
-sudo dpkg -i ccs_*.deb
+curl -LO https://github.com/pomeluce/akiron-mux/releases/latest/download/akiron-mux_<version>_amd64.deb
+sudo dpkg -i akiron-mux_*.deb
 
 # Fedora/RHEL
-curl -LO https://github.com/pomeluce/ccswitch/releases/latest/download/ccswitch-<version>.x86_64.rpm
-sudo rpm -i ccswitch-*.rpm
+curl -LO https://github.com/pomeluce/akiron-mux/releases/latest/download/akiron-mux-<version>.x86_64.rpm
+sudo rpm -i akiron-mux-*.rpm
 
 # 通用 tar.gz
-curl -LO https://github.com/pomeluce/ccswitch/releases/latest/download/ccs_<version>_linux-x86_64.tar.gz
-tar -xzf ccs_*.tar.gz
-sudo mv ccs /usr/local/bin/
+curl -LO https://github.com/pomeluce/akiron-mux/releases/latest/download/akmux_<version>_linux-x86_64.tar.gz
+tar -xzf akmux_*.tar.gz
+sudo mv akmux akmux-sessiond /usr/local/bin/
 ```
 
 ### 预编译包（macOS 手动）
 
 ```bash
-curl -LO https://github.com/pomeluce/ccswitch/releases/latest/download/ccs_<version>_darwin-arm64.tar.gz
-tar -xzf ccs_*.tar.gz
-chmod +x ccs
-sudo mv ccs /usr/local/bin/
+curl -LO https://github.com/pomeluce/akiron-mux/releases/latest/download/akmux_<version>_darwin-arm64.tar.gz
+tar -xzf akmux_*.tar.gz
+chmod +x akmux akmux-sessiond
+sudo mv akmux akmux-sessiond /usr/local/bin/
 ```
 
 ### 预编译包（Windows）
 
-从 [Releases](https://github.com/pomeluce/ccswitch/releases) 下载 zip 或 exe，解压后将 `ccs.exe` 放到 `%PATH%` 中。
+从 [Releases](https://github.com/pomeluce/akiron-mux/releases) 下载 CLI zip 或 AkironMux GUI 安装包；CLI zip 中的 `akmux.exe` 与 `akmux-sessiond.exe` 可加入 `%PATH%`。
 
 也可以通过 **Scoop** 安装：
 
@@ -182,14 +186,14 @@ scoop bucket add ccswitch https://github.com/pomeluce/scoop-ccswitch.git
 scoop install ccswitch
 ```
 
-安装后执行 `ccs service install` 注册 Windows 计划任务后台服务。
+安装后执行 `akmux service install` 注册 Windows 计划任务后台服务。
 
 ## 使用
 
 ### TUI 模式
 
 ```bash
-ccs    # 无参数启动 TUI
+akmux    # 无参数启动 TUI
 ```
 
 左侧栏 `J/K` 选择标签页，`Tab` / `Shift+Tab` 切换，`Enter` 确认。
@@ -198,22 +202,22 @@ ccs    # 无参数启动 TUI
 
 ```bash
 # 模型切换
-ccs switch deepseek/v4           # 切换到指定的 provider/profile
-ccs list                         # 列出所有 provider 和 profile
+akmux switch deepseek/v4           # 切换到指定的 provider/profile
+akmux list                         # 列出所有 provider 和 profile
 
 # 配置管理（仅对用户配置生效，系统默认不可删除/编辑）
-ccs add provider                 # 交互式添加供应商
-ccs add profile <provider-id>    # 添加模型配置
-ccs edit <provider|profile>      # 查看配置
-ccs remove <provider|profile>    # 删除用户配置
+akmux add provider                 # 交互式添加供应商
+akmux add profile <provider-id>    # 添加模型配置
+akmux edit <provider|profile>      # 查看配置
+akmux remove <provider|profile>    # 删除用户配置
 
 # 代理服务
-ccs proxy start                  # 后台启动代理（自动检测 systemd）
-ccs proxy stop                   # 停止代理
-ccs proxy status                 # 查看代理状态
-ccs proxy serve                  # 前台运行代理（调试用）
-ccs service install              # 安装后台服务（开机自启）
-ccs service uninstall            # 卸载后台服务
+akmux proxy start                  # 后台启动代理（自动检测 systemd）
+akmux proxy stop                   # 停止代理
+akmux proxy status                 # 查看代理状态
+akmux proxy serve                  # 前台运行代理（调试用）
+akmux service install              # 安装后台服务（开机自启）
+akmux service uninstall            # 卸载后台服务
 
 # 服务安装平台支持：
 #   Linux   → systemd user service
@@ -221,31 +225,31 @@ ccs service uninstall            # 卸载后台服务
 #   Windows → 计划任务 (Schtasks)
 
 # 用量与历史
-ccs usage                        # Token 用量统计（默认本周）
-ccs usage --day|--week|--month   # 按日/周/月
-ccs usage --profile <name>       # 按模型过滤
-ccs history                      # 会话历史
-ccs history --project <name>     # 按项目过滤
-ccs history --search <keyword>   # 搜索会话
+akmux usage                        # Token 用量统计（默认本周）
+akmux usage --day|--week|--month   # 按日/周/月
+akmux usage --profile <name>       # 按模型过滤
+akmux history                      # 会话历史
+akmux history --project <name>     # 按项目过滤
+akmux history --search <keyword>   # 搜索会话
 
 # Shell 补全 & Man 文档
-ccs completions <zsh|bash|fish>  # 生成 Shell 补全脚本
-ccs man                          # 输出 roff 格式 man page
+akmux completions <zsh|bash|fish>  # 生成 Shell 补全脚本
+akmux man                          # 输出 roff 格式 man page
 ```
 
 ## 配置
 
 配置文件位置：
 
-- `~/.config/ccswitch/ccswitch.db` — SQLite 数据库（模型配置、用量、会话）
-- `~/.config/ccswitch/defaults.toml` — 系统默认配置（Home Manager / NixOS 生成）
-- `~/.local/share/ccswitch/ccs.log` — TUI 运行日志
+- `~/.config/akmux/akmux.db` — SQLite 数据库（模型配置、用量、会话和后端开关）
+- `~/.config/akmux/defaults.toml` — 系统默认配置（Home Manager / NixOS 生成）
+- `~/.local/share/akmux/akmux.log` — TUI 运行日志
 - `~/.codex/config.toml` — Codex Provider 配置
 - `~/.codex/auth.json` — Codex API Key
 
 ### 首次启动
 
-首次启动 `ccs` 时会先显示终端进度条导入 Claude Code 历史会话数据（从 `~/.claude/projects/` 扫描 JSONL 文件）。导入完成后自动进入 TUI。后续启动跳过导入直接进入。
+首次启动 `akmux` 时会先显示终端进度条导入 Claude Code 历史会话数据（从 `~/.claude/projects/` 扫描 JSONL 文件）。导入完成后自动进入 TUI。后续启动跳过导入直接进入。
 
 用量数据在进入 TUI 后通过后台异步扫描。Claude 数据来自 `~/.claude/projects`，Codex 数据来自 `~/.codex/sessions`；会话与用量面板约每秒检测变化并实时刷新。Codex rename 后的会话标题从 `~/.codex/session_index.jsonl` 同步。
 
@@ -313,7 +317,7 @@ default = true
 
 | 格式           | 说明                                                                   |
 | -------------- | ---------------------------------------------------------------------- |
-| `env:VAR_NAME` | 从进程环境、HM 的 `envVars` 文件或 `~/.config/ccswitch/env` 读取，推荐 |
+| `env:VAR_NAME` | 从进程环境、HM 的 `envVars` 文件或 `~/.config/akmux/env` 读取，推荐 |
 | `sk-xxx...`    | 直接文本（明文存储，不安全）                                           |
 | 空值           | Claude 使用 `$CLAUDE_API_KEY`；Codex 使用 `$OPENAI_API_KEY`            |
 
@@ -370,7 +374,7 @@ Claude Code 使用 Provider → Profile，Codex 使用 Provider → Model。Code
 | `J/K` `↑/↓` | 选择设置项 |
 | `H/L` `←/→` | 切换选项值 |
 
-设置面板由 Claude 与 Codex 共用，支持切换主题（7 种）、模式（local / proxy）、语言（中文 / English）。模式设置只对 Claude 生效；Codex 不区分 local/proxy。
+设置面板由 Claude 与 Codex 共用，支持切换主题（7 种）、模式（local / proxy）、语言（中文 / English）及会话后端。会话后端默认关闭；启用后才启动 `akmux-sessiond` 并监听 `127.0.0.1:17321`，关闭时立即停止。模式设置只对 Claude 生效；Codex 不区分 local/proxy。
 
 ## 写入映射
 
@@ -399,13 +403,13 @@ Opus/Sonnet/Haiku 变量不在 settings.json 中设置，由 proxy server 透明
 
 ### Codex Provider 切换
 
-Codex 不使用 Claude Profile，也不区分 local/proxy。第三方 Responses Provider 的所有模型会聚合写入 `~/.codex/ccswitch/models.json`。切换时保留其他设置和已有 Provider，并统一更新 `model_providers.ccs`：
+Codex 不使用 Claude Profile，也不区分 local/proxy。第三方 Responses Provider 的所有模型会聚合写入 `~/.codex/akmux/models.json`。切换时保留其他设置和已有 Provider，并统一更新兼容字段 `model_providers.ccs`：
 
 ```toml
 model_provider = "ccs"
 model = "third-party-coder"
 model_reasoning_effort = "high"
-model_catalog_json = "/home/user/.codex/ccswitch/models.json"
+model_catalog_json = "/home/user/.codex/akmux/models.json"
 
 [model_providers.ccs]
 name = "Codex Proxy"
@@ -413,7 +417,7 @@ base_url = "https://api.example.com/v1"
 wire_api = "responses"
 requires_openai_auth = true
 
-[ccswitch.last_switch]
+[akmux.last_switch]
 source = "codex-proxy"
 at = "2026-01-01 12:00:00"
 ```
@@ -426,7 +430,7 @@ at = "2026-01-01 12:00:00"
 }
 ```
 
-固定的 Codex Catalog 兼容字段由 CCSwitch 的版本化模板生成；每个模型只配置名称、上下文、推理档位和能力差异。切回 `codex_catalog = "built-in"` 的 Provider 时，CCSwitch 只移除自己管理的 `model_catalog_json` 引用，不覆盖其他外部 Catalog 文件。
+固定的 Codex Catalog 兼容字段由 AkironMux 的版本化模板生成；每个模型只配置名称、上下文、推理档位和能力差异。切回 `codex_catalog = "built-in"` 的 Provider 时，AkironMux 只移除自己管理的 `model_catalog_json` 引用，不覆盖其他外部 Catalog 文件。
 
 ## 模式
 
@@ -436,7 +440,7 @@ at = "2026-01-01 12:00:00"
 
 ### 代理模式（Proxy）
 
-1. `ccs service install` 安装后台服务（或 `ccs proxy start` 手动启动）
+1. `akmux service install` 安装后台服务（或 `akmux proxy start` 手动启动）
 2. 代理监听 `127.0.0.1:15721`
 3. `settings.json` 的 `ANTHROPIC_BASE_URL` 指向代理，Claude Code 所有请求经过代理
 4. 代理自动进行模型名转换：
@@ -451,8 +455,9 @@ at = "2026-01-01 12:00:00"
 nix develop    # 进入开发环境（Rust 工具链）
 cargo build    # 构建
 cargo test     # 测试
-cargo run      # 启动 TUI
-nix build .#   # Nix 打包
+cargo run --bin akmux  # 启动 TUI
+nix build .#tui        # 仅构建 TUI/CLI
+nix build .#gui        # 构建 TUI/CLI + 桌面 GUI
 ```
 
 ## License

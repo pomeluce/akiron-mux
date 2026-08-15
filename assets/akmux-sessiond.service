@@ -1,0 +1,12 @@
+[Unit]
+Description=AkironMux AI Session Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/akmux-sessiond
+WorkingDirectory=%h
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -6,12 +6,19 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to rebuild and publish
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
   BIN_NAME: akmux
   BACKEND_BIN_NAME: akmux-sessiond
   PNPM_VERSION: 11
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 permissions:
   contents: write
@@ -49,7 +56,7 @@ jobs:
           cp target/release/${{ env.BIN_NAME }} dist/
           cp target/release/${{ env.BACKEND_BIN_NAME }} dist/
           cp README.md LICENSE dist/
-          tar -C dist -czf ${{ env.BIN_NAME }}_${{ github.ref_name }}_linux-x86_64.tar.gz .
+          tar -C dist -czf ${{ env.BIN_NAME }}_${{ env.RELEASE_TAG }}_linux-x86_64.tar.gz .
 
       - name: Package deb
         run: cargo deb --no-build
@@ -62,7 +69,7 @@ jobs:
         with:
           name: linux-cli
           path: |
-            ${{ env.BIN_NAME }}_${{ github.ref_name }}_linux-x86_64.tar.gz
+            ${{ env.BIN_NAME }}_${{ env.RELEASE_TAG }}_linux-x86_64.tar.gz
             target/debian/akiron-mux_*.deb
             target/generate-rpm/akiron-mux-*.rpm
 
@@ -95,21 +102,21 @@ jobs:
           cp target/release/${{ env.BIN_NAME }} dist/
           cp target/release/${{ env.BACKEND_BIN_NAME }} dist/
           cp README.md LICENSE dist/
-          tar -C dist -czf ${{ env.BIN_NAME }}_${{ github.ref_name }}_darwin-arm64.tar.gz .
+          tar -C dist -czf ${{ env.BIN_NAME }}_${{ env.RELEASE_TAG }}_darwin-arm64.tar.gz .
 
       - name: Upload macOS CLI package
         uses: actions/upload-artifact@v4
         with:
           name: macos-cli
-          path: ${{ env.BIN_NAME }}_${{ github.ref_name }}_darwin-arm64.tar.gz
+          path: ${{ env.BIN_NAME }}_${{ env.RELEASE_TAG }}_darwin-arm64.tar.gz
 
       - name: Update Homebrew formula
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          VERSION="${{ github.ref_name }}"
+          VERSION="${{ env.RELEASE_TAG }}"
           VERSION="${VERSION#v}"
-          TARBALL="${{ env.BIN_NAME }}_${{ github.ref_name }}_darwin-arm64.tar.gz"
+          TARBALL="${{ env.BIN_NAME }}_${{ env.RELEASE_TAG }}_darwin-arm64.tar.gz"
           SHA256=$(shasum -a 256 "$TARBALL" | cut -d ' ' -f 1)
 
           git clone "https://${HOMEBREW_TAP_TOKEN}@github.com/pomeluce/homebrew-ccswitch.git" homebrew-tap
@@ -136,14 +143,14 @@ jobs:
           end
           RUBYEOF
 
-          sed -i '' "s|URL_PLACEHOLDER|https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${TARBALL}|" Formula/akiron-mux.rb
+          sed -i '' "s|URL_PLACEHOLDER|https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/${TARBALL}|" Formula/akiron-mux.rb
           sed -i '' "s|SHA_PLACEHOLDER|${SHA256}|" Formula/akiron-mux.rb
           sed -i '' "s|VERSION_PLACEHOLDER|${VERSION}|" Formula/akiron-mux.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/akiron-mux.rb
-          git commit -m "chore: update AkironMux formula for ${{ github.ref_name }}" || true
+          git commit -m "chore: update AkironMux formula for ${{ env.RELEASE_TAG }}" || true
           git pull --rebase || true
           git push
 
@@ -179,14 +186,14 @@ jobs:
           Copy-Item "target/release/${{ env.BACKEND_BIN_NAME }}.exe" -Destination dist/
           Copy-Item README.md -Destination dist/
           Copy-Item LICENSE -Destination dist/
-          Compress-Archive -Path dist/* -DestinationPath "${{ env.BIN_NAME }}_${{ github.ref_name }}_windows-x86_64.zip"
+          Compress-Archive -Path dist/* -DestinationPath "${{ env.BIN_NAME }}_${{ env.RELEASE_TAG }}_windows-x86_64.zip"
         shell: pwsh
 
       - name: Upload Windows CLI package
         uses: actions/upload-artifact@v4
         with:
           name: windows-cli
-          path: ${{ env.BIN_NAME }}_${{ github.ref_name }}_windows-x86_64.zip
+          path: ${{ env.BIN_NAME }}_${{ env.RELEASE_TAG }}_windows-x86_64.zip
 
   gui-linux:
     runs-on: ubuntu-24.04
@@ -299,6 +306,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Test release publishing
+        run: bash tests/release_publish_test.sh
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -319,8 +329,4 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
-            --notes-file CHANGELOG.md \
-            artifacts/*
+        run: bash scripts/publish-release.sh "${{ env.RELEASE_TAG }}" CHANGELOG.md artifacts

@@ -1,5 +1,7 @@
 import { Folder } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { InlineErrorState } from '@/shared/components/inline-error-state';
+import { isServiceUnavailable } from '@/shared/lib/api';
 import { Button } from '@/shared/ui/button';
 import { IconPicker, type WorkspaceIconName } from '@/shared/components/workspace-icon';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/shared/ui/dialog';
@@ -23,7 +25,7 @@ export function ProjectDialog(props: ProjectDialogProps) {
   const [name, setName] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
   const [icon, setIcon] = useState<WorkspaceIconName>(props.icon);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<'backend' | 'save' | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -40,7 +42,7 @@ export function ProjectDialog(props: ProjectDialogProps) {
       await props.onSave(path, name, icon);
       props.onOpenChange(false);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(isServiceUnavailable(cause) ? 'backend' : 'save');
     } finally {
       setSaving(false);
     }
@@ -84,7 +86,13 @@ export function ProjectDialog(props: ProjectDialogProps) {
               <span className="field-label">{props.t('icon')}</span>
               <IconPicker value={icon} onChange={setIcon} />
             </div>
-            {error && <div className="text-sm text-destructive">{error}</div>}
+            {error && (
+              <InlineErrorState
+                compact
+                title={props.t(error === 'backend' ? 'backendUnavailable' : 'projectSaveFailed')}
+                message={props.t(error === 'backend' ? 'backendUnavailableHint' : 'projectSaveFailedHint')}
+              />
+            )}
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => props.onOpenChange(false)}>

@@ -88,6 +88,21 @@ const en = {
   menu: 'More actions',
   toggleSidebar: 'Toggle sidebar',
   errorGeneric: 'Something went wrong',
+  directoryUnavailable: 'Directory unavailable',
+  directoryUnavailableHint: 'This directory does not exist or cannot be accessed. Check the path and try again.',
+  backendUnavailable: 'Service unavailable',
+  backendUnavailableHint: 'AkironMux could not reach the backend service. Check the backend address and service status.',
+  settingsSaveFailed: 'Could not save settings',
+  settingsSaveFailedHint: 'Check the backend address and General sessions directory, then try again.',
+  projectSaveFailed: 'Could not save workspace',
+  projectSaveFailedHint: 'Check that the directory is accessible and does not overlap an existing workspace.',
+  sessionCreateFailed: 'Could not create session',
+  sessionCreateFailedHint: 'Check the working directory and tool availability, then try again.',
+  invalidSubdirectory: 'Invalid subdirectory name',
+  invalidSubdirectoryHint: 'Enter one directory name without slash characters.',
+  sessionFailed: 'Session could not continue',
+  sessionFailedHint: 'Check the tool installation and session configuration, then restart the session.',
+  retry: 'Retry',
 } as const;
 
 const zh: Record<keyof typeof en, string> = {
@@ -178,6 +193,21 @@ const zh: Record<keyof typeof en, string> = {
   menu: '更多操作',
   toggleSidebar: '切换侧栏',
   errorGeneric: '操作失败',
+  directoryUnavailable: '目录不可用',
+  directoryUnavailableHint: '此目录不存在或无法访问，请检查目录路径后重试。',
+  backendUnavailable: '服务不可用',
+  backendUnavailableHint: 'AkironMux 无法连接后端服务，请检查后端地址和服务状态。',
+  settingsSaveFailed: '无法保存设置',
+  settingsSaveFailedHint: '请检查后端地址和通用会话目录，然后重试。',
+  projectSaveFailed: '无法保存工作区',
+  projectSaveFailedHint: '请确认目录可以访问，并且没有与已有工作区重叠。',
+  sessionCreateFailed: '无法创建会话',
+  sessionCreateFailedHint: '请检查工作目录和工具是否可用，然后重试。',
+  invalidSubdirectory: '子目录名称无效',
+  invalidSubdirectoryHint: '请输入不包含斜杠的单个目录名称。',
+  sessionFailed: '会话无法继续运行',
+  sessionFailedHint: '请检查工具安装和会话配置，然后重启会话。',
+  retry: '重试',
 };
 
 export type MessageKey = keyof typeof en;

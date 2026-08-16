@@ -1,5 +1,5 @@
 import * as Collapsible from '@radix-ui/react-collapsible';
-import { Bell, Check, ChevronRight, CircleStop, Ellipsis, FolderPlus, Image, Pencil, Pin, Plus, RefreshCw, Search, Settings, Trash2 } from 'lucide-react';
+import { Bell, Check, ChevronRight, CircleStop, Ellipsis, FolderPlus, GripVertical, Image, Pencil, Pin, Plus, RefreshCw, Search, Settings, Trash2 } from 'lucide-react';
 import { useRef } from 'react';
 import { AgentIcon } from '@/shared/components/agent-icon';
 import { WorkspaceIcon, type WorkspaceIconName } from '@/shared/components/workspace-icon';
@@ -91,6 +91,7 @@ function HistoryRow({ item, active, attention, draggable, onDragStart, onDrop, o
       onClick={() => onResume(item)}
       title={item.cwd}
     >
+      {draggable && <DragHandle />}
       <AgentIcon agent={item.agent} className="size-6" />
       <span className="min-w-0 flex-1">
         <strong className="block truncate text-xs font-medium">{item.title}</strong>
@@ -100,6 +101,14 @@ function HistoryRow({ item, active, attention, draggable, onDragStart, onDrop, o
       </span>
       {attention === 'input' ? <Bell className="session-signal session-signal-input" /> : attention === 'exited' ? <CircleStop className="session-signal session-signal-exited" /> : active && <span className="size-1.5 rounded-full bg-emerald-500" />}
     </button>
+  );
+}
+
+function DragHandle() {
+  return (
+    <span data-drag-handle className="drag-handle" aria-hidden="true">
+      <GripVertical />
+    </span>
   );
 }
 
@@ -226,9 +235,10 @@ export function AppSidebar(props: AppSidebarProps) {
           <Collapsible.Content>
             {workspace.projects.length ? (
               workspace.projects.map(group => (
-                <Collapsible.Root key={group.project.id} defaultOpen={false} className="group/project">
+                <Collapsible.Root key={group.project.id} defaultOpen={false} className="group/project" data-project-group={group.project.id}>
                   <div
-                    className="flex min-h-9 items-center rounded-lg px-1 hover:bg-accent"
+                    className="draggable-row flex min-h-9 items-center rounded-lg px-1 hover:bg-accent"
+                    data-project-row={group.project.id}
                     draggable
                     onDragStart={event => setDragData(event, 'projects', 'projects', group.project.id)}
                     onDragOver={event => event.preventDefault()}
@@ -239,13 +249,14 @@ export function AppSidebar(props: AppSidebarProps) {
                       props.onReorder('projects', 'projects', moveId(workspace.projects.map(item => item.project.id), payload.id, group.project.id));
                     }}
                   >
+                    <DragHandle />
                     <Collapsible.Trigger className="grid size-7 shrink-0 place-items-center text-muted-foreground">
                       <ChevronRight className="size-4 transition-transform group-data-[state=open]/project:rotate-90" />
                     </Collapsible.Trigger>
                     <WorkspaceIcon name={props.icons[`project:${group.project.id}`]} className="mr-2 text-foreground/80" />
-                    <button className="min-w-0 flex-1 truncate text-left text-xs font-medium" title={group.project.path}>
+                    <Collapsible.Trigger className="min-w-0 flex-1 truncate text-left text-xs font-medium" title={group.project.path}>
                       {group.project.name}
-                    </button>
+                    </Collapsible.Trigger>
                     {group.project.pinned && <Pin className="mr-1 size-3 text-primary" />}
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
@@ -316,7 +327,8 @@ export function AppSidebar(props: AppSidebarProps) {
                   data-unavailable={!group.available}
                 >
                   <div
-                    className="flex min-h-9 items-center rounded-lg px-1 hover:bg-accent"
+                    className="draggable-row flex min-h-9 items-center rounded-lg px-1 hover:bg-accent"
+                    data-directory-row={group.path}
                     draggable
                     onDragStart={event => setDragData(event, 'directories', 'general', group.path)}
                     onDragOver={event => event.preventDefault()}
@@ -327,6 +339,7 @@ export function AppSidebar(props: AppSidebarProps) {
                       props.onReorder('directories', 'general', moveId(workspace.general.map(item => item.path), payload.id, group.path));
                     }}
                   >
+                    <DragHandle />
                     <Collapsible.Trigger className="flex min-w-0 flex-1 items-center text-left">
                       <ChevronRight className="mx-1.5 size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]/directory:rotate-90" />
                       <WorkspaceIcon name={props.icons[`directory:${group.path}`]} className="mr-2 text-foreground/80" />
@@ -385,7 +398,8 @@ export function AppSidebar(props: AppSidebarProps) {
               workspace.other.map(group => (
                 <Collapsible.Root key={group.path} defaultOpen={false} className="group/directory">
                   <div
-                    className="flex min-h-9 items-center rounded-lg px-1 hover:bg-accent"
+                    className="draggable-row flex min-h-9 items-center rounded-lg px-1 hover:bg-accent"
+                    data-directory-row={group.path}
                     draggable
                     onDragStart={event => setDragData(event, 'directories', 'other', group.path)}
                     onDragOver={event => event.preventDefault()}
@@ -396,6 +410,7 @@ export function AppSidebar(props: AppSidebarProps) {
                       props.onReorder('directories', 'other', moveId(workspace.other.map(item => item.path), payload.id, group.path));
                     }}
                   >
+                    <DragHandle />
                     <Collapsible.Trigger className="flex min-w-0 flex-1 items-center text-left">
                       <ChevronRight className="mx-1.5 size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]/directory:rotate-90" />
                       <WorkspaceIcon name={props.icons[`directory:${group.path}`]} className="mr-2 text-foreground/75" />

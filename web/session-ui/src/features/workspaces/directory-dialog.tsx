@@ -1,6 +1,7 @@
 import { ChevronLeft, ChevronRight, Eye, EyeOff, Folder, Home } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
-import { sessionApi } from '@/shared/lib/api';
+import { useEffect, useState } from 'react';
+import { InlineErrorState } from '@/shared/components/inline-error-state';
+import { isServiceUnavailable, sessionApi } from '@/shared/lib/api';
 import { Button } from '@/shared/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/shared/ui/dialog';
 import { Tooltip } from '@/shared/ui/tooltip';
@@ -20,9 +21,8 @@ export function DirectoryDialog(props: DirectoryDialogProps) {
   const [listing, setListing] = useState<DirectoryListing | null>(null);
   const [path, setPath] = useState(props.initialPath);
   const [showHidden, setShowHidden] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<'backend' | 'directory' | null>(null);
   const [loading, setLoading] = useState(false);
-  const pathInputRef = useRef<HTMLInputElement>(null);
 
   const load = async (nextPath: string, hidden = showHidden) => {
     setLoading(true);
@@ -32,7 +32,7 @@ export function DirectoryDialog(props: DirectoryDialogProps) {
       setListing(next);
       setPath(next.path);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(isServiceUnavailable(cause) ? 'backend' : 'directory');
     } finally {
       setLoading(false);
     }
@@ -46,13 +46,7 @@ export function DirectoryDialog(props: DirectoryDialogProps) {
 
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogContent
-        className="directory-dialog w-[min(720px,calc(100vw-28px))]"
-        onOpenAutoFocus={event => {
-          event.preventDefault();
-          requestAnimationFrame(() => pathInputRef.current?.focus({ preventScroll: true }));
-        }}
-      >
+      <DialogContent className="directory-dialog w-[min(720px,calc(100vw-28px))]">
         <DialogHeader>
           <DialogTitle>{props.t('chooseDirectory')}</DialogTitle>
         </DialogHeader>
@@ -89,7 +83,6 @@ export function DirectoryDialog(props: DirectoryDialogProps) {
               }}
             >
               <input
-                ref={pathInputRef}
                 className="text-field"
                 name="akmux-directory-path"
                 autoComplete="off"
@@ -103,7 +96,12 @@ export function DirectoryDialog(props: DirectoryDialogProps) {
             {loading ? (
               <div className="p-4 text-sm text-muted-foreground">{props.t('loading')}</div>
             ) : error ? (
-              <div className="p-4 text-sm text-destructive">{error}</div>
+              <InlineErrorState
+                title={props.t(error === 'backend' ? 'backendUnavailable' : 'directoryUnavailable')}
+                message={props.t(error === 'backend' ? 'backendUnavailableHint' : 'directoryUnavailableHint')}
+                retryLabel={props.t('retry')}
+                onRetry={() => void load(path || props.initialPath, showHidden)}
+              />
             ) : listing?.entries.length ? (
               listing.entries.map(entry => (
                 <button key={entry.path} className="flex h-10 w-full items-center gap-2 rounded-md px-3 text-left text-sm hover:bg-accent" onClick={() => void load(entry.path)}>

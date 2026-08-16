@@ -81,6 +81,7 @@ export function TerminalView({ backendAddress, session, active, fontSize, onStat
     let disposed = false;
     let outputTail = '';
     let lastAttentionAt = 0;
+    let lastResizeAt = 0;
 
     const signalAttention = () => {
       const now = Date.now();
@@ -90,13 +91,23 @@ export function TerminalView({ backendAddress, session, active, fontSize, onStat
       attentionRef.current(session);
     };
 
+    const sendResize = (rows = terminal.rows, cols = terminal.cols) => {
+      lastResizeAt = performance.now();
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', rows, cols }));
+    };
+
     const connect = () => {
       if (disposed) return;
       socket = new WebSocket(websocketUrl(backendAddress, `/api/sessions/${encodeURIComponent(session.id)}/terminal`));
       socket.binaryType = 'arraybuffer';
       socket.addEventListener('open', () => {
         reconnectTimer = null;
-        requestAnimationFrame(() => fit.fit());
+        fit.fit();
+        sendResize();
+        requestAnimationFrame(() => {
+          fit.fit();
+          sendResize();
+        });
       });
       socket.addEventListener('message', event => {
         if (event.data instanceof ArrayBuffer) {
@@ -118,10 +129,19 @@ export function TerminalView({ backendAddress, session, active, fontSize, onStat
     const dataDisposable = terminal.onData(data => {
       if (socket?.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data));
     });
-    const bellDisposable = terminal.onBell(signalAttention);
+    terminal.attachCustomKeyEventHandler(event => {
+      const copySelection = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c' && terminal.hasSelection();
+      if (!copySelection) return true;
+      if (event.type === 'keydown') void navigator.clipboard.writeText(terminal.getSelection()).catch(() => undefined);
+      return false;
+    });
+    const bellDisposable = terminal.onBell(() => {
+      if (performance.now() - lastResizeAt < 750) return;
+      signalAttention();
+    });
     const resizeDisposable = terminal.onResize(size => {
       if (syncingViewportRef.current) return;
-      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', rows: size.rows, cols: size.cols }));
+      sendResize(size.rows, size.cols);
     });
     const observer = new ResizeObserver(() => requestAnimationFrame(() => fit.fit()));
     observer.observe(host);

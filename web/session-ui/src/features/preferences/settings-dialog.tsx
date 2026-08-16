@@ -1,5 +1,7 @@
 import { Folder, Languages, MonitorCog, Palette } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { InlineErrorState } from '@/shared/components/inline-error-state';
+import { isServiceUnavailable } from '@/shared/lib/api';
 import { Button } from '@/shared/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/shared/ui/dialog';
 import type { ClientPreferences, Locale, ThemeMode } from '@/types';
@@ -19,7 +21,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const [draft, setDraft] = useState(props.preferences);
   const [root, setRoot] = useState(props.generalRoot);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<'backend' | 'save' | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -35,7 +37,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       await props.onSave(draft, root);
       props.onOpenChange(false);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(isServiceUnavailable(cause) ? 'backend' : 'save');
     } finally {
       setSaving(false);
     }
@@ -135,7 +137,13 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 </div>
               </SettingsRow>
             </SettingsSection>
-            {error && <div className="text-sm text-destructive">{error}</div>}
+            {error && (
+              <InlineErrorState
+                compact
+                title={props.t(error === 'backend' ? 'backendUnavailable' : 'settingsSaveFailed')}
+                message={props.t(error === 'backend' ? 'backendUnavailableHint' : 'settingsSaveFailedHint')}
+              />
+            )}
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => props.onOpenChange(false)}>

@@ -12,5 +12,6 @@ export default defineConfig({
     baseURL: 'http://127.0.0.1:5173',
     viewport: { width: 1440, height: 900 },
     colorScheme: 'dark',
+    permissions: ['clipboard-read', 'clipboard-write'],
   },
 });

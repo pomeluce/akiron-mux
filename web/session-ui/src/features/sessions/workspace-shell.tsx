@@ -113,7 +113,10 @@ export function WorkspaceShell(props: WorkspaceShellProps) {
                   {active.error && (
                     <div className="mt-3 flex gap-2 rounded-md bg-destructive/10 p-3 text-xs text-destructive">
                       <CircleAlert className="size-4 shrink-0" />
-                      {active.error}
+                      <div>
+                        <strong className="block font-medium">{t('sessionFailed')}</strong>
+                        <span className="mt-0.5 block text-muted-foreground">{t('sessionFailedHint')}</span>
+                      </div>
                     </div>
                   )}
                 </DropdownMenuContent>

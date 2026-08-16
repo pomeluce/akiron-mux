@@ -123,6 +123,11 @@ body {
   line-height: 1.45;
 }
 
+:focus,
+:focus-visible {
+  outline: none !important;
+}
+
 :root[lang='zh-CN'] body {
   font-family: 'Maple Mono NF CN', ui-sans-serif, system-ui, sans-serif;
 }
@@ -330,6 +335,33 @@ body {
   box-shadow: inset 2px 0 var(--primary);
 }
 
+.drag-handle {
+  display: grid;
+  width: 16px;
+  height: 24px;
+  flex: 0 0 16px;
+  place-items: center;
+  color: var(--muted-foreground);
+  cursor: grab;
+  opacity: 0.45;
+  transition: opacity 120ms ease;
+}
+
+.drag-handle svg {
+  width: 13px;
+  height: 13px;
+}
+
+.draggable-row:hover .drag-handle,
+.history-row:hover .drag-handle {
+  opacity: 0.9;
+}
+
+.draggable-row:active,
+.history-row[draggable='true']:active {
+  cursor: grabbing;
+}
+
 .session-signal {
   width: 14px;
   height: 14px;
@@ -367,7 +399,7 @@ body {
 }
 
 .text-field {
-  @apply h-10 w-full rounded-lg border border-border bg-surface px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/15;
+  @apply h-10 w-full rounded-lg border border-border bg-surface px-3 text-sm text-foreground outline-none transition focus:border-primary;
 }
 
 .segmented-control {

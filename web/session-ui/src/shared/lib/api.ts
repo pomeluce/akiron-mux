@@ -1,5 +1,22 @@
 import type { Agent, DirectoryListing, Project, SessionDetails, SessionInfo, SettingsResponse, SortMode, WorkspaceResponse } from '@/types';
 
+export class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = 'ApiRequestError';
+  }
+}
+
+export function isServiceUnavailable(cause: unknown) {
+  if (cause instanceof ApiRequestError) return cause.status >= 500;
+  if (cause instanceof TypeError) return true;
+  const message = cause instanceof Error ? cause.message.toLowerCase() : '';
+  return /failed to fetch|network|econnrefused|connection refused/.test(message);
+}
+
 function normalizedBase(address: string) {
   return address.trim().replace(/\/$/, '');
 }
@@ -24,7 +41,7 @@ export async function request<T>(address: string, path: string, init?: RequestIn
   });
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error || response.statusText);
+    throw new ApiRequestError(body.error || response.statusText, response.status);
   }
   return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
 }

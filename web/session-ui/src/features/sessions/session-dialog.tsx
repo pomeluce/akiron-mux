@@ -1,7 +1,8 @@
 import { Check, ChevronDown, Folder } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { AgentIcon } from '@/shared/components/agent-icon';
-import { sessionApi } from '@/shared/lib/api';
+import { InlineErrorState } from '@/shared/components/inline-error-state';
+import { isServiceUnavailable, sessionApi } from '@/shared/lib/api';
 import { basename } from '@/shared/lib/utils';
 import { Button } from '@/shared/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/shared/ui/dialog';
@@ -26,7 +27,7 @@ export function SessionDialog(props: SessionDialogProps) {
   const [isolate, setIsolate] = useState(false);
   const [subdirectory, setSubdirectory] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<'backend' | 'create' | 'subdirectory' | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -45,14 +46,17 @@ export function SessionDialog(props: SessionDialogProps) {
       let cwd = directory;
       if (props.mode === 'general' && isolate) {
         const name = subdirectory.trim();
-        if (!name || name.includes('/') || name.includes('\\')) throw new Error('Enter a valid subdirectory name');
+        if (!name || name.includes('/') || name.includes('\\')) {
+          setError('subdirectory');
+          return;
+        }
         await sessionApi.createDirectory(props.backendAddress, directory, name);
         cwd = `${directory.replace(/\/$/, '')}/${name}`;
       }
       await props.onCreate(agent, cwd);
       props.onOpenChange(false);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(isServiceUnavailable(cause) ? 'backend' : 'create');
     } finally {
       setSaving(false);
     }
@@ -122,7 +126,13 @@ export function SessionDialog(props: SessionDialogProps) {
                 )}
               </div>
             )}
-            {error && <div className="text-sm text-destructive">{error}</div>}
+            {error && (
+              <InlineErrorState
+                compact
+                title={props.t(error === 'backend' ? 'backendUnavailable' : error === 'subdirectory' ? 'invalidSubdirectory' : 'sessionCreateFailed')}
+                message={props.t(error === 'backend' ? 'backendUnavailableHint' : error === 'subdirectory' ? 'invalidSubdirectoryHint' : 'sessionCreateFailedHint')}
+              />
+            )}
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => props.onOpenChange(false)}>

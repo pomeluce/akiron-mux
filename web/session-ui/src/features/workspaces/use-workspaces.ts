@@ -19,7 +19,7 @@ export function useWorkspaces(backendAddress: string) {
   const [workspace, setWorkspace] = useState<WorkspaceResponse>(emptyWorkspace);
   const [settings, setSettings] = useState<SettingsResponse>(emptySettings);
   const [connected, setConnected] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -27,10 +27,10 @@ export function useWorkspaces(backendAddress: string) {
       setWorkspace(nextWorkspace);
       setSettings(normalizeSettings(nextSettings));
       setConnected(true);
-      setError(null);
-    } catch (cause) {
+      setError(false);
+    } catch {
       setConnected(false);
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(true);
     }
   }, [backendAddress]);
 

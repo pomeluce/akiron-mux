@@ -335,31 +335,26 @@ body {
   box-shadow: inset 2px 0 var(--primary);
 }
 
-.drag-handle {
-  display: grid;
-  width: 16px;
-  height: 24px;
-  flex: 0 0 16px;
-  place-items: center;
-  color: var(--muted-foreground);
+.draggable-row[data-reorder-enabled='true'],
+.history-row[data-reorder-enabled='true'] {
   cursor: grab;
-  opacity: 0.45;
-  transition: opacity 120ms ease;
 }
 
-.drag-handle svg {
-  width: 13px;
-  height: 13px;
+.draggable-row[data-reordering='true'],
+.history-row[data-reordering='true'] {
+  opacity: 0.62;
 }
 
-.draggable-row:hover .drag-handle,
-.history-row:hover .drag-handle {
-  opacity: 0.9;
+.draggable-row[data-reorder-target='true'],
+.history-row[data-reorder-target='true'] {
+  background: var(--accent);
+  box-shadow: inset 0 1px var(--primary);
 }
 
-.draggable-row:active,
-.history-row[draggable='true']:active {
+:root[data-sidebar-reordering='true'],
+:root[data-sidebar-reordering='true'] * {
   cursor: grabbing;
+  user-select: none;
 }
 
 .session-signal {

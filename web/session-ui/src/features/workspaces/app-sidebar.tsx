@@ -1,6 +1,6 @@
 import * as Collapsible from '@radix-ui/react-collapsible';
-import { Bell, Check, ChevronRight, CircleStop, Ellipsis, FolderPlus, GripVertical, Image, Pencil, Pin, Plus, RefreshCw, Search, Settings, Trash2 } from 'lucide-react';
-import { useRef } from 'react';
+import { Bell, Check, ChevronRight, CircleStop, Ellipsis, FolderPlus, Image, Pencil, Pin, Plus, RefreshCw, Search, Settings, Trash2 } from 'lucide-react';
+import { useEffect, useRef } from 'react';
 import { AgentIcon } from '@/shared/components/agent-icon';
 import { WorkspaceIcon, type WorkspaceIconName } from '@/shared/components/workspace-icon';
 import { basename, cn } from '@/shared/lib/utils';
@@ -64,34 +64,124 @@ function moveId(ids: string[], moved: string, target: string) {
   return next;
 }
 
-function setDragData(event: React.DragEvent, kind: string, scope: string, id: string) {
-  event.dataTransfer.effectAllowed = 'move';
-  event.dataTransfer.setData('application/x-akmux-order', JSON.stringify({ kind, scope, id }));
+type ReorderKind = 'projects' | 'directories' | 'sessions';
+
+interface ReorderPayload {
+  kind: ReorderKind;
+  scope: string;
+  id: string;
+  ids: string[];
 }
 
-function getDragData(event: React.DragEvent) {
-  try {
-    return JSON.parse(event.dataTransfer.getData('application/x-akmux-order')) as { kind: string; scope: string; id: string };
-  } catch {
-    return null;
-  }
+interface PointerReorder extends ReorderPayload {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  active: boolean;
+  source: HTMLElement;
+  target: HTMLElement | null;
 }
 
-function HistoryRow({ item, active, attention, draggable, onDragStart, onDrop, onResume }: { item: HistoryItem; active: boolean; attention?: AttentionKind; draggable: boolean; onDragStart: (event: React.DragEvent) => void; onDrop: (event: React.DragEvent) => void; onResume: (item: HistoryItem) => void }) {
+function usePointerReorder(onReorder: AppSidebarProps['onReorder']) {
+  const activeRef = useRef<PointerReorder | null>(null);
+  const onReorderRef = useRef(onReorder);
+  const suppressClickRef = useRef(false);
+  onReorderRef.current = onReorder;
+
+  useEffect(() => {
+    const clearTarget = (drag: PointerReorder) => {
+      drag.target?.removeAttribute('data-reorder-target');
+      drag.target = null;
+    };
+    const cleanup = (drag: PointerReorder) => {
+      clearTarget(drag);
+      drag.source.removeAttribute('data-reordering');
+      delete document.documentElement.dataset.sidebarReordering;
+      activeRef.current = null;
+    };
+    const move = (event: PointerEvent) => {
+      const drag = activeRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      if (!drag.active) {
+        const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+        if (distance < 6) return;
+        drag.active = true;
+        drag.source.dataset.reordering = 'true';
+        document.documentElement.dataset.sidebarReordering = 'true';
+      }
+      event.preventDefault();
+      const candidate = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-reorder-id]') || null;
+      const target = candidate?.dataset.reorderKind === drag.kind && candidate.dataset.reorderScope === drag.scope ? candidate : null;
+      if (target === drag.target) return;
+      clearTarget(drag);
+      drag.target = target;
+      target?.setAttribute('data-reorder-target', 'true');
+    };
+    const finish = (event: PointerEvent) => {
+      const drag = activeRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const targetId = drag.target?.dataset.reorderId;
+      const active = drag.active;
+      cleanup(drag);
+      if (!active) return;
+      event.preventDefault();
+      suppressClickRef.current = true;
+      window.setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 0);
+      if (targetId && targetId !== drag.id) onReorderRef.current(drag.kind, drag.scope, moveId(drag.ids, drag.id, targetId));
+    };
+    const cancel = (event: PointerEvent) => {
+      const drag = activeRef.current;
+      if (drag?.pointerId === event.pointerId) cleanup(drag);
+    };
+    const suppressClick = (event: MouseEvent) => {
+      if (!suppressClickRef.current) return;
+      suppressClickRef.current = false;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+
+    document.addEventListener('pointermove', move, { passive: false });
+    document.addEventListener('pointerup', finish, true);
+    document.addEventListener('pointercancel', cancel, true);
+    document.addEventListener('click', suppressClick, true);
+    return () => {
+      if (activeRef.current) cleanup(activeRef.current);
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup', finish, true);
+      document.removeEventListener('pointercancel', cancel, true);
+      document.removeEventListener('click', suppressClick, true);
+    };
+  }, []);
+
+  return (event: React.PointerEvent<HTMLElement>, payload: ReorderPayload) => {
+    if (event.button !== 0 || activeRef.current) return;
+    activeRef.current = {
+      ...payload,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      active: false,
+      source: event.currentTarget,
+      target: null,
+    };
+  };
+}
+
+function HistoryRow({ item, active, attention, reorder, onPointerReorder, onResume }: { item: HistoryItem; active: boolean; attention?: AttentionKind; reorder: ReorderPayload | null; onPointerReorder: (event: React.PointerEvent<HTMLElement>, payload: ReorderPayload) => void; onResume: (item: HistoryItem) => void }) {
   return (
     <button
       className="history-row"
       data-active={active}
-      draggable={draggable}
-      onDragStart={onDragStart}
-      onDragOver={event => {
-        if (draggable) event.preventDefault();
-      }}
-      onDrop={onDrop}
+      data-reorder-enabled={Boolean(reorder)}
+      data-reorder-kind={reorder?.kind}
+      data-reorder-scope={reorder?.scope}
+      data-reorder-id={reorder?.id}
+      onPointerDown={reorder ? event => onPointerReorder(event, reorder) : undefined}
       onClick={() => onResume(item)}
       title={item.cwd}
     >
-      {draggable && <DragHandle />}
       <AgentIcon agent={item.agent} className="size-6" />
       <span className="min-w-0 flex-1">
         <strong className="block truncate text-xs font-medium">{item.title}</strong>
@@ -104,21 +194,13 @@ function HistoryRow({ item, active, attention, draggable, onDragStart, onDrop, o
   );
 }
 
-function DragHandle() {
-  return (
-    <span data-drag-handle className="drag-handle" aria-hidden="true">
-      <GripVertical />
-    </span>
-  );
-}
-
 function HistoryList({
   items,
   activeNativeId,
   attentionByNativeId,
   sortMode,
   scope,
-  onReorder,
+  onPointerReorder,
   onResume,
   empty,
 }: {
@@ -127,7 +209,7 @@ function HistoryList({
   attentionByNativeId: Record<string, AttentionKind>;
   sortMode: SortMode;
   scope: string;
-  onReorder: AppSidebarProps['onReorder'];
+  onPointerReorder: (event: React.PointerEvent<HTMLElement>, payload: ReorderPayload) => void;
   onResume: (item: HistoryItem) => void;
   empty: string;
 }) {
@@ -142,14 +224,8 @@ function HistoryList({
           item={item}
           active={item.id === activeNativeId}
           attention={attentionByNativeId[itemId]}
-          draggable={sortMode === 'manual'}
-          onDragStart={event => setDragData(event, 'sessions', scope, itemId)}
-          onDrop={event => {
-            const payload = getDragData(event);
-            if (sortMode !== 'manual' || payload?.kind !== 'sessions' || payload.scope !== scope) return;
-            event.preventDefault();
-            onReorder('sessions', scope, moveId(items.map(entry => `${entry.agent}:${entry.id}`), payload.id, itemId));
-          }}
+          reorder={sortMode === 'manual' ? { kind: 'sessions', scope, id: itemId, ids: items.map(entry => `${entry.agent}:${entry.id}`) } : null}
+          onPointerReorder={onPointerReorder}
           onResume={onResume}
         />
         );
@@ -173,6 +249,7 @@ function SectionHeading({ title, children }: { title: string; children?: React.R
 export function AppSidebar(props: AppSidebarProps) {
   const { workspace, settings, t } = props;
   const resizeStart = useRef<{ pointerX: number; width: number } | null>(null);
+  const startReorder = usePointerReorder(props.onReorder);
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     if (window.innerWidth <= 760) return;
@@ -239,17 +316,14 @@ export function AppSidebar(props: AppSidebarProps) {
                   <div
                     className="draggable-row flex min-h-9 items-center rounded-lg px-1 hover:bg-accent"
                     data-project-row={group.project.id}
-                    draggable
-                    onDragStart={event => setDragData(event, 'projects', 'projects', group.project.id)}
-                    onDragOver={event => event.preventDefault()}
-                    onDrop={event => {
-                      const payload = getDragData(event);
-                      if (payload?.kind !== 'projects') return;
-                      event.preventDefault();
-                      props.onReorder('projects', 'projects', moveId(workspace.projects.map(item => item.project.id), payload.id, group.project.id));
-                    }}
+                    data-reorder-enabled="true"
+                    data-reorder-kind="projects"
+                    data-reorder-scope="projects"
+                    data-reorder-id={group.project.id}
+                    onPointerDown={event =>
+                      startReorder(event, { kind: 'projects', scope: 'projects', id: group.project.id, ids: workspace.projects.map(item => item.project.id) })
+                    }
                   >
-                    <DragHandle />
                     <Collapsible.Trigger className="grid size-7 shrink-0 place-items-center text-muted-foreground">
                       <ChevronRight className="size-4 transition-transform group-data-[state=open]/project:rotate-90" />
                     </Collapsible.Trigger>
@@ -295,7 +369,7 @@ export function AppSidebar(props: AppSidebarProps) {
                       attentionByNativeId={props.attentionByNativeId}
                       sortMode={settings.project_sort}
                       scope={`project:${group.project.id}`}
-                      onReorder={props.onReorder}
+                      onPointerReorder={startReorder}
                       onResume={props.onResume}
                       empty={t('noHistory')}
                     />
@@ -329,17 +403,12 @@ export function AppSidebar(props: AppSidebarProps) {
                   <div
                     className="draggable-row flex min-h-9 items-center rounded-lg px-1 hover:bg-accent"
                     data-directory-row={group.path}
-                    draggable
-                    onDragStart={event => setDragData(event, 'directories', 'general', group.path)}
-                    onDragOver={event => event.preventDefault()}
-                    onDrop={event => {
-                      const payload = getDragData(event);
-                      if (payload?.kind !== 'directories' || payload.scope !== 'general') return;
-                      event.preventDefault();
-                      props.onReorder('directories', 'general', moveId(workspace.general.map(item => item.path), payload.id, group.path));
-                    }}
+                    data-reorder-enabled="true"
+                    data-reorder-kind="directories"
+                    data-reorder-scope="general"
+                    data-reorder-id={group.path}
+                    onPointerDown={event => startReorder(event, { kind: 'directories', scope: 'general', id: group.path, ids: workspace.general.map(item => item.path) })}
                   >
-                    <DragHandle />
                     <Collapsible.Trigger className="flex min-w-0 flex-1 items-center text-left">
                       <ChevronRight className="mx-1.5 size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]/directory:rotate-90" />
                       <WorkspaceIcon name={props.icons[`directory:${group.path}`]} className="mr-2 text-foreground/80" />
@@ -376,7 +445,7 @@ export function AppSidebar(props: AppSidebarProps) {
                       attentionByNativeId={props.attentionByNativeId}
                       sortMode={settings.directory_sort[group.path] || settings.general_sort}
                       scope={`directory:${group.path}`}
-                      onReorder={props.onReorder}
+                      onPointerReorder={startReorder}
                       onResume={props.onResume}
                       empty={t('noHistory')}
                     />
@@ -400,17 +469,12 @@ export function AppSidebar(props: AppSidebarProps) {
                   <div
                     className="draggable-row flex min-h-9 items-center rounded-lg px-1 hover:bg-accent"
                     data-directory-row={group.path}
-                    draggable
-                    onDragStart={event => setDragData(event, 'directories', 'other', group.path)}
-                    onDragOver={event => event.preventDefault()}
-                    onDrop={event => {
-                      const payload = getDragData(event);
-                      if (payload?.kind !== 'directories' || payload.scope !== 'other') return;
-                      event.preventDefault();
-                      props.onReorder('directories', 'other', moveId(workspace.other.map(item => item.path), payload.id, group.path));
-                    }}
+                    data-reorder-enabled="true"
+                    data-reorder-kind="directories"
+                    data-reorder-scope="other"
+                    data-reorder-id={group.path}
+                    onPointerDown={event => startReorder(event, { kind: 'directories', scope: 'other', id: group.path, ids: workspace.other.map(item => item.path) })}
                   >
-                    <DragHandle />
                     <Collapsible.Trigger className="flex min-w-0 flex-1 items-center text-left">
                       <ChevronRight className="mx-1.5 size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]/directory:rotate-90" />
                       <WorkspaceIcon name={props.icons[`directory:${group.path}`]} className="mr-2 text-foreground/75" />
@@ -447,7 +511,7 @@ export function AppSidebar(props: AppSidebarProps) {
                       attentionByNativeId={props.attentionByNativeId}
                       sortMode={settings.directory_sort[group.path] || settings.other_sort}
                       scope={`directory:${group.path}`}
-                      onReorder={props.onReorder}
+                      onPointerReorder={startReorder}
                       onResume={props.onResume}
                       empty={t('noHistory')}
                     />

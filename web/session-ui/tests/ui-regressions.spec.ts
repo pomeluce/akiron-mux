@@ -47,6 +47,17 @@ const history = (id: string, title: string, cwd: string) => ({
   message_count: 4,
 });
 
+async function dragRowTo(page: Page, source: ReturnType<Page['locator']>, target: ReturnType<Page['locator']>) {
+  const sourceBox = await source.boundingBox();
+  const targetBox = await target.boundingBox();
+  expect(sourceBox).not.toBeNull();
+  expect(targetBox).not.toBeNull();
+  await page.mouse.move(sourceBox!.x + sourceBox!.width / 2, sourceBox!.y + sourceBox!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + targetBox!.height / 2, { steps: 12 });
+  await page.mouse.up();
+}
+
 const workspace = {
   general_root: '/home/test/workbench',
   projects: [
@@ -219,6 +230,7 @@ test.beforeEach(async ({ page }) => {
 
 test('settings expose full acrylic range and terminal font size', async ({ page }) => {
   await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
   const acrylic = page.getByRole('slider', { name: 'Acrylic transparency' });
   await expect(acrylic).toHaveAttribute('min', '0');
   await expect(acrylic).toHaveAttribute('max', '100');
@@ -326,12 +338,15 @@ test('terminal output can be selected and copied', async ({ page }) => {
 });
 
 test('manual ordering exposes drag affordances and persists workspace order', async ({ page }) => {
+  await page.evaluate(() => {
+    document.addEventListener('dragstart', event => event.dataTransfer?.clearData());
+  });
   await page.getByText('Workspaces', { exact: true }).click();
   const projectGroup = page.locator('[data-project-group="project-a"]');
   const projectA = page.locator('[data-project-row="project-a"]');
   const projectB = page.locator('[data-project-row="project-b"]');
-  await expect(projectA.locator('[data-drag-handle]')).toBeVisible();
-  await projectB.dragTo(projectA);
+  await expect(projectA.locator('[data-drag-handle]')).toHaveCount(0);
+  await dragRowTo(page, projectB, projectA);
   await expect
     .poll(() => page.evaluate(() => (window as unknown as { __akmuxReorders: unknown[] }).__akmuxReorders))
     .toContainEqual({ kind: 'projects', scope: 'projects', ids: ['project-b', 'project-a'] });
@@ -339,8 +354,8 @@ test('manual ordering exposes drag affordances and persists workspace order', as
   await projectA.locator('button[title="/home/test/project-a"]').click();
   const projectSessions = projectGroup.locator('.history-row');
   await expect(projectSessions).toHaveCount(2);
-  await expect(projectSessions.nth(0).locator('[data-drag-handle]')).toBeVisible();
-  await projectSessions.nth(1).dragTo(projectSessions.nth(0));
+  await expect(projectSessions.nth(0).locator('[data-drag-handle]')).toHaveCount(0);
+  await dragRowTo(page, projectSessions.nth(1), projectSessions.nth(0));
   await expect
     .poll(() => page.evaluate(() => (window as unknown as { __akmuxReorders: unknown[] }).__akmuxReorders))
     .toContainEqual({ kind: 'sessions', scope: 'project:project-a', ids: ['codex:project-a-2', 'codex:project-a-1'] });
@@ -348,8 +363,8 @@ test('manual ordering exposes drag affordances and persists workspace order', as
   await page.getByText('Other directories', { exact: true }).click();
   const otherA = page.locator('[data-directory-row="/home/test/other-a"]');
   const otherB = page.locator('[data-directory-row="/home/test/other-b"]');
-  await expect(otherA.locator('[data-drag-handle]')).toBeVisible();
-  await otherB.dragTo(otherA);
+  await expect(otherA.locator('[data-drag-handle]')).toHaveCount(0);
+  await dragRowTo(page, otherB, otherA);
   await expect
     .poll(() => page.evaluate(() => (window as unknown as { __akmuxReorders: unknown[] }).__akmuxReorders))
     .toContainEqual({ kind: 'directories', scope: 'other', ids: ['/home/test/other-b', '/home/test/other-a'] });

@@ -10,9 +10,11 @@ const nsis = config.bundle.windows.nsis;
 
 assert.equal(nsis.installMode, 'perMachine', 'Windows installer must target Program Files');
 assert.equal(nsis.installerIcon, 'icons/icon.ico', 'NSIS installer must use the application icon');
-assert.equal(window.transparent, true, 'native acrylic requires a transparent Tauri window');
+assert.equal(window.transparent, true, 'native backdrop materials require a transparent Tauri window');
 assert.equal(window.decorations, false, 'desktop builds must use the custom title bar');
-assert.ok(window.windowEffects?.effects?.includes('acrylic'), 'Windows acrylic must be enabled at the native window layer');
+assert.match(cargoManifest, /\[target\.'cfg\(target_os = "windows"\)'\.dependencies\][\s\S]*window-vibrancy\s*=/, 'Windows backdrop materials must use the native vibrancy API');
+assert.match(desktopLibrary, /window_vibrancy::apply_mica\(&window, None\)/, 'Windows 11 must use the wallpaper-based Mica material');
+assert.match(desktopLibrary, /apply_mica[\s\S]*is_err\(\)[\s\S]*window_vibrancy::apply_acrylic/, 'Windows 10 must fall back to Acrylic when Mica is unavailable');
 assert.ok(capability.permissions.includes('core:window:allow-close'));
 assert.ok(capability.permissions.includes('core:window:allow-minimize'));
 assert.ok(capability.permissions.includes('core:window:allow-toggle-maximize'));

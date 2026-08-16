@@ -19,11 +19,12 @@ dependencies = [
 
 [[package]]
 name = "akiron-mux"
-version = "1.13.0"
+version = "1.13.1"
 dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-notification",
+ "window-vibrancy",
 ]
 
 [[package]]

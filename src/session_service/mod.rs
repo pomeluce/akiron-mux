@@ -2125,12 +2125,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_router_authenticates_device_and_rejects_wrong_host() {
+    async fn remote_router_enforces_device_lifecycle_host_and_protocol() {
         let db = Db::open(std::path::Path::new(":memory:")).unwrap();
         let security = super::remote::RemoteSecurity::ephemeral();
-        let (_, token) = security.create_device(&db, "Test desktop").unwrap();
+        let (device, token) = security.create_device(&db, "Test desktop").unwrap();
         let state = app_state(SessionManager::new(), db, security).unwrap();
-        let app = remote_router(state, url::Url::parse("https://backend.example.com").unwrap());
+        let app = remote_router(state.clone(), url::Url::parse("https://backend.example.com").unwrap());
+        let incorrect_token = format!(
+            "akmux_1_{}_{}",
+            device.token_id,
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, [0_u8; 32])
+        );
+
+        for authorization in [None, Some("Bearer malformed".to_owned()), Some(format!("Bearer {incorrect_token}"))] {
+            let mut request = Request::builder()
+                .uri("/api/health")
+                .header(header::HOST, "backend.example.com")
+                .header("x-akmux-protocol", "1");
+            if let Some(authorization) = authorization {
+                request = request.header(header::AUTHORIZATION, authorization);
+            }
+            let response = app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let security = state.remote_security.as_ref().unwrap();
+            security.clear_authentication_token_failures("unknown");
+            security.clear_authentication_token_failures(&device.token_id);
+        }
 
         let valid = app
             .clone()
@@ -2159,6 +2179,7 @@ mod tests {
             .await
             .unwrap();
         let wrong_protocol = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/health")
@@ -2170,9 +2191,23 @@ mod tests {
             )
             .await
             .unwrap();
+        state.remote_security.as_ref().unwrap().revoke_device(&state.db.lock().unwrap(), &device.token_id).unwrap();
+        let revoked = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header(header::HOST, "backend.example.com")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header("x-akmux-protocol", "1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(valid.status(), StatusCode::OK);
         assert_eq!(wrong_host.status(), StatusCode::FORBIDDEN);
         assert_eq!(wrong_protocol.status(), StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
     }
 }

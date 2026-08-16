@@ -713,12 +713,29 @@ mod tests {
     #[test]
     fn token_is_verified_and_plaintext_is_not_persisted() {
         let security = RemoteSecurity::for_tests();
-        let db = Db::open(Path::new(":memory:")).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("akmux.db");
+        let db = Db::open(&database_path).unwrap();
         let (device, token) = security.create_device(&db, "Android").unwrap();
         assert_eq!(security.authenticate(&db, &token).unwrap().unwrap().name, "Android");
-        assert!(security.authenticate(&db, &(token + "x")).unwrap().is_none());
+        assert!(security.authenticate(&db, &(token.clone() + "x")).unwrap().is_none());
         let (_, stored) = db.backend_device_digest(&device.token_id).unwrap().unwrap();
         assert!(!String::from_utf8_lossy(&stored).contains("akmux_1_"));
+        drop(db);
+        assert!(!String::from_utf8_lossy(&std::fs::read(database_path).unwrap()).contains(&token));
+    }
+
+    #[tokio::test]
+    async fn revocation_invalidates_authentication_and_notifies_active_connections() {
+        let security = RemoteSecurity::for_tests();
+        let db = Db::open(Path::new(":memory:")).unwrap();
+        let (device, token) = security.create_device(&db, "Android").unwrap();
+        let mut revocations = security.subscribe_revocations();
+
+        assert!(security.authenticate(&db, &token).unwrap().is_some());
+        assert!(security.revoke_device(&db, &device.token_id).unwrap());
+        assert_eq!(revocations.recv().await.unwrap(), device.token_id);
+        assert!(security.authenticate(&db, &token).unwrap().is_none());
     }
 
     #[test]

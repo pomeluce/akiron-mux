@@ -1,7 +1,9 @@
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { websocketUrl } from '@/shared/lib/api';
+import type { MessageKey } from '@/shared/lib/i18n';
+import { Button } from '@/shared/ui/button';
 import { cn } from '@/shared/lib/utils';
 import type { SessionInfo } from '@/types';
 
@@ -10,19 +12,28 @@ interface TerminalViewProps {
   session: SessionInfo;
   active: boolean;
   fontSize: number;
+  t: (key: MessageKey) => string;
   onStatus: (session: SessionInfo) => void;
   onAttention: (session: SessionInfo) => void;
 }
 
 const ATTENTION_PATTERN = /(?:allow|approve|approval|permission|confirm|proceed|continue|yes\s*\/\s*no|\(y\/n\)|授权|批准|允许|确认|继续)/i;
 
-export function TerminalView({ backendAddress, session, active, fontSize, onStatus, onAttention }: TerminalViewProps) {
+interface LeaseState {
+  version: number;
+  controller_device_name?: string;
+}
+
+export function TerminalView({ backendAddress, session, active, fontSize, t, onStatus, onAttention }: TerminalViewProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const statusRef = useRef(onStatus);
   const attentionRef = useRef(onAttention);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const syncingViewportRef = useRef(false);
+  const socketRef = useRef<WebSocket | null>(null);
+  const [lease, setLease] = useState<LeaseState | null>(null);
+  const [canWrite, setCanWrite] = useState(true);
 
   statusRef.current = onStatus;
   attentionRef.current = onAttention;
@@ -82,6 +93,7 @@ export function TerminalView({ backendAddress, session, active, fontSize, onStat
     let outputTail = '';
     let lastAttentionAt = 0;
     let lastResizeAt = 0;
+    const recoveryKey = `akmux.lease-recovery:${backendAddress}:${session.id}`;
 
     const signalAttention = () => {
       const now = Date.now();
@@ -98,10 +110,14 @@ export function TerminalView({ backendAddress, session, active, fontSize, onStat
 
     const connect = () => {
       if (disposed) return;
-      socket = new WebSocket(websocketUrl(backendAddress, `/api/sessions/${encodeURIComponent(session.id)}/terminal`));
+      const url = new URL(websocketUrl(backendAddress, `/api/sessions/${encodeURIComponent(session.id)}/terminal`));
+      const recoveryCredential = sessionStorage.getItem(recoveryKey);
+      socket = new WebSocket(url);
+      socketRef.current = socket;
       socket.binaryType = 'arraybuffer';
       socket.addEventListener('open', () => {
         reconnectTimer = null;
+        if (recoveryCredential) socket?.send(JSON.stringify({ type: 'recover-control', credential: recoveryCredential }));
         fit.fit();
         sendResize();
         requestAnimationFrame(() => {
@@ -118,8 +134,23 @@ export function TerminalView({ backendAddress, session, active, fontSize, onStat
           if (ATTENTION_PATTERN.test(outputTail)) signalAttention();
           return;
         }
-        const message = JSON.parse(event.data) as { type: string; session?: SessionInfo };
+        const message = JSON.parse(event.data) as {
+          type: string;
+          session?: SessionInfo;
+          credential?: string;
+          lease?: LeaseState;
+          can_write?: boolean;
+        };
         if (message.type === 'status' && message.session) statusRef.current(message.session);
+        if (message.type === 'lease' && message.lease) {
+          setLease(message.lease);
+          setCanWrite(Boolean(message.can_write));
+        }
+        if (message.type === 'lease-recovery' && message.credential) {
+          sessionStorage.setItem(recoveryKey, message.credential);
+          setCanWrite(true);
+        }
+        if (message.type === 'authorization-revoked') sessionStorage.removeItem(recoveryKey);
       });
       socket.addEventListener('close', () => {
         if (!disposed && reconnectTimer === null) reconnectTimer = window.setTimeout(connect, 1_200);
@@ -151,6 +182,7 @@ export function TerminalView({ backendAddress, session, active, fontSize, onStat
       disposed = true;
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       socket?.close();
+      socketRef.current = null;
       observer.disconnect();
       dataDisposable.dispose();
       resizeDisposable.dispose();
@@ -161,5 +193,25 @@ export function TerminalView({ backendAddress, session, active, fontSize, onStat
     };
   }, [backendAddress, session.id]);
 
-  return <div ref={hostRef} className={cn('terminal-host', !active && 'invisible pointer-events-none')} aria-hidden={!active} />;
+  const takeControl = () => {
+    if (!lease || socketRef.current?.readyState !== WebSocket.OPEN) return;
+    socketRef.current.send(JSON.stringify({ type: 'take-control', expected_version: lease.version }));
+  };
+
+  return (
+    <div className={cn('terminal-view-shell', !active && 'invisible pointer-events-none')} aria-hidden={!active}>
+      <div ref={hostRef} className="terminal-host" />
+      {lease && !canWrite && (
+        <div className="terminal-lease-banner">
+          <span>
+            {t('readOnly')}
+            {lease.controller_device_name ? ` · ${t('controlledBy')} ${lease.controller_device_name}` : ''}
+          </span>
+          <Button size="sm" variant="secondary" onClick={takeControl}>
+            {t('takeControl')}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
 }

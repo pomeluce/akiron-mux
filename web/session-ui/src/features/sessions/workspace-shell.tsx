@@ -147,6 +147,7 @@ export function WorkspaceShell(props: WorkspaceShellProps) {
                   session={session}
                   active={session.id === props.activeId}
                   fontSize={props.terminalFontSize}
+                  t={props.t}
                   onStatus={props.onStatus}
                   onAttention={props.onAttention}
                 />

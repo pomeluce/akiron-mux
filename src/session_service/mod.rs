@@ -29,6 +29,7 @@ use crate::{
     session_runtime::{CreateSession, SessionHandle, SessionInfo, SessionManager, SessionStreamEvent},
 };
 
+pub mod admin;
 pub mod control;
 pub mod remote;
 
@@ -239,8 +240,18 @@ struct CreateSessionRequest {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum ClientControl {
-    Resize { rows: u16, cols: u16 },
-    TakeControl { expected_version: u64 },
+    Resize {
+        rows: u16,
+        cols: u16,
+    },
+    #[serde(rename = "take-control", alias = "takecontrol")]
+    TakeControl {
+        expected_version: u64,
+    },
+    #[serde(rename = "recover-control", alias = "recovercontrol")]
+    RecoverControl {
+        credential: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -285,12 +296,6 @@ struct PairResponse {
     token: String,
     token_id: String,
     device_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RemoteConfig {
-    bind: SocketAddr,
-    public_url: Url,
 }
 
 #[derive(Debug, Deserialize)]
@@ -367,7 +372,7 @@ pub async fn run(port: u16) -> anyhow::Result<()> {
 }
 
 async fn supervise_remote_listener(state: Arc<AppState>) {
-    let mut active: Option<(RemoteConfig, tokio::task::JoinHandle<()>)> = None;
+    let mut active: Option<(remote::RemoteListenerConfig, tokio::task::JoinHandle<()>)> = None;
     loop {
         let desired = match remote_config(&state) {
             Ok(config) => config,
@@ -448,6 +453,7 @@ fn local_router(state: Arc<AppState>) -> Router {
     api_routes()
         .route("/api/pairing", get(list_pending_pairings).post(create_pairing))
         .route("/api/pairing/:id/confirm", post(confirm_pairing))
+        .route("/api/pairing/:id", delete(cancel_pairing))
         .route("/api/devices/:id/revoke", post(revoke_device))
         .route("/", get(index))
         .route("/app.js", get(app_js))
@@ -608,11 +614,10 @@ async fn validate_remote_request(State((state, public_url)): State<(Arc<AppState
             .get::<axum::extract::ConnectInfo<SocketAddr>>()
             .map_or_else(|| "unknown".into(), |source| source.0.ip().to_string());
         let token_id = token.and_then(remote::token_public_id).unwrap_or("unknown");
-        let limit_key = format!("{source}:{token_id}");
         let Some(security) = state.remote_security.as_ref() else {
             return remote_error(StatusCode::INTERNAL_SERVER_ERROR, "Remote security is unavailable");
         };
-        if !security.rate_limit_allows(&limit_key) {
+        if !security.authentication_rate_limit_allows(&source, token_id) {
             return remote_cors(remote_error(StatusCode::TOO_MANY_REQUESTS, "Authentication is temporarily rate limited"), origin.as_deref());
         }
         let device = token.and_then(|token| {
@@ -620,13 +625,13 @@ async fn validate_remote_request(State((state, public_url)): State<(Arc<AppState
             security.authenticate(&db, token).ok().flatten()
         });
         let Some(device) = device else {
-            security.record_auth_failure(&limit_key);
+            security.record_authentication_failure(&source, token_id);
             if let Ok(db) = state.db.lock() {
                 let _ = db.record_backend_audit("auth.failed", (token_id != "unknown").then_some(token_id), Some(&source), remote::now_ms());
             }
             return remote_cors(remote_error(StatusCode::UNAUTHORIZED, "A valid device credential is required"), origin.as_deref());
         };
-        security.clear_auth_failures(&limit_key);
+        security.clear_authentication_failures(&source, token_id);
         if let Ok(db) = state.db.lock() {
             let _ = db.record_backend_last_use_audit(&device.token_id, Some(&source), remote::now_ms());
         }
@@ -807,6 +812,18 @@ async fn confirm_pairing(State(state): State<Arc<AppState>>, Path(id): Path<Stri
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn cancel_pairing(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    let cancelled = state
+        .remote_security
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("Remote security is unavailable"))?
+        .cancel_pairing(&id);
+    if !cancelled {
+        return Err(ApiError::not_found(anyhow::anyhow!("Pairing request is missing or expired")));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn revoke_device(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
     let security = state.remote_security.as_ref().ok_or_else(|| ApiError::internal("Remote security is unavailable"))?;
     let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
@@ -823,17 +840,16 @@ async fn pair_device(
 ) -> Result<Json<PairResponse>, ApiError> {
     let security = state.remote_security.as_ref().ok_or_else(|| ApiError::internal("Remote security is unavailable"))?;
     let source = source.map_or_else(|| "unknown".into(), |source| source.0.ip().to_string());
-    let limit_key = format!("pair:{source}:{}", request.code.chars().take(12).collect::<String>());
-    if !security.rate_limit_allows(&limit_key) {
+    if !security.pairing_rate_limit_allows(&source, &request.code) {
         return Err(ApiError::too_many_requests("Pairing is temporarily rate limited"));
     }
-    let claim = match security.begin_pairing_claim(&request.code, &request.device_name) {
+    let claim = match security.begin_pairing_claim(&request.code, &request.device_name, &source) {
         Ok(claim) => {
-            security.clear_auth_failures(&limit_key);
+            security.clear_pairing_failures(&source, claim.id());
             claim
         }
         Err(error) => {
-            security.record_auth_failure(&limit_key);
+            security.record_pairing_failure(&source, &request.code);
             return Err(ApiError::unauthorized(error.to_string()));
         }
     };
@@ -856,43 +872,19 @@ fn persisted_instance_id(db: &Db) -> anyhow::Result<String> {
     if let Some(value) = db.get_setting("remote.instance_id") {
         return Ok(value);
     }
-    let value = remote::random_id();
+    let value = remote::new_instance_id();
     db.set_setting("remote.instance_id", &value)?;
     Ok(value)
 }
 
-fn remote_config(state: &AppState) -> anyhow::Result<Option<RemoteConfig>> {
+fn remote_config(state: &AppState) -> anyhow::Result<Option<remote::RemoteListenerConfig>> {
     let db = state.db.lock().map_err(|_| anyhow::anyhow!("Database lock poisoned"))?;
-    if db.get_setting("remote.enabled").as_deref() != Some("true") {
-        return Ok(None);
-    }
-    anyhow::ensure!(db.has_active_backend_device()?, "Remote backend requires at least one active device credential");
-    let bind = db.get_setting("remote.bind").unwrap_or_else(|| "127.0.0.1:17322".into()).parse::<SocketAddr>()?;
-    anyhow::ensure!(
-        is_safe_remote_bind(bind.ip()),
-        "Remote bind must be loopback, private LAN, or Tailnet; public and wildcard addresses are rejected"
-    );
-    let public_url = Url::parse(&db.get_setting("remote.public_url").ok_or_else(|| anyhow::anyhow!("Remote public URL is required"))?)?;
-    anyhow::ensure!(public_url.scheme() == "https", "Remote public URL must use HTTPS");
-    anyhow::ensure!(
-        public_url.username().is_empty() && public_url.password().is_none(),
-        "Remote public URL cannot contain user information"
-    );
-    anyhow::ensure!(
-        public_url.path() == "/" && public_url.query().is_none() && public_url.fragment().is_none(),
-        "Remote public URL cannot contain a path, query, or fragment"
-    );
-    Ok(Some(RemoteConfig { bind, public_url }))
+    remote::RemoteBackendConfig::load(&db)?.listener(&db)
 }
 
+#[cfg(test)]
 pub(crate) fn is_safe_remote_bind(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(ip) => {
-            let octets = ip.octets();
-            ip.is_loopback() || ip.is_private() || ip.is_link_local() || (octets[0] == 100 && (64..=127).contains(&octets[1]))
-        }
-        std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
-    }
+    remote::is_safe_bind(ip)
 }
 
 fn refresh_native_history(db: &Db) -> anyhow::Result<()> {
@@ -1453,11 +1445,11 @@ async fn terminal_websocket(
             name: "Local client".into(),
         }),
         RequestAccess::Remote => {
-            let ticket = query.ticket.ok_or_else(|| ApiError::unauthorized("A WebSocket ticket is required"))?;
+            let ticket = query.ticket.as_deref().ok_or_else(|| ApiError::unauthorized("A WebSocket ticket is required"))?;
             let device = state
                 .remote_security
                 .as_ref()
-                .and_then(|security| security.consume_ticket(&ticket, &id))
+                .and_then(|security| security.consume_ticket(ticket, &id))
                 .ok_or_else(|| ApiError::unauthorized("WebSocket ticket is invalid or expired"))?;
             let active = state
                 .db
@@ -1496,7 +1488,7 @@ async fn terminal_socket(
     state: Arc<AppState>,
     _websocket_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) {
-    let connection_id = remote::random_id();
+    let connection_id = remote::new_connection_id();
     let initial_lease = leases.connect(&session_id, &connection_id, &device.name);
     let mut lease_events = leases.subscribe(&session_id);
     let (mut sender, mut receiver) = socket.split();
@@ -1508,9 +1500,15 @@ async fn terminal_socket(
         leases.disconnect(&session_id, &connection_id);
         return;
     }
-    if send_lease(&mut sender, &initial_lease).await.is_err() {
+    if send_lease(&mut sender, &initial_lease.state, leases.can_write(&session_id, &connection_id)).await.is_err() {
         leases.disconnect(&session_id, &connection_id);
         return;
+    }
+    if let Some(credential) = initial_lease.recovery_credential.as_deref() {
+        if send_recovery_credential(&mut sender, credential).await.is_err() {
+            leases.disconnect(&session_id, &connection_id);
+            return;
+        }
     }
     let mut events = session.subscribe();
     let mut credential_check = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -1543,7 +1541,20 @@ async fn terminal_socket(
                                 }
                             }
                             ClientControl::TakeControl { expected_version } => {
-                                leases.take_control(&session_id, &connection_id, &device.name, expected_version);
+                                let connection = leases.take_control(&session_id, &connection_id, &device.name, expected_version);
+                                if let Some(credential) = connection.recovery_credential.as_deref() {
+                                    if send_recovery_credential(&mut sender, credential).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            ClientControl::RecoverControl { credential } => {
+                                let connection = leases.recover_control(&session_id, &connection_id, &device.name, &credential);
+                                if let Some(credential) = connection.recovery_credential.as_deref() {
+                                    if send_recovery_credential(&mut sender, credential).await.is_err() {
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1583,7 +1594,7 @@ async fn terminal_socket(
             }
             lease = lease_events.recv() => {
                 if let Ok(lease) = lease {
-                    if send_lease(&mut sender, &lease).await.is_err() {
+                    if send_lease(&mut sender, &lease, leases.can_write(&session_id, &connection_id)).await.is_err() {
                         break;
                     }
                 }
@@ -1622,8 +1633,16 @@ async fn send_status(sender: &mut futures_util::stream::SplitSink<WebSocket, Mes
     sender.send(Message::Text(message)).await
 }
 
-async fn send_lease(sender: &mut futures_util::stream::SplitSink<WebSocket, Message>, lease: &remote::LeaseState) -> Result<(), axum::Error> {
-    sender.send(Message::Text(serde_json::json!({ "type": "lease", "lease": lease }).to_string())).await
+async fn send_lease(sender: &mut futures_util::stream::SplitSink<WebSocket, Message>, lease: &remote::LeaseState, can_write: bool) -> Result<(), axum::Error> {
+    sender
+        .send(Message::Text(serde_json::json!({ "type": "lease", "lease": lease, "can_write": can_write }).to_string()))
+        .await
+}
+
+async fn send_recovery_credential(sender: &mut futures_util::stream::SplitSink<WebSocket, Message>, credential: &str) -> Result<(), axum::Error> {
+    sender
+        .send(Message::Text(serde_json::json!({ "type": "lease-recovery", "credential": credential }).to_string()))
+        .await
 }
 
 #[derive(Debug)]

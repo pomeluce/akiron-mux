@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     fs::OpenOptions,
     io::Write,
+    net::{IpAddr, SocketAddr},
     path::Path,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -10,17 +11,91 @@ use std::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use hmac::{Hmac, Mac};
 use rand::{rngs::OsRng, RngCore};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
+use url::Url;
 
 use crate::db::{remote::BackendDevice, Db};
 
 const TOKEN_PREFIX: &str = "akmux_1";
 const TICKET_TTL_MS: i64 = 30_000;
 const PAIRING_TTL_MS: i64 = 60_000;
+const LEASE_RECOVERY_TTL_MS: i64 = 30_000;
 type HmacSha256 = Hmac<Sha256>;
+
+pub const DEFAULT_REMOTE_BIND: &str = "127.0.0.1:17322";
+
+#[derive(Debug, Clone)]
+pub struct RemoteBackendConfig {
+    pub enabled: bool,
+    pub bind: SocketAddr,
+    pub public_url: Option<Url>,
+    pub allow_wildcard_bind: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteListenerConfig {
+    pub bind: SocketAddr,
+    pub public_url: Url,
+}
+
+impl RemoteBackendConfig {
+    pub fn load(db: &Db) -> anyhow::Result<Self> {
+        let bind = db.get_setting("remote.bind").unwrap_or_else(|| DEFAULT_REMOTE_BIND.to_owned()).parse::<SocketAddr>()?;
+        let public_url = db.get_setting("remote.public_url").map(|value| validate_public_url(&value)).transpose()?;
+        Ok(Self {
+            enabled: db.get_setting("remote.enabled").as_deref() == Some("true"),
+            bind,
+            public_url,
+            allow_wildcard_bind: db.get_setting("remote.allow_wildcard_bind").as_deref() == Some("true"),
+        })
+    }
+
+    pub fn listener(&self, db: &Db) -> anyhow::Result<Option<RemoteListenerConfig>> {
+        if !self.enabled {
+            return Ok(None);
+        }
+        anyhow::ensure!(db.has_active_backend_device()?, "Remote backend requires at least one active device credential");
+        validate_bind(self.bind.ip(), self.allow_wildcard_bind)?;
+        let public_url = self.public_url.clone().ok_or_else(|| anyhow::anyhow!("Remote public URL is required"))?;
+        Ok(Some(RemoteListenerConfig { bind: self.bind, public_url }))
+    }
+}
+
+pub fn validate_public_url(value: &str) -> anyhow::Result<Url> {
+    let url = Url::parse(value)?;
+    anyhow::ensure!(url.scheme() == "https", "Remote public URL must use HTTPS");
+    anyhow::ensure!(url.username().is_empty() && url.password().is_none(), "Remote public URL cannot contain user information");
+    anyhow::ensure!(
+        url.path() == "/" && url.query().is_none() && url.fragment().is_none(),
+        "Remote public URL cannot contain a path, query, or fragment"
+    );
+    Ok(url)
+}
+
+pub fn validate_bind(ip: IpAddr, allow_wildcard_bind: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        is_safe_bind(ip) || (ip.is_unspecified() && allow_wildcard_bind),
+        if ip.is_unspecified() {
+            "Wildcard Remote bind requires --allow-wildcard-bind and firewall or TLS-proxy safeguards"
+        } else {
+            "Remote bind must be loopback, private LAN, or Tailnet; public addresses are rejected"
+        }
+    );
+    Ok(())
+}
+
+pub fn is_safe_bind(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        }
+        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct DeviceIdentity {
@@ -46,11 +121,12 @@ struct PendingPairing {
     code: String,
     expires_at_ms: i64,
     device_name: Option<String>,
+    source: Option<String>,
     approved: bool,
     notify: Arc<tokio::sync::Notify>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairingOffer {
     pub id: String,
     pub code: String,
@@ -58,10 +134,11 @@ pub struct PairingOffer {
     pub expires_at_ms: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingPairingInfo {
     pub id: String,
     pub device_name: Option<String>,
+    pub source: Option<String>,
     pub expires_at_ms: i64,
 }
 
@@ -69,6 +146,12 @@ pub struct PairingClaim {
     id: String,
     expires_at_ms: i64,
     notify: Arc<tokio::sync::Notify>,
+}
+
+impl PairingClaim {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
 }
 
 #[derive(Clone)]
@@ -194,15 +277,66 @@ impl RemoteSecurity {
     }
 
     pub fn record_auth_failure(&self, key: &str) {
+        self.record_rate_failure(key, 1);
+    }
+
+    fn record_rate_failure(&self, key: &str, block_after: u8) {
         let mut limits = self.rate_limits.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let entry = limits.entry(key.to_owned()).or_insert(RateLimitEntry { failures: 0, blocked_until_ms: 0 });
         entry.failures = entry.failures.saturating_add(1);
-        let exponent = entry.failures.saturating_sub(1).min(7) as u32;
-        entry.blocked_until_ms = now_ms() + 250_i64.saturating_mul(2_i64.pow(exponent));
+        if entry.failures >= block_after {
+            let exponent = entry.failures.saturating_sub(block_after).min(7) as u32;
+            entry.blocked_until_ms = now_ms() + 250_i64.saturating_mul(2_i64.pow(exponent));
+        }
     }
 
     pub fn clear_auth_failures(&self, key: &str) {
         self.rate_limits.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(key);
+    }
+
+    pub fn authentication_rate_limit_allows(&self, source: &str, token_id: &str) -> bool {
+        // Reject only when both dimensions identify abusive traffic. A reverse proxy can
+        // legitimately collapse many clients into one source address, so a source-only
+        // rejection must never lock out an otherwise healthy device credential.
+        self.rate_limit_allows(&format!("auth-source:{source}")) || self.rate_limit_allows(&format!("auth-token:{token_id}"))
+    }
+
+    pub fn record_authentication_failure(&self, source: &str, token_id: &str) {
+        // A reverse proxy is intentionally treated as one untrusted source because AkironMux
+        // does not trust forwarding headers. Keep a burst allowance so one hostile client
+        // cannot immediately lock every legitimate client behind that proxy.
+        self.record_rate_failure(&format!("auth-source:{source}"), 20);
+        self.record_auth_failure(&format!("auth-token:{token_id}"));
+    }
+
+    pub fn clear_authentication_failures(&self, source: &str, token_id: &str) {
+        self.clear_auth_failures(&format!("auth-source:{source}"));
+        self.clear_auth_failures(&format!("auth-token:{token_id}"));
+    }
+
+    pub fn pairing_rate_limit_allows(&self, source: &str, code: &str) -> bool {
+        let pairing_id = self.pairing_id_for_code(code).unwrap_or_else(|| "unknown".to_owned());
+        self.rate_limit_allows(&format!("pair-source:{source}")) || self.rate_limit_allows(&format!("pair-id:{pairing_id}"))
+    }
+
+    pub fn record_pairing_failure(&self, source: &str, code: &str) {
+        self.record_rate_failure(&format!("pair-source:{source}"), 10);
+        let pairing_id = self.pairing_id_for_code(code).unwrap_or_else(|| "unknown".to_owned());
+        self.record_auth_failure(&format!("pair-id:{pairing_id}"));
+    }
+
+    pub fn clear_pairing_failures(&self, source: &str, pairing_id: &str) {
+        self.clear_auth_failures(&format!("pair-source:{source}"));
+        self.clear_auth_failures(&format!("pair-id:{pairing_id}"));
+    }
+
+    fn pairing_id_for_code(&self, code: &str) -> Option<String> {
+        self.pairings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .find(|(_, pairing)| pairing.code.as_bytes().ct_eq(code.as_bytes()).unwrap_u8() == 1)
+            .map(|(id, _)| id.clone())
     }
 
     pub fn revoke_device(&self, db: &Db, token_id: &str) -> anyhow::Result<bool> {
@@ -245,8 +379,8 @@ impl RemoteSecurity {
     pub fn create_pairing(&self, public_url: &str, backend_name: &str) -> anyhow::Result<PairingOffer> {
         let url = url::Url::parse(public_url)?;
         anyhow::ensure!(url.scheme() == "https", "Pairing URL must use HTTPS");
-        let id = random_id();
-        let code = random_id();
+        let id = generate_opaque_id(18);
+        let code = generate_opaque_id(18);
         let expires_at_ms = now_ms() + PAIRING_TTL_MS;
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("url", public_url)
@@ -267,6 +401,7 @@ impl RemoteSecurity {
                 code,
                 expires_at_ms,
                 device_name: None,
+                source: None,
                 approved: false,
                 notify: Arc::new(tokio::sync::Notify::new()),
             },
@@ -274,7 +409,7 @@ impl RemoteSecurity {
         Ok(offer)
     }
 
-    pub fn begin_pairing_claim(&self, code: &str, device_name: &str) -> anyhow::Result<PairingClaim> {
+    pub fn begin_pairing_claim(&self, code: &str, device_name: &str, source: &str) -> anyhow::Result<PairingClaim> {
         let device_name = device_name.trim();
         anyhow::ensure!(!device_name.is_empty() && device_name.chars().count() <= 80, "Device name must contain 1 to 80 characters");
         let mut pairings = self.pairings.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -286,6 +421,7 @@ impl RemoteSecurity {
             .ok_or_else(|| anyhow::anyhow!("Pairing code is invalid or expired"))?;
         anyhow::ensure!(pairing.device_name.is_none(), "Pairing code has already been claimed");
         pairing.device_name = Some(device_name.to_owned());
+        pairing.source = Some(source.to_owned());
         Ok(PairingClaim {
             id: id.clone(),
             expires_at_ms: pairing.expires_at_ms,
@@ -301,6 +437,7 @@ impl RemoteSecurity {
             .map(|(id, pairing)| PendingPairingInfo {
                 id: id.clone(),
                 device_name: pairing.device_name.clone(),
+                source: pairing.source.clone(),
                 expires_at_ms: pairing.expires_at_ms,
             })
             .collect()
@@ -314,6 +451,10 @@ impl RemoteSecurity {
         pairing.approved = true;
         pairing.notify.notify_one();
         Ok(())
+    }
+
+    pub fn cancel_pairing(&self, id: &str) -> bool {
+        self.pairings.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(id).is_some()
     }
 
     pub async fn finish_pairing(&self, claim: PairingClaim) -> anyhow::Result<String> {
@@ -348,10 +489,18 @@ pub fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
 }
 
-pub fn random_id() -> String {
-    let mut bytes = [0_u8; 18];
+fn generate_opaque_id(byte_count: usize) -> String {
+    let mut bytes = vec![0_u8; byte_count];
     OsRng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+pub fn new_instance_id() -> String {
+    generate_opaque_id(18)
+}
+
+pub fn new_connection_id() -> String {
+    generate_opaque_id(18)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -359,11 +508,25 @@ pub struct LeaseState {
     pub version: u64,
     pub controller_connection_id: Option<String>,
     pub controller_device_name: Option<String>,
+    pub recovery_expires_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LeaseConnection {
+    pub state: LeaseState,
+    pub recovery_credential: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LeaseRecovery {
+    credential: String,
+    expires_at_ms: Option<i64>,
 }
 
 #[derive(Default)]
 struct LeaseRegistry {
     states: HashMap<String, LeaseState>,
+    recoveries: HashMap<String, LeaseRecovery>,
     events: HashMap<String, broadcast::Sender<LeaseState>>,
 }
 
@@ -373,52 +536,112 @@ pub struct ControlLeases {
 }
 
 impl ControlLeases {
-    pub fn connect(&self, session_id: &str, connection_id: &str, device_name: &str) -> LeaseState {
+    pub fn connect(&self, session_id: &str, connection_id: &str, device_name: &str) -> LeaseConnection {
         let mut registry = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::expire_recovery(&mut registry, session_id);
         let lease = registry.states.entry(session_id.to_owned()).or_insert(LeaseState {
             version: 0,
             controller_connection_id: None,
             controller_device_name: None,
+            recovery_expires_at_ms: None,
         });
-        if lease.controller_connection_id.is_none() {
+        let initial = lease.version == 0 && lease.controller_connection_id.is_none();
+        if initial {
             lease.version += 1;
             lease.controller_connection_id = Some(connection_id.to_owned());
             lease.controller_device_name = Some(device_name.to_owned());
+            lease.recovery_expires_at_ms = None;
         }
         let state = lease.clone();
+        let recovery_credential = initial.then(|| {
+            let credential = generate_opaque_id(32);
+            registry.recoveries.insert(
+                session_id.to_owned(),
+                LeaseRecovery {
+                    credential: credential.clone(),
+                    expires_at_ms: None,
+                },
+            );
+            credential
+        });
         Self::broadcast(&mut registry, session_id, &state);
-        state
+        LeaseConnection { state, recovery_credential }
     }
 
-    pub fn take_control(&self, session_id: &str, connection_id: &str, device_name: &str, expected_version: u64) -> LeaseState {
+    pub fn recover_control(&self, session_id: &str, connection_id: &str, device_name: &str, credential: &str) -> LeaseConnection {
         let mut registry = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::expire_recovery(&mut registry, session_id);
+        let restored = registry
+            .recoveries
+            .get(session_id)
+            .is_some_and(|recovery| recovery.expires_at_ms.is_some() && recovery.credential.as_bytes().ct_eq(credential.as_bytes()).unwrap_u8() == 1);
         let lease = registry.states.entry(session_id.to_owned()).or_insert(LeaseState {
             version: 0,
             controller_connection_id: None,
             controller_device_name: None,
+            recovery_expires_at_ms: None,
         });
+        let recovery_credential = restored.then(|| {
+            lease.version += 1;
+            lease.controller_connection_id = Some(connection_id.to_owned());
+            lease.controller_device_name = Some(device_name.to_owned());
+            lease.recovery_expires_at_ms = None;
+            generate_opaque_id(32)
+        });
+        let state = lease.clone();
+        if let Some(credential) = recovery_credential.as_ref() {
+            registry.recoveries.insert(
+                session_id.to_owned(),
+                LeaseRecovery {
+                    credential: credential.clone(),
+                    expires_at_ms: None,
+                },
+            );
+        }
+        Self::broadcast(&mut registry, session_id, &state);
+        LeaseConnection { state, recovery_credential }
+    }
+
+    pub fn take_control(&self, session_id: &str, connection_id: &str, device_name: &str, expected_version: u64) -> LeaseConnection {
+        let mut registry = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::expire_recovery(&mut registry, session_id);
+        let lease = registry.states.entry(session_id.to_owned()).or_insert(LeaseState {
+            version: 0,
+            controller_connection_id: None,
+            controller_device_name: None,
+            recovery_expires_at_ms: None,
+        });
+        let mut recovery_credential = None;
         if lease.version == expected_version {
             lease.version += 1;
             lease.controller_connection_id = Some(connection_id.to_owned());
             lease.controller_device_name = Some(device_name.to_owned());
+            lease.recovery_expires_at_ms = None;
+            recovery_credential = Some(generate_opaque_id(32));
         }
         let state = lease.clone();
+        if let Some(credential) = recovery_credential.as_ref() {
+            registry.recoveries.insert(
+                session_id.to_owned(),
+                LeaseRecovery {
+                    credential: credential.clone(),
+                    expires_at_ms: None,
+                },
+            );
+        }
         Self::broadcast(&mut registry, session_id, &state);
-        state
+        LeaseConnection { state, recovery_credential }
     }
 
     pub fn state(&self, session_id: &str) -> LeaseState {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .states
-            .get(session_id)
-            .cloned()
-            .unwrap_or(LeaseState {
-                version: 0,
-                controller_connection_id: None,
-                controller_device_name: None,
-            })
+        let mut registry = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::expire_recovery(&mut registry, session_id);
+        registry.states.get(session_id).cloned().unwrap_or(LeaseState {
+            version: 0,
+            controller_connection_id: None,
+            controller_device_name: None,
+            recovery_expires_at_ms: None,
+        })
     }
 
     pub fn can_write(&self, session_id: &str, connection_id: &str) -> bool {
@@ -428,13 +651,19 @@ impl ControlLeases {
     pub fn disconnect(&self, session_id: &str, connection_id: &str) {
         let mut registry = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut changed = None;
+        let mut recovery_expires_at_ms = None;
         if let Some(lease) = registry.states.get_mut(session_id) {
             if lease.controller_connection_id.as_deref() == Some(connection_id) {
                 lease.version += 1;
                 lease.controller_connection_id = None;
-                lease.controller_device_name = None;
+                let expires_at_ms = now_ms() + LEASE_RECOVERY_TTL_MS;
+                lease.recovery_expires_at_ms = Some(expires_at_ms);
+                recovery_expires_at_ms = Some(expires_at_ms);
                 changed = Some(lease.clone());
             }
+        }
+        if let (Some(recovery), Some(expires_at_ms)) = (registry.recoveries.get_mut(session_id), recovery_expires_at_ms) {
+            recovery.expires_at_ms = Some(expires_at_ms);
         }
         if let Some(state) = changed {
             Self::broadcast(&mut registry, session_id, &state);
@@ -449,6 +678,23 @@ impl ControlLeases {
     fn broadcast(registry: &mut LeaseRegistry, session_id: &str, state: &LeaseState) {
         let sender = registry.events.entry(session_id.to_owned()).or_insert_with(|| broadcast::channel(32).0);
         let _ = sender.send(state.clone());
+    }
+
+    fn expire_recovery(registry: &mut LeaseRegistry, session_id: &str) {
+        let expired = registry
+            .recoveries
+            .get(session_id)
+            .and_then(|recovery| recovery.expires_at_ms)
+            .is_some_and(|expires_at_ms| expires_at_ms <= now_ms());
+        if !expired {
+            return;
+        }
+        registry.recoveries.remove(session_id);
+        if let Some(lease) = registry.states.get_mut(session_id) {
+            lease.version += 1;
+            lease.controller_device_name = None;
+            lease.recovery_expires_at_ms = None;
+        }
     }
 }
 
@@ -489,16 +735,30 @@ mod tests {
     }
 
     #[test]
+    fn expired_websocket_ticket_is_rejected() {
+        let security = RemoteSecurity::for_tests();
+        let ticket = security.issue_ticket(
+            DeviceIdentity {
+                token_id: "id".into(),
+                name: "Desktop".into(),
+            },
+            "session".into(),
+        );
+        security.tickets.lock().unwrap().get_mut(&ticket).unwrap().expires_at_ms = now_ms() - 1;
+        assert!(security.consume_ticket(&ticket, "session").is_none());
+    }
+
+    #[test]
     fn takeover_makes_previous_controller_read_only() {
         let leases = ControlLeases::default();
         leases.connect("session", "first", "Desktop");
         assert!(leases.can_write("session", "first"));
         let state = leases.take_control("session", "second", "Phone", 1);
-        assert_eq!(state.controller_device_name.as_deref(), Some("Phone"));
+        assert_eq!(state.state.controller_device_name.as_deref(), Some("Phone"));
         assert!(!leases.can_write("session", "first"));
         assert!(leases.can_write("session", "second"));
         let stale = leases.take_control("session", "third", "Tablet", 1);
-        assert_eq!(stale.controller_device_name.as_deref(), Some("Phone"));
+        assert_eq!(stale.state.controller_device_name.as_deref(), Some("Phone"));
         assert!(!leases.can_write("session", "third"));
     }
 
@@ -512,18 +772,113 @@ mod tests {
         assert!(security.rate_limit_allows("source:token"));
     }
 
+    #[test]
+    fn authentication_failures_are_limited_by_source_even_when_token_ids_change() {
+        let security = RemoteSecurity::for_tests();
+        assert!(security.authentication_rate_limit_allows("192.0.2.1", "token-one"));
+        for index in 0..20 {
+            security.record_authentication_failure("192.0.2.1", &format!("token-{index}"));
+        }
+        assert!(!security.authentication_rate_limit_allows("192.0.2.1", "token-19"));
+        assert!(security.authentication_rate_limit_allows("192.0.2.1", "healthy-token"));
+        assert!(security.authentication_rate_limit_allows("192.0.2.2", "token-two"));
+    }
+
+    #[test]
+    fn wildcard_bind_requires_explicit_safeguard_but_public_ips_remain_rejected() {
+        assert!(validate_bind("0.0.0.0".parse().unwrap(), false).is_err());
+        assert!(validate_bind("0.0.0.0".parse().unwrap(), true).is_ok());
+        assert!(validate_bind("203.0.113.10".parse().unwrap(), true).is_err());
+    }
+
+    #[test]
+    fn pairing_failures_are_limited_by_source_even_when_codes_change() {
+        let security = RemoteSecurity::for_tests();
+        assert!(security.pairing_rate_limit_allows("192.0.2.1", "first-invalid-code"));
+        for index in 0..10 {
+            security.record_pairing_failure("192.0.2.1", &format!("invalid-code-{index}"));
+        }
+        assert!(!security.pairing_rate_limit_allows("192.0.2.1", "another-invalid-code"));
+        let offer = security.create_pairing("https://backend.example.com", "AkironMux").unwrap();
+        assert!(security.pairing_rate_limit_allows("192.0.2.1", &offer.code));
+        assert!(security.pairing_rate_limit_allows("192.0.2.2", "another-invalid-code"));
+    }
+
+    #[test]
+    fn controller_can_recover_with_credential_but_other_connections_stay_read_only() {
+        let leases = ControlLeases::default();
+        let first = leases.connect("session", "first", "Desktop");
+        let credential = first.recovery_credential.expect("controller receives a recovery credential");
+        leases.disconnect("session", "first");
+
+        let observer = leases.connect("session", "observer", "Phone");
+        assert!(observer.recovery_credential.is_none());
+        assert!(!leases.can_write("session", "observer"));
+
+        let recovered = leases.connect("session", "reconnected", "Desktop");
+        assert!(recovered.recovery_credential.is_none());
+        let recovered = leases.recover_control("session", "reconnected", "Desktop", &credential);
+        assert_eq!(recovered.state.controller_connection_id.as_deref(), Some("reconnected"));
+        assert!(recovered.recovery_credential.is_some());
+        assert!(leases.can_write("session", "reconnected"));
+        assert!(!leases.can_write("session", "observer"));
+    }
+
+    #[test]
+    fn expired_recovery_credential_cannot_restore_control() {
+        let leases = ControlLeases::default();
+        let first = leases.connect("session", "first", "Desktop");
+        let credential = first.recovery_credential.unwrap();
+        leases.disconnect("session", "first");
+        leases.inner.lock().unwrap().recoveries.get_mut("session").unwrap().expires_at_ms = Some(now_ms() - 1);
+        let recovered = leases.recover_control("session", "second", "Desktop", &credential);
+        assert!(recovered.recovery_credential.is_none());
+        assert!(!leases.can_write("session", "second"));
+    }
+
     #[tokio::test]
     async fn pairing_requires_local_approval_before_issuing_token() {
         let security = RemoteSecurity::for_tests();
         let db = Db::open(Path::new(":memory:")).unwrap();
         let offer = security.create_pairing("https://backend.example.com", "AkironMux").unwrap();
         assert!(!offer.deep_link.contains("akmux_1_"));
-        let claim = security.begin_pairing_claim(&offer.code, "Phone").unwrap();
+        let claim = security.begin_pairing_claim(&offer.code, "Phone", "192.0.2.1").unwrap();
         assert_eq!(security.pending_pairings()[0].device_name.as_deref(), Some("Phone"));
         security.approve_pairing(&offer.id).unwrap();
         let device_name = security.finish_pairing(claim).await.unwrap();
         let (_, token) = security.create_device(&db, &device_name).unwrap();
         assert!(token.starts_with("akmux_1_"));
-        assert!(security.begin_pairing_claim(&offer.code, "Replay").is_err());
+        assert!(security.begin_pairing_claim(&offer.code, "Replay", "192.0.2.1").is_err());
+    }
+
+    #[test]
+    fn cancelled_pairing_code_is_immediately_invalid() {
+        let security = RemoteSecurity::for_tests();
+        let offer = security.create_pairing("https://backend.example.com", "AkironMux").unwrap();
+        assert!(security.cancel_pairing(&offer.id));
+        assert!(security.begin_pairing_claim(&offer.code, "Phone", "192.0.2.1").is_err());
+        assert!(!security.cancel_pairing(&offer.id));
+    }
+
+    #[test]
+    fn expired_pairing_and_concurrent_claims_are_rejected() {
+        let security = RemoteSecurity::for_tests();
+        let expired = security.create_pairing("https://backend.example.com", "AkironMux").unwrap();
+        security.pairings.lock().unwrap().get_mut(&expired.id).unwrap().expires_at_ms = now_ms() - 1;
+        assert!(security.begin_pairing_claim(&expired.code, "Phone", "192.0.2.1").is_err());
+
+        let offer = security.create_pairing("https://backend.example.com", "AkironMux").unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let attempts = ["Phone", "Tablet"].map(|name| {
+            let security = security.clone();
+            let code = offer.code.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                security.begin_pairing_claim(&code, name, "192.0.2.1").is_ok()
+            })
+        });
+        barrier.wait();
+        assert_eq!(attempts.into_iter().map(|attempt| attempt.join().unwrap()).filter(|claimed| *claimed).count(), 1);
     }
 }

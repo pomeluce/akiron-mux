@@ -4,16 +4,31 @@ use super::super::widgets::shared::display_width;
 use super::TabContent;
 use crate::core::config::{self, ConfigManager};
 use crossterm::event::KeyCode;
+use qrcode::{render::unicode, QrCode};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph},
+    widgets::{Block, Clear, Paragraph},
     Frame,
 };
-use std::rc::Rc;
+use std::{rc::Rc, sync::mpsc};
+
+use crate::{
+    db::remote::BackendDevice,
+    session_service::remote::{PairingOffer, PendingPairingInfo, RemoteBackendConfig},
+};
 
 const MODES: &[&str] = &["local", "proxy"];
+
+enum RemoteActionResult {
+    PairCreated(Result<PairingOffer, String>),
+    PairingsLoaded(Result<Vec<PendingPairingInfo>, String>),
+    PairConfirmed(Result<(), String>),
+    PairCancelled(Result<(), String>),
+    DeviceRevoked(Result<(), String>),
+    Failed(String),
+}
 
 pub struct SettingsTab {
     mgr: Rc<ConfigManager>,
@@ -23,6 +38,14 @@ pub struct SettingsTab {
     lang_idx: usize,
     session_service_enabled: bool,
     remote_backend_enabled: bool,
+    remote_listener_status: String,
+    pairing_offer: Option<PairingOffer>,
+    pending_pairing: Option<PendingPairingInfo>,
+    devices: Vec<BackendDevice>,
+    selected_device: usize,
+    pending_revoke: bool,
+    remote_notice: String,
+    remote_action_rx: Option<mpsc::Receiver<RemoteActionResult>>,
 }
 
 impl SettingsTab {
@@ -50,7 +73,7 @@ impl SettingsTab {
         if let Err(error) = crate::session_service::control::reconcile(&mgr) {
             tracing::warn!("Failed to reconcile AkironMux session service: {error:#}");
         }
-        SettingsTab {
+        let mut tab = SettingsTab {
             mgr,
             selected: 0,
             theme_idx,
@@ -58,7 +81,17 @@ impl SettingsTab {
             lang_idx,
             session_service_enabled,
             remote_backend_enabled,
-        }
+            remote_listener_status: String::new(),
+            pairing_offer: None,
+            pending_pairing: None,
+            devices: Vec::new(),
+            selected_device: 0,
+            pending_revoke: false,
+            remote_notice: String::new(),
+            remote_action_rx: None,
+        };
+        tab.refresh_remote_state();
+        tab
     }
 
     fn items(&self) -> Vec<(&str, String)> {
@@ -83,6 +116,9 @@ impl SettingsTab {
                 )
                 .to_string(),
             ),
+            (lang::pick("Remote listener", "远程监听"), self.remote_listener_status.clone()),
+            (lang::pick("Pair device", "设备配对"), lang::pick("Enter to create", "回车创建").to_string()),
+            (lang::pick("Remote device", "远程设备"), self.selected_device_label()),
         ]
     }
 
@@ -159,7 +195,10 @@ impl SettingsTab {
     fn toggle_session_service(&mut self) {
         let next = !self.session_service_enabled;
         match crate::session_service::control::set_enabled(&self.mgr, next) {
-            Ok(()) => self.session_service_enabled = next,
+            Ok(()) => {
+                self.session_service_enabled = next;
+                self.refresh_remote_state();
+            }
             Err(error) => tracing::warn!("Failed to update AkironMux session service: {error:#}"),
         }
     }
@@ -175,26 +214,308 @@ impl SettingsTab {
             }
         }
         match self.mgr.set_setting("remote.enabled", &next.to_string()) {
-            Ok(()) => self.remote_backend_enabled = next,
+            Ok(()) => {
+                self.remote_backend_enabled = next;
+                self.refresh_remote_state();
+            }
             Err(error) => tracing::warn!("Failed to update Remote backend: {error:#}"),
         }
+    }
+
+    fn refresh_remote_state(&mut self) {
+        self.devices = self
+            .mgr
+            .db()
+            .list_backend_devices()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|device| device.revoked_at_ms.is_none())
+            .collect();
+        self.selected_device = self.selected_device.min(self.devices.len().saturating_sub(1));
+        self.remote_listener_status = match RemoteBackendConfig::load(self.mgr.db()) {
+            Ok(config) if !config.enabled => lang::pick("Disabled", "已关闭").to_string(),
+            Ok(config) => match config.listener(self.mgr.db()) {
+                Ok(Some(listener)) => {
+                    let reachable = std::net::TcpStream::connect_timeout(&listener.bind, std::time::Duration::from_millis(75)).is_ok();
+                    lang::pick(if reachable { "Listening" } else { "Starting" }, if reachable { "监听中" } else { "启动中" }).to_string()
+                }
+                Ok(None) => lang::pick("Disabled", "已关闭").to_string(),
+                Err(_) => lang::pick("Invalid config", "配置无效").to_string(),
+            },
+            Err(_) => lang::pick("Invalid config", "配置无效").to_string(),
+        };
+        self.remote_backend_enabled = self.mgr.get_setting("remote.enabled").as_deref() == Some("true");
+    }
+
+    fn selected_device_label(&self) -> String {
+        self.devices.get(self.selected_device).map_or_else(
+            || lang::pick("No active devices", "没有活动设备").to_string(),
+            |device| {
+                if self.pending_revoke {
+                    format!("{} · {}", device.name, lang::pick("press X again", "再次按 X"))
+                } else {
+                    device.name.clone()
+                }
+            },
+        )
+    }
+
+    fn create_pairing(&mut self) {
+        if self.remote_action_rx.is_some() {
+            return;
+        }
+        if !crate::session_service::control::is_running() {
+            self.remote_notice = lang::pick("Start the session backend before pairing", "请先启动会话后端再配对").to_string();
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.remote_action_rx = Some(rx);
+        self.remote_notice = lang::pick("Creating pairing…", "正在创建配对…").to_string();
+        std::thread::spawn(move || {
+            let client = crate::session_service::admin::LocalAdminClient::from_env();
+            let result = tokio::runtime::Runtime::new()
+                .map_err(|error| error.to_string())
+                .and_then(|runtime| runtime.block_on(client.create_pairing()).map_err(|error| error.to_string()));
+            let _ = tx.send(RemoteActionResult::PairCreated(result));
+        });
+    }
+
+    fn refresh_pairing(&mut self) {
+        if self.pairing_offer.is_none() || self.remote_action_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.remote_action_rx = Some(rx);
+        self.remote_notice = lang::pick("Refreshing pairing…", "正在刷新配对…").to_string();
+        std::thread::spawn(move || {
+            let client = crate::session_service::admin::LocalAdminClient::from_env();
+            let result = tokio::runtime::Runtime::new()
+                .map_err(|error| error.to_string())
+                .and_then(|runtime| runtime.block_on(client.pending_pairings()).map_err(|error| error.to_string()));
+            let _ = tx.send(RemoteActionResult::PairingsLoaded(result));
+        });
+    }
+
+    fn confirm_pairing(&mut self) {
+        if self.remote_action_rx.is_some() {
+            return;
+        }
+        let Some(pairing) = self.pending_pairing.as_ref().filter(|pairing| pairing.device_name.is_some()) else {
+            self.remote_notice = lang::pick("Waiting for the device; press R to refresh", "等待设备请求；按 R 刷新").to_string();
+            return;
+        };
+        let id = pairing.id.clone();
+        let (tx, rx) = mpsc::channel();
+        self.remote_action_rx = Some(rx);
+        self.remote_notice = lang::pick("Approving pairing…", "正在批准配对…").to_string();
+        std::thread::spawn(move || {
+            let client = crate::session_service::admin::LocalAdminClient::from_env();
+            let result = tokio::runtime::Runtime::new()
+                .map_err(|error| error.to_string())
+                .and_then(|runtime| runtime.block_on(client.confirm_pairing(&id)).map_err(|error| error.to_string()));
+            let _ = tx.send(RemoteActionResult::PairConfirmed(result));
+        });
+    }
+
+    fn cancel_pairing(&mut self) {
+        if self.remote_action_rx.is_some() {
+            return;
+        }
+        let Some(offer) = self.pairing_offer.as_ref() else {
+            return;
+        };
+        let id = offer.id.clone();
+        let (tx, rx) = mpsc::channel();
+        self.remote_action_rx = Some(rx);
+        self.remote_notice = lang::pick("Cancelling pairing…", "正在取消配对…").to_string();
+        std::thread::spawn(move || {
+            let client = crate::session_service::admin::LocalAdminClient::from_env();
+            let result = tokio::runtime::Runtime::new()
+                .map_err(|error| error.to_string())
+                .and_then(|runtime| runtime.block_on(client.cancel_pairing(&id)).map_err(|error| error.to_string()));
+            let _ = tx.send(RemoteActionResult::PairCancelled(result));
+        });
+    }
+
+    fn cycle_device(&mut self, forward: bool) {
+        if self.devices.is_empty() {
+            return;
+        }
+        self.selected_device = if forward {
+            (self.selected_device + 1) % self.devices.len()
+        } else if self.selected_device == 0 {
+            self.devices.len() - 1
+        } else {
+            self.selected_device - 1
+        };
+        self.pending_revoke = false;
+    }
+
+    fn revoke_selected_device(&mut self) {
+        let Some(device) = self.devices.get(self.selected_device) else {
+            return;
+        };
+        if !self.pending_revoke {
+            self.pending_revoke = true;
+            return;
+        }
+        let token_id = device.token_id.clone();
+        if crate::session_service::control::is_running() {
+            let (tx, rx) = mpsc::channel();
+            self.remote_action_rx = Some(rx);
+            self.remote_notice = lang::pick("Revoking device…", "正在撤销设备…").to_string();
+            std::thread::spawn(move || {
+                let client = crate::session_service::admin::LocalAdminClient::from_env();
+                let result = tokio::runtime::Runtime::new()
+                    .map_err(|error| error.to_string())
+                    .and_then(|runtime| runtime.block_on(client.revoke_device(&token_id)).map_err(|error| error.to_string()));
+                let _ = tx.send(RemoteActionResult::DeviceRevoked(result));
+            });
+            self.pending_revoke = false;
+            return;
+        }
+        let result = {
+            let now = crate::session_service::remote::now_ms();
+            self.mgr.db().revoke_backend_device(&token_id, now).map_err(anyhow::Error::from).and_then(|revoked| {
+                anyhow::ensure!(revoked, "Active device not found");
+                self.mgr.db().record_backend_audit("device.revoked", Some(&token_id), Some("tui"), now)?;
+                Ok(())
+            })
+        };
+        match result {
+            Ok(()) => self.remote_notice = lang::pick("Device revoked", "设备已撤销").to_string(),
+            Err(error) => self.remote_notice = format!("{}: {error}", lang::pick("Unable to revoke device", "无法撤销设备")),
+        }
+        self.pending_revoke = false;
+        self.refresh_remote_state();
+    }
+
+    fn poll_remote_action(&mut self) {
+        let result = self.remote_action_rx.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(RemoteActionResult::Failed("Background task stopped".into())),
+        });
+        let Some(result) = result else {
+            return;
+        };
+        self.remote_action_rx = None;
+        match result {
+            RemoteActionResult::PairCreated(Ok(offer)) => {
+                self.pairing_offer = Some(offer);
+                self.pending_pairing = None;
+                self.remote_notice.clear();
+            }
+            RemoteActionResult::PairCreated(Err(error)) => {
+                self.remote_notice = format!("{}: {error}", lang::pick("Unable to create pairing", "无法创建配对"));
+            }
+            RemoteActionResult::PairingsLoaded(Ok(pairings)) => {
+                if let Some(offer) = self.pairing_offer.as_ref() {
+                    self.pending_pairing = pairings.into_iter().find(|pairing| pairing.id == offer.id);
+                }
+                self.remote_notice.clear();
+            }
+            RemoteActionResult::PairingsLoaded(Err(error)) => {
+                self.remote_notice = format!("{}: {error}", lang::pick("Unable to refresh pairing", "无法刷新配对"));
+            }
+            RemoteActionResult::PairConfirmed(Ok(())) => {
+                self.pairing_offer = None;
+                self.pending_pairing = None;
+                self.remote_notice = lang::pick("Pairing approved", "配对已批准").to_string();
+                self.refresh_remote_state();
+            }
+            RemoteActionResult::PairConfirmed(Err(error)) => {
+                self.remote_notice = format!("{}: {error}", lang::pick("Unable to approve pairing", "无法批准配对"));
+            }
+            RemoteActionResult::PairCancelled(Ok(())) => {
+                self.pairing_offer = None;
+                self.pending_pairing = None;
+                self.remote_notice = lang::pick("Pairing cancelled", "配对已取消").to_string();
+            }
+            RemoteActionResult::PairCancelled(Err(error)) => {
+                self.remote_notice = format!("{}: {error}", lang::pick("Unable to cancel pairing", "无法取消配对"));
+            }
+            RemoteActionResult::DeviceRevoked(Ok(())) => {
+                self.remote_notice = lang::pick("Device revoked", "设备已撤销").to_string();
+                self.refresh_remote_state();
+            }
+            RemoteActionResult::DeviceRevoked(Err(error)) => {
+                self.remote_notice = format!("{}: {error}", lang::pick("Unable to revoke device", "无法撤销设备"));
+            }
+            RemoteActionResult::Failed(error) => {
+                self.remote_notice = format!("{}: {error}", lang::pick("Remote action failed", "远程操作失败"));
+            }
+        }
+    }
+}
+
+impl SettingsTab {
+    fn render_pairing(&self, f: &mut Frame, area: Rect) {
+        let Some(offer) = self.pairing_offer.as_ref() else {
+            return;
+        };
+        let mut lines = vec![
+            Line::styled(
+                lang::pick("Scan with the AkironMux mobile app", "使用 AkironMux 移动端扫描"),
+                Style::default().fg(theme::current().cyan),
+            ),
+            Line::from(""),
+        ];
+        match QrCode::new(offer.deep_link.as_bytes()) {
+            Ok(code) => {
+                let qr = code.render::<unicode::Dense1x2>().quiet_zone(true).build();
+                lines.extend(qr.lines().map(|line| Line::raw(line.to_owned())));
+            }
+            Err(_) => lines.push(Line::raw(offer.deep_link.clone())),
+        }
+        lines.push(Line::from(""));
+        if let Some(pairing) = self.pending_pairing.as_ref().filter(|pairing| pairing.device_name.is_some()) {
+            lines.push(Line::styled(
+                format!(
+                    "{}: {} · {}: {}",
+                    lang::pick("Device", "设备"),
+                    pairing.device_name.as_deref().unwrap_or("-"),
+                    lang::pick("Source", "来源"),
+                    pairing.source.as_deref().unwrap_or("unknown")
+                ),
+                Style::default().fg(theme::current().purple),
+            ));
+            lines.push(Line::raw(lang::pick("Enter approve · R refresh · Esc cancel", "回车批准 · R 刷新 · Esc 取消")));
+        } else {
+            lines.push(Line::raw(lang::pick("Waiting for device · R refresh · Esc cancel", "等待设备 · R 刷新 · Esc 取消")));
+        }
+        if !self.remote_notice.is_empty() {
+            lines.push(Line::styled(self.remote_notice.clone(), Style::default().fg(theme::current().yellow)));
+        }
+        f.render_widget(Clear, area);
+        f.render_widget(
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .border_set(ratatui::symbols::border::ROUNDED)
+                    .title(lang::pick("Pair Remote device", "配对远程设备"))
+                    .border_style(Style::default().fg(theme::current().cyan)),
+            ),
+            area,
+        );
     }
 }
 
 impl TabContent for SettingsTab {
     fn render(&mut self, f: &mut Frame, area: Rect) {
+        self.poll_remote_action();
         let items = self.items();
         let refresh_label = lang::pick("Session Refresh", "会话刷新");
         let database_label = lang::pick("Database", "数据库");
+        let remote_notice_label = lang::pick("Remote", "远程");
         let max_label_dw = items
             .iter()
             .map(|(label, _)| display_width(label))
-            .chain([display_width(refresh_label), display_width(database_label)])
+            .chain([display_width(refresh_label), display_width(database_label), display_width(remote_notice_label)])
             .max()
             .unwrap_or(0);
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(7), Constraint::Length(5), Constraint::Length(7), Constraint::Min(5)])
+            .constraints([Constraint::Length(7), Constraint::Length(5), Constraint::Length(13), Constraint::Min(5)])
             .split(area);
 
         let appearance = vec![
@@ -214,18 +535,42 @@ impl TabContent for SettingsTab {
             setting_line(3, self.selected, items[3].0, &items[3].1, max_label_dw),
             Line::from(""),
             setting_line(4, self.selected, items[4].0, &items[4].1, max_label_dw),
+            Line::from(""),
+            setting_line(5, self.selected, items[5].0, &items[5].1, max_label_dw),
+            Line::from(""),
+            setting_line(6, self.selected, items[6].0, &items[6].1, max_label_dw),
+            Line::from(""),
+            setting_line(7, self.selected, items[7].0, &items[7].1, max_label_dw),
         ];
         f.render_widget(section(lang::pick("Services", "服务").into(), backend), sections[2]);
 
         let database = shorten_home(&config::db_path().display().to_string());
-        let data = vec![
+        let mut data = vec![
             readonly_line(refresh_label, lang::pick("Real-time", "实时"), max_label_dw),
             readonly_line(database_label, &database, max_label_dw),
         ];
+        if !self.remote_notice.is_empty() {
+            data.push(readonly_line(remote_notice_label, &self.remote_notice, max_label_dw));
+        }
         f.render_widget(section(lang::pick("Data", "数据").into(), data), sections[3]);
+
+        if self.pairing_offer.is_some() {
+            self.render_pairing(f, area);
+        }
     }
 
     fn handle_key(&mut self, code: KeyCode) -> bool {
+        if self.pairing_offer.is_some() {
+            match code {
+                KeyCode::Esc => {
+                    self.cancel_pairing();
+                }
+                KeyCode::Char('r' | 'R') => self.refresh_pairing(),
+                KeyCode::Enter => self.confirm_pairing(),
+                _ => {}
+            }
+            return true;
+        }
         match code {
             KeyCode::Tab | KeyCode::BackTab => return false,
             KeyCode::Char('j') | KeyCode::Down => {
@@ -241,6 +586,9 @@ impl TabContent for SettingsTab {
                 2 => self.cycle_mode(true),
                 3 => self.toggle_session_service(),
                 4 => self.toggle_remote_backend(),
+                5 => self.refresh_remote_state(),
+                6 => self.create_pairing(),
+                7 => self.cycle_device(true),
                 _ => {}
             },
             KeyCode::Char('h') | KeyCode::Left => match self.selected {
@@ -249,8 +597,17 @@ impl TabContent for SettingsTab {
                 2 => self.cycle_mode(false),
                 3 => self.toggle_session_service(),
                 4 => self.toggle_remote_backend(),
+                5 => self.refresh_remote_state(),
+                6 => self.create_pairing(),
+                7 => self.cycle_device(false),
                 _ => {}
             },
+            KeyCode::Enter => match self.selected {
+                5 => self.refresh_remote_state(),
+                6 => self.create_pairing(),
+                _ => return false,
+            },
+            KeyCode::Char('x' | 'X') if self.selected == 7 => self.revoke_selected_device(),
             _ => return false,
         }
         true
@@ -261,6 +618,11 @@ impl TabContent for SettingsTab {
         vec![
             vec![(" J/K ".into(), theme::current().comment), (l.sc_nav.into(), theme::current().comment)],
             vec![(" H/L ".into(), theme::current().comment), (l.sc_toggle.into(), theme::current().comment)],
+            vec![
+                (" Enter ".into(), theme::current().comment),
+                (lang::pick("action", "操作").into(), theme::current().comment),
+            ],
+            vec![(" X X ".into(), theme::current().comment), (lang::pick("revoke", "撤销").into(), theme::current().comment)],
             vec![(" Q ".into(), theme::current().comment), (l.sc_quit.into(), theme::current().comment)],
         ]
     }

@@ -12,6 +12,14 @@ pub struct BackendDevice {
     pub revoked_at_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct BackendAuditEntry {
+    pub event: String,
+    pub device_id: Option<String>,
+    pub source: Option<String>,
+    pub created_at_ms: i64,
+}
+
 impl Db {
     pub fn insert_backend_device(&self, device: &BackendDevice, digest: &[u8]) -> Result<(), rusqlite::Error> {
         self.conn().execute(
@@ -100,7 +108,30 @@ impl Db {
              )",
             params![device_id, source, now_ms, now_ms - 5 * 60 * 1000],
         )?;
+        let cutoff = now_ms - 30 * 24 * 60 * 60 * 1000;
+        self.conn().execute("DELETE FROM backend_audit WHERE created_at_ms < ?1", params![cutoff])?;
         Ok(())
+    }
+
+    pub fn list_backend_audit(&self, limit: usize) -> Result<Vec<BackendAuditEntry>, rusqlite::Error> {
+        let limit = limit.clamp(1, 1_000) as i64;
+        let mut statement = self.conn().prepare(
+            "SELECT event, device_id, source, created_at_ms
+             FROM backend_audit
+             ORDER BY created_at_ms DESC, id DESC
+             LIMIT ?1",
+        )?;
+        let entries = statement
+            .query_map([limit], |row| {
+                Ok(BackendAuditEntry {
+                    event: row.get(0)?,
+                    device_id: row.get(1)?,
+                    source: row.get(2)?,
+                    created_at_ms: row.get(3)?,
+                })
+            })?
+            .collect();
+        entries
     }
 }
 
@@ -127,5 +158,16 @@ mod tests {
 
         assert!(db.revoke_backend_device("device-1", 20).unwrap());
         assert!(!db.has_active_backend_device().unwrap());
+    }
+
+    #[test]
+    fn audit_entries_can_be_inspected_without_secret_material() {
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        db.record_backend_audit("auth.failed", Some("public-device-id"), Some("192.0.2.1"), 42).unwrap();
+        let entries = db.list_backend_audit(10).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event, "auth.failed");
+        assert_eq!(entries[0].device_id.as_deref(), Some("public-device-id"));
+        assert_eq!(entries[0].source.as_deref(), Some("192.0.2.1"));
     }
 }

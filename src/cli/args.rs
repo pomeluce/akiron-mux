@@ -113,6 +113,13 @@ pub enum BackendAction {
         #[command(subcommand)]
         action: BackendPairAction,
     },
+    /// Check listener, configuration, and public endpoint health
+    Diagnostics,
+    /// Inspect recent security audit metadata (never credential or terminal content)
+    Audit {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -123,6 +130,8 @@ pub enum BackendPairAction {
     Pending,
     /// Approve a pending pairing request
     Confirm { id: String },
+    /// Cancel a pending pairing request immediately
+    Cancel { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -133,6 +142,9 @@ pub enum RemoteBackendAction {
         bind: String,
         #[arg(long)]
         public_url: String,
+        /// Explicitly permit 0.0.0.0/[::]; requires external firewall or TLS proxy safeguards
+        #[arg(long)]
+        allow_wildcard_bind: bool,
     },
     /// Enable Remote on the next daemon start
     Enable,

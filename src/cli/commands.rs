@@ -86,53 +86,43 @@ fn handle_backend(mgr: &ConfigManager, action: BackendAction) -> Result<()> {
         BackendAction::Remote { action } => handle_remote_backend(mgr, action),
         BackendAction::Device { action } => handle_backend_device(mgr, action),
         BackendAction::Pair { action } => handle_backend_pair(action),
+        BackendAction::Diagnostics => handle_backend_diagnostics(mgr),
+        BackendAction::Audit { limit } => handle_backend_audit(mgr, limit),
     }
 }
 
 fn handle_backend_pair(action: BackendPairAction) -> Result<()> {
-    let port = std::env::var("AKMUX_SESSION_PORT")
-        .or_else(|_| std::env::var("CCSWITCH_SESSION_PORT"))
-        .ok()
-        .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(17321);
-    let base_url = format!("http://127.0.0.1:{port}");
+    let client = crate::session_service::admin::LocalAdminClient::from_env();
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move {
-        let client = reqwest::Client::new();
         match action {
             BackendPairAction::Create => {
-                let response = client.post(format!("{base_url}/api/pairing")).json(&serde_json::json!({})).send().await?;
-                let status = response.status();
-                let body: serde_json::Value = response.json().await?;
-                anyhow::ensure!(
-                    status.is_success(),
-                    "{}",
-                    body.get("error").and_then(|value| value.as_str()).unwrap_or("Unable to create pairing request")
-                );
-                println!("Pairing ID: {}", body["id"].as_str().unwrap_or_default());
-                println!("Expires at: {}", body["expires_at_ms"]);
-                println!("Deep link: {}", body["deep_link"].as_str().unwrap_or_default());
+                let offer = client.create_pairing().await?;
+                println!("Pairing ID: {}", offer.id);
+                println!("Expires at: {}", offer.expires_at_ms);
+                if let Ok(code) = qrcode::QrCode::new(offer.deep_link.as_bytes()) {
+                    println!("{}", code.render::<qrcode::render::unicode::Dense1x2>().quiet_zone(true).build());
+                }
+                println!("Deep link: {}", offer.deep_link);
             }
             BackendPairAction::Pending => {
-                let response = client.get(format!("{base_url}/api/pairing")).send().await?;
-                anyhow::ensure!(response.status().is_success(), "Unable to list pending pairing requests");
-                let pairings: Vec<serde_json::Value> = response.json().await?;
-                for pairing in pairings {
+                for pairing in client.pending_pairings().await? {
                     println!(
-                        "{}\t{}\t{}",
-                        pairing["id"].as_str().unwrap_or_default(),
-                        pairing["device_name"].as_str().unwrap_or("waiting for device"),
-                        pairing["expires_at_ms"]
+                        "{}\t{}\t{}\t{}",
+                        pairing.id,
+                        pairing.device_name.as_deref().unwrap_or("waiting for device"),
+                        pairing.source.as_deref().unwrap_or("waiting for request"),
+                        pairing.expires_at_ms
                     );
                 }
             }
             BackendPairAction::Confirm { id } => {
-                let response = client.post(format!("{base_url}/api/pairing/{id}/confirm")).json(&serde_json::json!({})).send().await?;
-                if !response.status().is_success() {
-                    let body: serde_json::Value = response.json().await.unwrap_or_default();
-                    anyhow::bail!("{}", body.get("error").and_then(|value| value.as_str()).unwrap_or("Unable to confirm pairing request"));
-                }
+                client.confirm_pairing(&id).await?;
                 println!("Pairing approved: {id}");
+            }
+            BackendPairAction::Cancel { id } => {
+                client.cancel_pairing(&id).await?;
+                println!("Pairing cancelled: {id}");
             }
         }
         Ok(())
@@ -141,30 +131,25 @@ fn handle_backend_pair(action: BackendPairAction) -> Result<()> {
 
 fn handle_remote_backend(mgr: &ConfigManager, action: RemoteBackendAction) -> Result<()> {
     match action {
-        RemoteBackendAction::Configure { bind, public_url } => {
+        RemoteBackendAction::Configure {
+            bind,
+            public_url,
+            allow_wildcard_bind,
+        } => {
             let bind = bind.parse::<std::net::SocketAddr>().context("Remote bind must be an IP address and port")?;
-            anyhow::ensure!(
-                crate::session_service::is_safe_remote_bind(bind.ip()),
-                "Remote bind must be loopback, private LAN, or Tailnet; public and wildcard addresses are rejected"
-            );
-            let public_url = url::Url::parse(&public_url).context("Remote public URL is invalid")?;
-            anyhow::ensure!(public_url.scheme() == "https", "Remote public URL must use HTTPS");
-            anyhow::ensure!(
-                public_url.username().is_empty() && public_url.password().is_none(),
-                "Remote public URL cannot contain user information"
-            );
-            anyhow::ensure!(
-                public_url.path() == "/" && public_url.query().is_none() && public_url.fragment().is_none(),
-                "Remote public URL cannot contain a path, query, or fragment"
-            );
+            crate::session_service::remote::validate_bind(bind.ip(), allow_wildcard_bind)?;
+            let public_url = crate::session_service::remote::validate_public_url(&public_url).context("Remote public URL is invalid")?;
             mgr.set_setting("remote.bind", &bind.to_string())?;
             mgr.set_setting("remote.public_url", public_url.as_str())?;
+            mgr.set_setting("remote.allow_wildcard_bind", &allow_wildcard_bind.to_string())?;
             println!("Remote backend configured. A running daemon will apply the change automatically.");
             Ok(())
         }
         RemoteBackendAction::Enable => {
-            anyhow::ensure!(mgr.get_setting("remote.public_url").is_some(), "Configure Remote before enabling it");
             anyhow::ensure!(mgr.db().has_active_backend_device()?, "Create at least one device credential before enabling Remote");
+            let config = crate::session_service::remote::RemoteBackendConfig::load(mgr.db())?;
+            anyhow::ensure!(config.public_url.is_some(), "Configure Remote before enabling it");
+            crate::session_service::remote::validate_bind(config.bind.ip(), config.allow_wildcard_bind)?;
             mgr.set_setting("remote.enabled", "true")?;
             println!("Remote backend enabled.");
             Ok(())
@@ -175,16 +160,11 @@ fn handle_remote_backend(mgr: &ConfigManager, action: RemoteBackendAction) -> Re
             Ok(())
         }
         RemoteBackendAction::Status => {
-            println!(
-                "Remote backend: {}",
-                if mgr.get_setting("remote.enabled").as_deref() == Some("true") {
-                    "enabled"
-                } else {
-                    "disabled"
-                }
-            );
-            println!("Bind: {}", mgr.get_setting("remote.bind").unwrap_or_else(|| "127.0.0.1:17322".into()));
-            println!("Public URL: {}", mgr.get_setting("remote.public_url").unwrap_or_else(|| "not configured".into()));
+            let config = crate::session_service::remote::RemoteBackendConfig::load(mgr.db())?;
+            println!("Remote backend: {}", if config.enabled { "enabled" } else { "disabled" });
+            println!("Bind: {}", config.bind);
+            println!("Public URL: {}", config.public_url.map_or_else(|| "not configured".into(), |url| url.to_string()));
+            println!("Wildcard safeguard: {}", if config.allow_wildcard_bind { "explicitly allowed" } else { "blocked" });
             println!(
                 "Active devices: {}",
                 mgr.db().list_backend_devices()?.iter().filter(|device| device.revoked_at_ms.is_none()).count()
@@ -192,6 +172,57 @@ fn handle_remote_backend(mgr: &ConfigManager, action: RemoteBackendAction) -> Re
             Ok(())
         }
     }
+}
+
+fn handle_backend_diagnostics(mgr: &ConfigManager) -> Result<()> {
+    let config = crate::session_service::remote::RemoteBackendConfig::load(mgr.db())?;
+    println!("Local listener: {}", if crate::session_service::control::is_running() { "running" } else { "stopped" });
+    println!("Remote configured: {}", if config.public_url.is_some() { "yes" } else { "no" });
+    println!("Remote enabled: {}", if config.enabled { "yes" } else { "no" });
+    println!("Remote bind: {}", config.bind);
+    match config.listener(mgr.db()) {
+        Ok(Some(listener)) => {
+            let reachable = std::net::TcpStream::connect_timeout(&listener.bind, std::time::Duration::from_millis(500)).is_ok();
+            println!("Remote listener: {}", if reachable { "reachable" } else { "not reachable" });
+            println!("Public URL: {}", listener.public_url);
+            let health_url = listener.public_url.join("healthz")?;
+            let public_health = tokio::runtime::Runtime::new()?.block_on(async {
+                let client = reqwest::Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(2))
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()?;
+                let response = client.get(health_url).send().await?;
+                anyhow::ensure!(response.status().is_success(), "HTTP {}", response.status());
+                let body = response.json::<serde_json::Value>().await?;
+                anyhow::ensure!(body.get("status").and_then(|value| value.as_str()) == Some("ok"), "unexpected health response");
+                Ok::<_, anyhow::Error>(())
+            });
+            match public_health {
+                Ok(()) => println!("Public HTTPS endpoint: healthy (TLS, proxy route, and Host validation passed)"),
+                Err(error) => println!("Public HTTPS endpoint: unavailable ({error})"),
+            }
+        }
+        Ok(None) => println!("Remote listener: disabled"),
+        Err(error) => println!("Remote listener: invalid configuration ({error})"),
+    }
+    println!(
+        "Active devices: {}",
+        mgr.db().list_backend_devices()?.iter().filter(|device| device.revoked_at_ms.is_none()).count()
+    );
+    Ok(())
+}
+
+fn handle_backend_audit(mgr: &ConfigManager, limit: usize) -> Result<()> {
+    for entry in mgr.db().list_backend_audit(limit)? {
+        println!(
+            "{}\t{}\t{}\t{}",
+            entry.created_at_ms,
+            entry.event,
+            entry.device_id.as_deref().unwrap_or("-"),
+            entry.source.as_deref().unwrap_or("-")
+        );
+    }
+    Ok(())
 }
 
 fn handle_backend_device(mgr: &ConfigManager, action: BackendDeviceAction) -> Result<()> {
@@ -216,21 +247,9 @@ fn handle_backend_device(mgr: &ConfigManager, action: BackendDeviceAction) -> Re
         }
         BackendDeviceAction::Revoke { token_id } => {
             if crate::session_service::control::is_running() {
-                let port = std::env::var("AKMUX_SESSION_PORT")
-                    .or_else(|_| std::env::var("CCSWITCH_SESSION_PORT"))
-                    .ok()
-                    .and_then(|value| value.parse::<u16>().ok())
-                    .unwrap_or(17321);
                 let runtime = tokio::runtime::Runtime::new()?;
-                runtime.block_on(async {
-                    let response = reqwest::Client::new()
-                        .post(format!("http://127.0.0.1:{port}/api/devices/{token_id}/revoke"))
-                        .json(&serde_json::json!({}))
-                        .send()
-                        .await?;
-                    anyhow::ensure!(response.status().is_success(), "Active device not found: {token_id}");
-                    Ok::<_, anyhow::Error>(())
-                })?;
+                let client = crate::session_service::admin::LocalAdminClient::from_env();
+                runtime.block_on(client.revoke_device(&token_id))?;
             } else {
                 let now = crate::session_service::remote::now_ms();
                 anyhow::ensure!(mgr.db().revoke_backend_device(&token_id, now)?, "Active device not found: {token_id}");

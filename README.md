@@ -230,11 +230,14 @@ akmux backend remote configure --bind 127.0.0.1:17322 --public-url https://akmux
 akmux backend device create --name "My desktop" --show-token
 akmux backend remote enable
 akmux backend remote status
+akmux backend diagnostics
+akmux backend audit --limit 50
 
 # 60 秒移动端配对；手机提交后再确认 pending ID
 akmux backend pair create
 akmux backend pair pending
 akmux backend pair confirm <pairing-id>
+akmux backend pair cancel <pairing-id>
 
 # 设备管理（输出不包含凭证明文）
 akmux backend device list
@@ -287,7 +290,7 @@ akmux.example.com {
 tailscale serve --bg https / http://127.0.0.1:17322
 ```
 
-随后将 `--public-url` 配置为实际的 HTTPS 地址。AkironMux 不会自动修改 DNS、防火墙、Caddy 或 Tailnet；不要把 17322 的明文 HTTP 监听器直接暴露到公网。Remote 默认拒绝 wildcard 和公网 IP 直绑，只允许 loopback、私网、link-local 和 Tailnet/共享地址。
+随后将 `--public-url` 配置为实际的 HTTPS 地址。AkironMux 不会自动修改 DNS、防火墙、Caddy 或 Tailnet；不要把 17322 的明文 HTTP 监听器直接暴露到公网。Remote 默认拒绝 wildcard 和公网 IP 直绑，只允许 loopback、私网、link-local 和 Tailnet/共享地址。确实需要容器或多网卡环境中的 wildcard 监听时，必须显式传入 `--allow-wildcard-bind`，并先通过主机防火墙、Tailnet ACL 或同机 TLS 反向代理限制 17322；该开关不会允许绑定具体公网 IP。
 
 ### defaults.toml
 

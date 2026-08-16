@@ -63,14 +63,24 @@ pub struct ScanContext {
 impl Db {
     pub fn query_session_usage_details(&self, app_type: &str, session_id: &str) -> Result<SessionUsageDetails, rusqlite::Error> {
         let mut stmt = self.conn().prepare(
-            "SELECT COALESCE(SUM(prompt_tokens), 0),
+            "WITH RECURSIVE family(id) AS (
+                 SELECT ?2
+                 UNION
+                 SELECT child.id
+                 FROM session_history child
+                 JOIN family ON child.parent_thread_id = family.id
+                 WHERE child.app_type = ?1
+             )
+             SELECT COALESCE(SUM(prompt_tokens), 0),
                     COALESCE(SUM(completion_tokens), 0),
                     COALESCE(SUM(cache_read_tokens), 0),
                     COALESCE(SUM(cache_creation_tokens), 0),
-                    COALESCE((SELECT model FROM usage_logs
-                              WHERE app_type = ?1 AND session_id = ?2
-                              ORDER BY timestamp DESC, id DESC LIMIT 1), '')
-             FROM usage_logs WHERE app_type = ?1 AND session_id = ?2",
+                    COALESCE((SELECT model FROM usage_logs latest
+                              WHERE latest.app_type = ?1
+                                AND latest.session_id IN (SELECT id FROM family)
+                              ORDER BY timestamp DESC, latest.id DESC LIMIT 1), '')
+             FROM usage_logs
+             WHERE app_type = ?1 AND session_id IN (SELECT id FROM family)",
         )?;
         stmt.query_row(params![app_type, session_id], |row| {
             Ok(SessionUsageDetails {
@@ -134,8 +144,17 @@ impl Db {
     /// Query token usage for a specific session (by session ID)
     pub fn query_session_tokens(&self, app_type: &str, session_id: &str) -> Result<(i64, i64), rusqlite::Error> {
         let mut stmt = self.conn().prepare(
-            "SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0)
-             FROM usage_logs WHERE app_type = ?1 AND session_id = ?2",
+            "WITH RECURSIVE family(id) AS (
+                 SELECT ?2
+                 UNION
+                 SELECT child.id
+                 FROM session_history child
+                 JOIN family ON child.parent_thread_id = family.id
+                 WHERE child.app_type = ?1
+             )
+             SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0)
+             FROM usage_logs
+             WHERE app_type = ?1 AND session_id IN (SELECT id FROM family)",
         )?;
         stmt.query_row(params![app_type, session_id], |row| Ok((row.get(0)?, row.get(1)?)))
     }

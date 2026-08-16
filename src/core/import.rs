@@ -11,7 +11,7 @@ const MAX_USAGE_TOKENS: i64 = 1_000_000_000_000;
 const CLAUDE_IMPORT_REVISION_KEY: &str = "claude_import_revision";
 const CLAUDE_IMPORT_REVISION: &str = "1";
 const CODEX_IMPORT_REVISION_KEY: &str = "codex_import_revision";
-const CODEX_IMPORT_REVISION: &str = "2";
+const CODEX_IMPORT_REVISION: &str = "3";
 
 use serde::Deserialize;
 
@@ -309,8 +309,8 @@ pub fn import_codex_sessions(db: &Db) -> Result<usize, anyhow::Error> {
 /// Invalidate Codex import state when rollout parsing semantics change.
 ///
 /// Session and usage scans have independent indexes, so both need to be
-/// cleared. Imported usage is also removed because older versions may have
-/// attributed fork usage to the parent session ID.
+/// cleared. Imported sessions and usage are rebuilt so rows created before
+/// parent_thread_id support cannot remain visible as root sessions.
 fn prepare_codex_import_revision(db: &Db, sessions_dir: &std::path::Path) -> Result<(), anyhow::Error> {
     if db.get_setting(CODEX_IMPORT_REVISION_KEY).as_deref() == Some(CODEX_IMPORT_REVISION) {
         return Ok(());
@@ -323,6 +323,7 @@ fn prepare_codex_import_revision(db: &Db, sessions_dir: &std::path::Path) -> Res
     };
 
     let transaction = db.conn().unchecked_transaction()?;
+    transaction.execute("DELETE FROM session_history WHERE app_type = 'codex'", [])?;
     transaction.execute("DELETE FROM usage_logs WHERE app_type = 'codex' AND data_source = 'import'", [])?;
     for path in codex_sync_paths {
         transaction.execute("DELETE FROM session_log_sync WHERE file_path = ?1", [path])?;
@@ -448,6 +449,7 @@ fn parse_codex_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, any
     let mut session_id = String::new();
     let mut cwd = String::new();
     let mut provider = String::new();
+    let mut parent_thread_id: Option<String> = None;
     let mut start_time = String::new();
     let mut end_time = String::new();
     let mut title: Option<String> = None;
@@ -481,6 +483,12 @@ fn parse_codex_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, any
                 session_id = canonical_id.to_string();
                 cwd = line.payload.get("cwd").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
                 provider = line.payload.get("model_provider").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+                parent_thread_id = line
+                    .payload
+                    .get("parent_thread_id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned);
                 if let Some(timestamp) = line.payload.get("timestamp").and_then(serde_json::Value::as_str) {
                     if let Some(normalized) = normalize_session_timestamp(timestamp) {
                         start_time = normalized;
@@ -517,6 +525,7 @@ fn parse_codex_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, any
         id: session_id,
         project_path: cwd.clone(),
         profile_id: if provider.is_empty() { None } else { Some(provider) },
+        parent_thread_id,
         mode: "direct".into(),
         start_time,
         end_time: if end_time.is_empty() { None } else { Some(end_time) },
@@ -713,6 +722,7 @@ fn parse_session_file(path: &PathBuf, projects_dir: &Path, project_paths: &HashM
         id: session_id,
         project_path: cwd,
         profile_id: None,
+        parent_thread_id: None,
         mode,
         start_time,
         end_time: None,
@@ -1115,10 +1125,10 @@ mod tests {
     }
 
     #[test]
-    fn codex_fork_uses_first_session_meta_as_canonical_id() {
+    fn codex_child_session_is_hidden_and_aggregated_into_parent() {
         let dir = tempfile::tempdir().unwrap();
         let parent_path = dir.path().join("rollout-parent-session.jsonl");
-        let fork_path = dir.path().join("rollout-fork-session.jsonl");
+        let child_path = dir.path().join("rollout-child-session.jsonl");
         std::fs::write(
             &parent_path,
             concat!(
@@ -1130,30 +1140,72 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            &fork_path,
+            &child_path,
             concat!(
-                r#"{"timestamp":"2026-07-27T08:00:00Z","type":"session_meta","payload":{"id":"fork-session","cwd":"/tmp/fork","model_provider":"fork-provider","forked_from_id":"parent-session"}}"#,
+                r#"{"timestamp":"2026-07-27T08:00:00Z","type":"session_meta","payload":{"id":"fork-session","cwd":"/tmp/fork","model_provider":"fork-provider","parent_thread_id":"parent-session"}}"#,
                 "\n",
                 r#"{"timestamp":"2026-07-23T08:00:00Z","type":"session_meta","payload":{"id":"parent-session","cwd":"/tmp/parent","model_provider":"parent-provider"}}"#,
                 "\n",
                 r#"{"timestamp":"2026-07-27T08:00:01Z","type":"turn_context","payload":{"model":"gpt-fork"}}"#,
                 "\n",
                 r#"{"timestamp":"2026-07-27T08:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":80,"cached_input_tokens":20,"output_tokens":10}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-07-27T08:00:03Z","type":"event_msg","payload":{"type":"agent_message","message":"Child result"}}"#,
                 "\n"
             ),
         )
         .unwrap();
 
         let parent = parse_codex_session_file(&parent_path).unwrap().unwrap();
-        let fork = parse_codex_session_file(&fork_path).unwrap().unwrap();
-        assert_eq!(fork.id, "fork-session");
-        assert_eq!(fork.project_path, "/tmp/fork");
-        assert_eq!(fork.profile_id.as_deref(), Some("fork-provider"));
+        let child = parse_codex_session_file(&child_path).unwrap().unwrap();
+        assert_eq!(child.id, "fork-session");
+        assert_eq!(child.parent_thread_id.as_deref(), Some("parent-session"));
+        assert_eq!(child.project_path, "/tmp/fork");
+        assert_eq!(child.profile_id.as_deref(), Some("fork-provider"));
 
-        let (sid, records) = parse_codex_usage_file(&fork_path, "fallback");
+        let (sid, records) = parse_codex_usage_file(&child_path, "fallback");
         assert_eq!(sid, "fork-session");
         assert_eq!(records.len(), 1);
         assert!(records[0].msg_id.starts_with("codex:fork-session:"));
+
+        let db = Db::open(&dir.path().join("ccswitch.db")).unwrap();
+        db.insert_session(&parent, "codex").unwrap();
+        db.insert_session(&child, "codex").unwrap();
+        db.insert_usage_batch("codex", &sid, &child_path, &records).unwrap();
+        let stored = db.query_sessions("codex", None, None, 10).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id, "parent-session");
+        assert_eq!(stored[0].message_count, 2);
+        let all_stored = db.query_all_sessions(None, 10).unwrap();
+        assert_eq!(all_stored.len(), 1);
+        assert_eq!(all_stored[0].1.id, "parent-session");
+
+        let usage = db.query_session_usage_details("codex", "parent-session").unwrap();
+        assert_eq!(usage.prompt_tokens, 60);
+        assert_eq!(usage.cache_read_tokens, 20);
+        assert_eq!(usage.completion_tokens, 10);
+        assert_eq!(db.query_session_tokens("codex", "parent-session").unwrap(), (60, 10));
+    }
+
+    #[test]
+    fn codex_fork_command_remains_an_independent_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent_path = dir.path().join("rollout-parent-session.jsonl");
+        let fork_path = dir.path().join("rollout-fork-session.jsonl");
+        std::fs::write(
+            &parent_path,
+            r#"{"timestamp":"2026-07-23T08:00:00Z","type":"session_meta","payload":{"id":"parent-session","cwd":"/tmp/parent"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &fork_path,
+            r#"{"timestamp":"2026-07-27T08:00:00Z","type":"session_meta","payload":{"id":"fork-session","cwd":"/tmp/fork","forked_from_id":"parent-session"}}"#,
+        )
+        .unwrap();
+
+        let parent = parse_codex_session_file(&parent_path).unwrap().unwrap();
+        let fork = parse_codex_session_file(&fork_path).unwrap().unwrap();
+        assert!(fork.parent_thread_id.is_none());
 
         let db = Db::open(&dir.path().join("ccswitch.db")).unwrap();
         db.insert_session(&parent, "codex").unwrap();
@@ -1193,6 +1245,15 @@ mod tests {
                 )
                 .unwrap();
         }
+        for (app_type, mode) in [("codex", "direct"), ("claude", "local")] {
+            db.conn()
+                .execute(
+                    "INSERT INTO session_history (id, app_type, project_path, mode, start_time)
+                     VALUES (?1, ?2, '/tmp/project', ?3, '2026-07-27 00:00:00')",
+                    rusqlite::params![format!("{app_type}-session"), app_type, mode],
+                )
+                .unwrap();
+        }
 
         prepare_codex_import_revision(&db, &sessions_dir).unwrap();
 
@@ -1206,6 +1267,11 @@ mod tests {
             statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
         };
         assert_eq!(sync_paths, vec![unrelated_path.to_string_lossy()]);
+        let session_apps = {
+            let mut statement = db.conn().prepare("SELECT app_type FROM session_history ORDER BY app_type").unwrap();
+            statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(session_apps, vec!["claude"]);
         assert_eq!(db.get_setting(CODEX_IMPORT_REVISION_KEY).as_deref(), Some(CODEX_IMPORT_REVISION));
 
         db.conn()
@@ -1283,6 +1349,7 @@ mod tests {
                 id: "session-1".into(),
                 project_path: "/tmp/project".into(),
                 profile_id: None,
+                parent_thread_id: None,
                 mode: "local".into(),
                 start_time: "2026-07-27 10:00:00".into(),
                 end_time: None,

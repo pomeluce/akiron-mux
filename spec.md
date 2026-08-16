@@ -96,7 +96,9 @@ The existing `session_history` rows index Claude and Codex native history files.
 Opening one in the WebUI creates a Managed session using the compatible native
 resume command. Native history is not the source of truth for live process state.
 The session service exposes these records to the WebUI and classifies them
-dynamically.
+dynamically. Codex internal child threads identified by `parent_thread_id` are
+hidden from native history and contribute their message and usage totals to the
+parent thread. Explicit `/fork` sessions remain independent history records.
 
 ### 2.4 Workspace organization
 

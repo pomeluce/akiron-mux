@@ -117,6 +117,7 @@ fn provider_scoped_profiles_and_app_scoped_sessions_do_not_collide() {
         id: "same-id".into(),
         project_path: format!("/tmp/{}", app),
         profile_id: None,
+        parent_thread_id: None,
         mode: if app == "codex" { "direct".into() } else { "local".into() },
         start_time: "2026-07-27 00:00:00".into(),
         end_time: None,

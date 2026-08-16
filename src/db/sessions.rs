@@ -8,6 +8,9 @@ pub struct SessionRecord {
     pub id: String,
     pub project_path: String,
     pub profile_id: Option<String>,
+    /// Set only for Codex internal child threads. Explicit `/fork` sessions
+    /// use different metadata and remain independent history entries.
+    pub parent_thread_id: Option<String>,
     pub mode: String,
     pub start_time: String,
     pub end_time: Option<String>,
@@ -26,24 +29,39 @@ pub struct SessionRecord {
 impl Db {
     pub fn query_session(&self, app_type: &str, id: &str) -> Result<Option<SessionRecord>, rusqlite::Error> {
         let mut stmt = self.conn().prepare(
-            "SELECT id, project_path, profile_id, mode, start_time, end_time,
-                    prompt_tokens, completion_tokens, message_count, title, size_bytes, file_mtime
-             FROM session_history WHERE app_type = ?1 AND id = ?2",
+            "WITH RECURSIVE family(id) AS (
+                 SELECT ?2
+                 UNION
+                 SELECT child.id
+                 FROM session_history child
+                 JOIN family ON child.parent_thread_id = family.id
+                 WHERE child.app_type = ?1
+             )
+             SELECT root.id, root.project_path, root.profile_id, root.parent_thread_id,
+                    root.mode, root.start_time, root.end_time,
+                    root.prompt_tokens, root.completion_tokens,
+                    COALESCE((SELECT SUM(member.message_count)
+                              FROM session_history member
+                              JOIN family ON family.id = member.id
+                              WHERE member.app_type = ?1), root.message_count),
+                    root.title, root.size_bytes, root.file_mtime
+             FROM session_history root WHERE root.app_type = ?1 AND root.id = ?2",
         )?;
         let mut rows = stmt.query_map(params![app_type, id], |row| {
             Ok(SessionRecord {
                 id: row.get(0)?,
                 project_path: row.get(1)?,
                 profile_id: row.get(2)?,
-                mode: row.get(3)?,
-                start_time: row.get(4)?,
-                end_time: row.get(5)?,
-                prompt_tokens: row.get(6)?,
-                completion_tokens: row.get(7)?,
-                message_count: row.get(8)?,
-                title: row.get(9)?,
-                size_bytes: row.get::<_, i64>(10).unwrap_or(0),
-                file_mtime: row.get::<_, String>(11).unwrap_or_default(),
+                parent_thread_id: row.get(3)?,
+                mode: row.get(4)?,
+                start_time: row.get(5)?,
+                end_time: row.get(6)?,
+                prompt_tokens: row.get(7)?,
+                completion_tokens: row.get(8)?,
+                message_count: row.get(9)?,
+                title: row.get(10)?,
+                size_bytes: row.get::<_, i64>(11).unwrap_or(0),
+                file_mtime: row.get::<_, String>(12).unwrap_or_default(),
                 search_text: String::new(),
             })
         })?;
@@ -52,15 +70,16 @@ impl Db {
 
     pub fn insert_session(&self, s: &SessionRecord, app_type: &str) -> Result<(), rusqlite::Error> {
         self.conn().execute(
-            "INSERT INTO session_history (id, app_type, project_path, profile_id, mode, start_time, end_time, prompt_tokens, completion_tokens, message_count, title, size_bytes, file_mtime)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "INSERT INTO session_history (id, app_type, project_path, profile_id, parent_thread_id, mode, start_time, end_time, prompt_tokens, completion_tokens, message_count, title, size_bytes, file_mtime)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id, app_type) DO UPDATE SET
                 project_path=excluded.project_path, profile_id=excluded.profile_id,
+                parent_thread_id=excluded.parent_thread_id,
                 mode=excluded.mode, start_time=excluded.start_time, end_time=excluded.end_time,
                 prompt_tokens=excluded.prompt_tokens, completion_tokens=excluded.completion_tokens,
                 message_count=excluded.message_count, title=excluded.title,
                 size_bytes=excluded.size_bytes, file_mtime=excluded.file_mtime",
-            params![s.id, app_type, s.project_path, s.profile_id, s.mode, s.start_time, s.end_time, s.prompt_tokens, s.completion_tokens, s.message_count, s.title, s.size_bytes, s.file_mtime],
+            params![s.id, app_type, s.project_path, s.profile_id, s.parent_thread_id, s.mode, s.start_time, s.end_time, s.prompt_tokens, s.completion_tokens, s.message_count, s.title, s.size_bytes, s.file_mtime],
         )?;
         Ok(())
     }
@@ -119,8 +138,30 @@ impl Db {
 
     pub fn query_sessions(&self, app_type: &str, project: Option<&str>, search: Option<&str>, limit: usize) -> Result<Vec<SessionRecord>, rusqlite::Error> {
         let mut sql = String::from(
-            "SELECT id, project_path, profile_id, mode, start_time, end_time, prompt_tokens, completion_tokens, message_count, title, size_bytes, file_mtime
-             FROM session_history WHERE app_type = ?1",
+            "WITH RECURSIVE session_tree(root_id, id) AS (
+                 SELECT id, id FROM session_history
+                 WHERE app_type = ?1 AND COALESCE(parent_thread_id, '') = ''
+                 UNION
+                 SELECT tree.root_id, child.id
+                 FROM session_tree tree
+                 JOIN session_history child
+                   ON child.app_type = ?1 AND child.parent_thread_id = tree.id
+             ),
+             message_totals(root_id, message_count) AS (
+                 SELECT tree.root_id, SUM(session.message_count)
+                 FROM session_tree tree
+                 JOIN session_history session
+                   ON session.app_type = ?1 AND session.id = tree.id
+                 GROUP BY tree.root_id
+             )
+             SELECT root.id, root.project_path, root.profile_id, root.parent_thread_id,
+                    root.mode, root.start_time, root.end_time,
+                    root.prompt_tokens, root.completion_tokens,
+                    COALESCE(totals.message_count, root.message_count),
+                    root.title, root.size_bytes, root.file_mtime
+             FROM session_history root
+             LEFT JOIN message_totals totals ON totals.root_id = root.id
+             WHERE root.app_type = ?1 AND COALESCE(root.parent_thread_id, '') = ''",
         );
         let mut param_values: Vec<String> = vec![app_type.to_string()];
 
@@ -147,15 +188,16 @@ impl Db {
                 id: row.get(0)?,
                 project_path: row.get(1)?,
                 profile_id: row.get(2)?,
-                mode: row.get(3)?,
-                start_time: row.get(4)?,
-                end_time: row.get(5)?,
-                prompt_tokens: row.get(6)?,
-                completion_tokens: row.get(7)?,
-                message_count: row.get(8)?,
-                title: row.get(9)?,
-                size_bytes: row.get::<_, i64>(10).unwrap_or(0),
-                file_mtime: row.get::<_, String>(11).unwrap_or_default(),
+                parent_thread_id: row.get(3)?,
+                mode: row.get(4)?,
+                start_time: row.get(5)?,
+                end_time: row.get(6)?,
+                prompt_tokens: row.get(7)?,
+                completion_tokens: row.get(8)?,
+                message_count: row.get(9)?,
+                title: row.get(10)?,
+                size_bytes: row.get::<_, i64>(11).unwrap_or(0),
+                file_mtime: row.get::<_, String>(12).unwrap_or_default(),
                 search_text: String::new(), // populated below
             })
         })?;
@@ -173,16 +215,39 @@ impl Db {
     pub fn query_all_sessions(&self, search: Option<&str>, limit: usize) -> Result<Vec<(String, SessionRecord)>, rusqlite::Error> {
         let pattern = search.map(|value| format!("%{}%", value));
         let mut stmt = self.conn().prepare(
-            "SELECT id, app_type, project_path, profile_id, mode, start_time, end_time,
-                    prompt_tokens, completion_tokens, message_count, title, size_bytes, file_mtime
-             FROM session_history
-             WHERE (?1 IS NULL OR title LIKE ?1 OR project_path LIKE ?1 OR id LIKE ?1)
-             ORDER BY file_mtime DESC, start_time DESC
+            "WITH RECURSIVE session_tree(root_app, root_id, app_type, id) AS (
+                 SELECT app_type, id, app_type, id
+                 FROM session_history
+                 WHERE COALESCE(parent_thread_id, '') = ''
+                 UNION
+                 SELECT tree.root_app, tree.root_id, child.app_type, child.id
+                 FROM session_tree tree
+                 JOIN session_history child
+                   ON child.app_type = tree.app_type AND child.parent_thread_id = tree.id
+             ),
+             message_totals(root_app, root_id, message_count) AS (
+                 SELECT tree.root_app, tree.root_id, SUM(session.message_count)
+                 FROM session_tree tree
+                 JOIN session_history session
+                   ON session.app_type = tree.app_type AND session.id = tree.id
+                 GROUP BY tree.root_app, tree.root_id
+             )
+             SELECT root.id, root.app_type, root.project_path, root.profile_id,
+                    root.parent_thread_id, root.mode, root.start_time, root.end_time,
+                    root.prompt_tokens, root.completion_tokens,
+                    COALESCE(totals.message_count, root.message_count),
+                    root.title, root.size_bytes, root.file_mtime
+             FROM session_history root
+             LEFT JOIN message_totals totals
+               ON totals.root_app = root.app_type AND totals.root_id = root.id
+             WHERE COALESCE(root.parent_thread_id, '') = ''
+               AND (?1 IS NULL OR root.title LIKE ?1 OR root.project_path LIKE ?1 OR root.id LIKE ?1)
+             ORDER BY root.file_mtime DESC, root.start_time DESC
              LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], |row| {
             let app_type: String = row.get(1)?;
-            let title: Option<String> = row.get(10)?;
+            let title: Option<String> = row.get(11)?;
             let project_path: String = row.get(2)?;
             Ok((
                 app_type,
@@ -190,15 +255,16 @@ impl Db {
                     id: row.get(0)?,
                     project_path: project_path.clone(),
                     profile_id: row.get(3)?,
-                    mode: row.get(4)?,
-                    start_time: row.get(5)?,
-                    end_time: row.get(6)?,
-                    prompt_tokens: row.get(7)?,
-                    completion_tokens: row.get(8)?,
-                    message_count: row.get(9)?,
+                    parent_thread_id: row.get(4)?,
+                    mode: row.get(5)?,
+                    start_time: row.get(6)?,
+                    end_time: row.get(7)?,
+                    prompt_tokens: row.get(8)?,
+                    completion_tokens: row.get(9)?,
+                    message_count: row.get(10)?,
                     title,
-                    size_bytes: row.get::<_, i64>(11).unwrap_or(0),
-                    file_mtime: row.get::<_, String>(12).unwrap_or_default(),
+                    size_bytes: row.get::<_, i64>(12).unwrap_or(0),
+                    file_mtime: row.get::<_, String>(13).unwrap_or_default(),
                     search_text: String::new(),
                 },
             ))

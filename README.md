@@ -276,7 +276,7 @@ akmux man                          # 输出 roff 格式 man page
 
 首次启动 `akmux` 时会先显示终端进度条导入 Claude Code 历史会话数据（从 `~/.claude/projects/` 扫描 JSONL 文件）。导入完成后自动进入 TUI。后续启动跳过导入直接进入。
 
-用量数据在进入 TUI 后通过后台异步扫描。Claude 数据来自 `~/.claude/projects`，Codex 数据来自 `~/.codex/sessions`；会话与用量面板约每秒检测变化并实时刷新。Codex rename 后的会话标题从 `~/.codex/session_index.jsonl` 同步。
+用量数据在进入 TUI 后通过后台异步扫描。Claude 数据来自 `~/.claude/projects`，Codex 数据来自 `~/.codex/sessions`；会话与用量面板约每秒检测变化并实时刷新。Codex rename 后的会话标题从 `~/.codex/session_index.jsonl` 同步。带 `parent_thread_id` 的 Codex 内部子会话不会单独显示，其消息数和用量会归并到父会话；通过 `/fork` 创建的会话仍作为独立会话显示。
 
 ### 远程后端部署
 

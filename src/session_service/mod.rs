@@ -1783,6 +1783,7 @@ mod tests {
             id: id.into(),
             project_path: path.display().to_string(),
             profile_id: None,
+            parent_thread_id: None,
             mode: "local".into(),
             start_time: file_mtime.into(),
             end_time: None,
@@ -1955,6 +1956,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gui_workspace_history_hides_codex_children_and_aggregates_messages() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let general = root.path().join("general");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&general).unwrap();
+
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        let mut parent = history_record("parent-session", &project, "2026-08-15 10:00:00", 2);
+        parent.mode = "direct".into();
+        let mut child = history_record("child-session", &project, "2026-08-15 10:01:00", 3);
+        child.mode = "direct".into();
+        child.parent_thread_id = Some(parent.id.clone());
+        db.insert_session(&parent, "codex").unwrap();
+        db.insert_session(&child, "codex").unwrap();
+
+        let mut workspace = WorkspaceState {
+            general_root: general.display().to_string(),
+            projects: vec![Project {
+                id: "project".into(),
+                name: "Project".into(),
+                path: project.display().to_string(),
+                pinned: false,
+                sort_order: 0,
+            }],
+            other_directories: Vec::new(),
+            project_sort: SortMode::Recent,
+            general_sort: SortMode::Recent,
+            other_sort: SortMode::Recent,
+            directory_sort: std::collections::HashMap::new(),
+            session_order: std::collections::HashMap::new(),
+        };
+
+        let response = workspace_response(&db, &mut workspace, None).unwrap();
+        assert_eq!(response.projects[0].history.len(), 1);
+        assert_eq!(response.projects[0].history[0].id, "parent-session");
+        assert_eq!(response.projects[0].history[0].message_count, 5);
+    }
+
     #[cfg(unix)]
     #[test]
     fn classifies_sessions_opened_through_a_workspace_symlink() {
@@ -1974,6 +2015,7 @@ mod tests {
                 id: "claude-through-symlink".into(),
                 project_path: project_alias.display().to_string(),
                 profile_id: None,
+                parent_thread_id: None,
                 mode: "local".into(),
                 start_time: "2026-08-15 10:00:00".into(),
                 end_time: None,

@@ -2,7 +2,7 @@ use anyhow::Context;
 use rusqlite::Connection;
 
 /// Current schema version. Increment each time we add a migration step.
-pub(crate) const CURRENT_USER_VERSION: i32 = 8;
+pub(crate) const CURRENT_USER_VERSION: i32 = 9;
 
 /// Apply schema migrations on the given connection.
 pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), anyhow::Error> {
@@ -41,7 +41,23 @@ pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), anyhow::Error> {
     if version < 8 {
         migrate_v8(conn).context("migrate v8")?;
     }
+    if version < 9 {
+        migrate_v9(conn).context("migrate v9")?;
+    }
 
+    Ok(())
+}
+
+fn migrate_v9(conn: &Connection) -> Result<(), anyhow::Error> {
+    let transaction = conn.unchecked_transaction()?;
+    transaction.execute_batch(
+        "ALTER TABLE session_history ADD COLUMN parent_thread_id TEXT;
+         CREATE INDEX idx_session_parent_thread
+             ON session_history(app_type, parent_thread_id);
+         PRAGMA user_version = 9;",
+    )?;
+    transaction.commit()?;
+    tracing::info!("Migration v9 complete: native child-session relationships added");
     Ok(())
 }
 

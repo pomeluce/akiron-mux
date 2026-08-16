@@ -93,7 +93,12 @@ pub fn is_safe_bind(ip: IpAddr) -> bool {
             let octets = ip.octets();
             ip.is_loopback() || ip.is_private() || ip.is_link_local() || (octets[0] == 100 && (64..=127).contains(&octets[1]))
         }
-        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
+        IpAddr::V6(ip) => {
+            let octets = ip.octets();
+            let unique_local = octets[0] & 0xfe == 0xfc;
+            let unicast_link_local = octets[0] == 0xfe && octets[1] & 0xc0 == 0x80;
+            ip.is_loopback() || unique_local || unicast_link_local
+        }
     }
 }
 
@@ -294,11 +299,8 @@ impl RemoteSecurity {
         self.rate_limits.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(key);
     }
 
-    pub fn authentication_rate_limit_allows(&self, source: &str, token_id: &str) -> bool {
-        // Reject only when both dimensions identify abusive traffic. A reverse proxy can
-        // legitimately collapse many clients into one source address, so a source-only
-        // rejection must never lock out an otherwise healthy device credential.
-        self.rate_limit_allows(&format!("auth-source:{source}")) || self.rate_limit_allows(&format!("auth-token:{token_id}"))
+    pub fn authentication_failure_rate_limit_allows(&self, source: &str, token_id: &str) -> bool {
+        self.rate_limit_allows(&format!("auth-source:{source}")) && self.rate_limit_allows(&format!("auth-token:{token_id}"))
     }
 
     pub fn record_authentication_failure(&self, source: &str, token_id: &str) {
@@ -309,25 +311,31 @@ impl RemoteSecurity {
         self.record_auth_failure(&format!("auth-token:{token_id}"));
     }
 
-    pub fn clear_authentication_failures(&self, source: &str, token_id: &str) {
-        self.clear_auth_failures(&format!("auth-source:{source}"));
+    pub fn clear_authentication_token_failures(&self, token_id: &str) {
         self.clear_auth_failures(&format!("auth-token:{token_id}"));
     }
 
-    pub fn pairing_rate_limit_allows(&self, source: &str, code: &str) -> bool {
-        let pairing_id = self.pairing_id_for_code(code).unwrap_or_else(|| "unknown".to_owned());
-        self.rate_limit_allows(&format!("pair-source:{source}")) || self.rate_limit_allows(&format!("pair-id:{pairing_id}"))
+    pub fn pairing_failure_rate_limit_allows(&self, source: &str, code: &str) -> bool {
+        let source_allowed = self.rate_limit_allows(&format!("pair-source:{source}"));
+        match self.pairing_id_for_code(code) {
+            Some(pairing_id) => source_allowed && self.rate_limit_allows(&format!("pair-id:{pairing_id}")),
+            None => source_allowed,
+        }
     }
 
     pub fn record_pairing_failure(&self, source: &str, code: &str) {
         self.record_rate_failure(&format!("pair-source:{source}"), 10);
-        let pairing_id = self.pairing_id_for_code(code).unwrap_or_else(|| "unknown".to_owned());
-        self.record_auth_failure(&format!("pair-id:{pairing_id}"));
+        if let Some(pairing_id) = self.pairing_id_for_code(code) {
+            self.record_auth_failure(&format!("pair-id:{pairing_id}"));
+        }
     }
 
-    pub fn clear_pairing_failures(&self, source: &str, pairing_id: &str) {
-        self.clear_auth_failures(&format!("pair-source:{source}"));
+    pub fn clear_pairing_id_failures(&self, pairing_id: &str) {
         self.clear_auth_failures(&format!("pair-id:{pairing_id}"));
+    }
+
+    pub fn pairing_code_is_pending(&self, code: &str) -> bool {
+        self.pairing_id_for_code(code).is_some()
     }
 
     fn pairing_id_for_code(&self, code: &str) -> Option<String> {
@@ -775,13 +783,13 @@ mod tests {
     #[test]
     fn authentication_failures_are_limited_by_source_even_when_token_ids_change() {
         let security = RemoteSecurity::for_tests();
-        assert!(security.authentication_rate_limit_allows("192.0.2.1", "token-one"));
+        assert!(security.authentication_failure_rate_limit_allows("192.0.2.1", "token-one"));
         for index in 0..20 {
             security.record_authentication_failure("192.0.2.1", &format!("token-{index}"));
         }
-        assert!(!security.authentication_rate_limit_allows("192.0.2.1", "token-19"));
-        assert!(security.authentication_rate_limit_allows("192.0.2.1", "healthy-token"));
-        assert!(security.authentication_rate_limit_allows("192.0.2.2", "token-two"));
+        assert!(!security.authentication_failure_rate_limit_allows("192.0.2.1", "token-19"));
+        assert!(!security.authentication_failure_rate_limit_allows("192.0.2.1", "rotated-token"));
+        assert!(security.authentication_failure_rate_limit_allows("192.0.2.2", "token-two"));
     }
 
     #[test]
@@ -794,14 +802,14 @@ mod tests {
     #[test]
     fn pairing_failures_are_limited_by_source_even_when_codes_change() {
         let security = RemoteSecurity::for_tests();
-        assert!(security.pairing_rate_limit_allows("192.0.2.1", "first-invalid-code"));
+        assert!(security.pairing_failure_rate_limit_allows("192.0.2.1", "first-invalid-code"));
         for index in 0..10 {
             security.record_pairing_failure("192.0.2.1", &format!("invalid-code-{index}"));
         }
-        assert!(!security.pairing_rate_limit_allows("192.0.2.1", "another-invalid-code"));
+        assert!(!security.pairing_failure_rate_limit_allows("192.0.2.1", "another-invalid-code"));
         let offer = security.create_pairing("https://backend.example.com", "AkironMux").unwrap();
-        assert!(security.pairing_rate_limit_allows("192.0.2.1", &offer.code));
-        assert!(security.pairing_rate_limit_allows("192.0.2.2", "another-invalid-code"));
+        assert!(security.pairing_code_is_pending(&offer.code));
+        assert!(security.pairing_failure_rate_limit_allows("192.0.2.2", "another-invalid-code"));
     }
 
     #[test]

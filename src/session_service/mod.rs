@@ -475,6 +475,7 @@ fn remote_router(state: Arc<AppState>, public_url: Url) -> Router {
     api_routes()
         .route("/healthz", get(|| async { Json(ReachabilityResponse { status: "ok" }) }))
         .route("/api/pair", post(pair_device))
+        .route("/api/device", delete(revoke_current_device))
         .with_state(state.clone())
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(middleware::from_fn_with_state((state, public_url), validate_remote_request))
@@ -617,21 +618,21 @@ async fn validate_remote_request(State((state, public_url)): State<(Arc<AppState
         let Some(security) = state.remote_security.as_ref() else {
             return remote_error(StatusCode::INTERNAL_SERVER_ERROR, "Remote security is unavailable");
         };
-        if !security.authentication_rate_limit_allows(&source, token_id) {
-            return remote_cors(remote_error(StatusCode::TOO_MANY_REQUESTS, "Authentication is temporarily rate limited"), origin.as_deref());
-        }
         let device = token.and_then(|token| {
             let db = state.db.lock().ok()?;
             security.authenticate(&db, token).ok().flatten()
         });
         let Some(device) = device else {
+            if !security.authentication_failure_rate_limit_allows(&source, token_id) {
+                return remote_cors(remote_error(StatusCode::TOO_MANY_REQUESTS, "Authentication is temporarily rate limited"), origin.as_deref());
+            }
             security.record_authentication_failure(&source, token_id);
             if let Ok(db) = state.db.lock() {
                 let _ = db.record_backend_audit("auth.failed", (token_id != "unknown").then_some(token_id), Some(&source), remote::now_ms());
             }
             return remote_cors(remote_error(StatusCode::UNAUTHORIZED, "A valid device credential is required"), origin.as_deref());
         };
-        security.clear_authentication_failures(&source, token_id);
+        security.clear_authentication_token_failures(token_id);
         if let Ok(db) = state.db.lock() {
             let _ = db.record_backend_last_use_audit(&device.token_id, Some(&source), remote::now_ms());
         }
@@ -833,6 +834,15 @@ async fn revoke_device(State(state): State<Arc<AppState>>, Path(id): Path<String
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn revoke_current_device(State(state): State<Arc<AppState>>, Extension(device): Extension<RequestDevice>) -> Result<StatusCode, ApiError> {
+    let security = state.remote_security.as_ref().ok_or_else(|| ApiError::internal("Remote security is unavailable"))?;
+    let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
+    if !security.revoke_device(&db, &device.0.token_id).map_err(|error| ApiError::internal(error.to_string()))? {
+        return Err(ApiError::not_found(anyhow::anyhow!("Active device not found")));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn pair_device(
     State(state): State<Arc<AppState>>,
     source: Option<axum::extract::ConnectInfo<SocketAddr>>,
@@ -840,15 +850,15 @@ async fn pair_device(
 ) -> Result<Json<PairResponse>, ApiError> {
     let security = state.remote_security.as_ref().ok_or_else(|| ApiError::internal("Remote security is unavailable"))?;
     let source = source.map_or_else(|| "unknown".into(), |source| source.0.ip().to_string());
-    if !security.pairing_rate_limit_allows(&source, &request.code) {
-        return Err(ApiError::too_many_requests("Pairing is temporarily rate limited"));
-    }
     let claim = match security.begin_pairing_claim(&request.code, &request.device_name, &source) {
         Ok(claim) => {
-            security.clear_pairing_failures(&source, claim.id());
+            security.clear_pairing_id_failures(claim.id());
             claim
         }
         Err(error) => {
+            if !security.pairing_failure_rate_limit_allows(&source, &request.code) {
+                return Err(ApiError::too_many_requests("Pairing is temporarily rate limited"));
+            }
             security.record_pairing_failure(&source, &request.code);
             return Err(ApiError::unauthorized(error.to_string()));
         }

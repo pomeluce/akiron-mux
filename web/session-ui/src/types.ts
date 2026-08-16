@@ -4,6 +4,30 @@ export type AttentionKind = 'input' | 'exited';
 export type SortMode = 'priority' | 'recent' | 'manual';
 export type ThemeMode = 'light' | 'dark' | 'system';
 export type Locale = 'en' | 'zh-CN';
+export type BackendKind = 'local' | 'remote';
+
+export interface BackendProfile {
+  id: string;
+  name: string;
+  kind: BackendKind;
+  address: string;
+  instanceId: string | null;
+  hasCredential: boolean;
+  requiresAuth: boolean;
+  capabilities: string[];
+}
+
+export interface BackendProfileState {
+  profiles: BackendProfile[];
+  activeProfileId: string;
+  revocationWarning?: string;
+}
+
+export interface BackendHealth {
+  instanceId: string;
+  apiProtocol: string;
+  capabilities: string[];
+}
 
 export interface SessionInfo {
   id: string;

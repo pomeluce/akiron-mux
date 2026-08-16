@@ -5,6 +5,8 @@ const config = JSON.parse(fs.readFileSync(new URL('../src-tauri/tauri.conf.json'
 const capability = JSON.parse(fs.readFileSync(new URL('../src-tauri/capabilities/main-window.json', import.meta.url), 'utf8'));
 const cargoManifest = fs.readFileSync(new URL('../src-tauri/Cargo.toml', import.meta.url), 'utf8');
 const desktopLibrary = fs.readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+const backendHook = fs.readFileSync(new URL('../src/features/backends/use-backends.ts', import.meta.url), 'utf8');
+const settingsDialog = fs.readFileSync(new URL('../src/features/preferences/settings-dialog.tsx', import.meta.url), 'utf8');
 const window = config.app.windows.find(candidate => candidate.label === 'main');
 const nsis = config.bundle.windows.nsis;
 
@@ -17,7 +19,11 @@ assert.match(desktopLibrary, /window_vibrancy::apply_mica\([^,]+, Some\(dark\)\)
 assert.match(desktopLibrary, /apply_mica[\s\S]*is_err\(\)[\s\S]*window_vibrancy::apply_acrylic/, 'Windows 10 must fall back to a theme-aware Acrylic tint when Mica is unavailable');
 assert.match(desktopLibrary, /material_transparency[\s\S]*tint_alpha/, 'Windows 10 Acrylic tint must follow material transparency');
 assert.match(desktopLibrary, /sync_native_backdrop/, 'the desktop shell must expose native backdrop theme synchronization');
-assert.match(desktopLibrary, /generate_handler!\[sync_native_backdrop\]/, 'native backdrop synchronization must be registered as a Tauri command');
+assert.match(desktopLibrary, /generate_handler!\[\s*sync_native_backdrop(?:,|\s*\])/, 'native backdrop synchronization must be registered as a Tauri command');
+assert.match(desktopLibrary, /backend::list_backend_profiles/, 'desktop backend profile commands must be registered with Tauri');
+assert.match(desktopLibrary, /backend::pair_backend_profile/, 'device pairing must be handled by the native desktop layer');
+assert.doesNotMatch(backendHook, /\btoken\b/i, 'long-lived device tokens must not cross the WebView backend hook');
+assert.doesNotMatch(settingsDialog, /\btoken\b/i, 'long-lived device tokens must not enter WebView settings state');
 assert.ok(capability.permissions.includes('core:window:allow-close'));
 assert.ok(capability.permissions.includes('core:window:allow-minimize'));
 assert.ok(capability.permissions.includes('core:window:allow-toggle-maximize'));

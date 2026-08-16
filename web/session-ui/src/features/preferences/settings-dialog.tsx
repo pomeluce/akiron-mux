@@ -1,16 +1,20 @@
-import { Folder, Languages, MonitorCog, Palette } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { ArrowDown, ArrowUp, Folder, Languages, MonitorCog, Palette, Plus, Server, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { InlineErrorState } from '@/shared/components/inline-error-state';
 import { isServiceUnavailable } from '@/shared/lib/api';
 import { Button } from '@/shared/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/shared/ui/dialog';
-import type { ClientPreferences, Locale, ThemeMode } from '@/types';
+import type { BackendProfile, ClientPreferences, Locale, ThemeMode } from '@/types';
+import type { BackendManager } from '@/features/backends/use-backends';
+import { desktopShell } from '@/features/desktop/desktop-shell';
 import type { MessageKey } from '@/shared/lib/i18n';
 import { DirectoryDialog } from '@/features/workspaces/directory-dialog';
 
 interface SettingsDialogProps {
   open: boolean;
   preferences: ClientPreferences;
+  backends: BackendManager;
+  workspaceEnabled: boolean;
   generalRoot: string;
   t: (key: MessageKey) => string;
   onOpenChange: (open: boolean) => void;
@@ -23,13 +27,71 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<'backend' | 'save' | null>(null);
   const [saving, setSaving] = useState(false);
+  const [backendDraft, setBackendDraft] = useState<BackendProfile>(props.backends.active);
+  const backendPairingRef = useRef<HTMLInputElement>(null);
+  const [backendMessage, setBackendMessage] = useState('');
+  const [pendingIdentity, setPendingIdentity] = useState<{ instanceId: string; pairing: boolean } | null>(null);
 
   useEffect(() => {
     if (!props.open) return;
     setDraft(props.preferences);
     setRoot(props.generalRoot);
     setError(null);
-  }, [props.open, props.preferences, props.generalRoot]);
+    setBackendDraft(props.backends.active);
+    if (backendPairingRef.current) backendPairingRef.current.value = '';
+    setBackendMessage('');
+    setPendingIdentity(null);
+  }, [props.open]);
+
+  const testBackend = async () => {
+    try {
+      const health = await props.backends.test(backendDraft);
+      setBackendMessage(`${props.t('connectionPassed')} · ${health.apiProtocol}`);
+    } catch {
+      setBackendMessage(props.t('backendUnavailableHint'));
+    }
+  };
+
+  const saveBackend = async () => {
+    const pairingLink = backendPairingRef.current?.value.trim() || '';
+    const usePairing = backendDraft.kind === 'remote' && (Boolean(pairingLink) || pendingIdentity?.pairing === true);
+    try {
+      const next = usePairing
+        ? await props.backends.pair(backendDraft, pairingLink, pendingIdentity?.instanceId)
+        : await props.backends.save(backendDraft, pendingIdentity?.instanceId);
+      const saved = next.profiles.find(profile => profile.id === backendDraft.id);
+      if (!saved) throw new Error('Saved backend profile is missing');
+      setBackendDraft(saved);
+      if (backendPairingRef.current) backendPairingRef.current.value = '';
+      setPendingIdentity(null);
+      setBackendMessage(props.t('connectionPassed'));
+    } catch (cause) {
+      const identity = String(cause).match(/BACKEND_IDENTITY_CHANGED:([^\s]+)/)?.[1];
+      if (identity) {
+        setPendingIdentity({ instanceId: identity, pairing: usePairing });
+        if (backendPairingRef.current) backendPairingRef.current.value = '';
+        setBackendMessage(props.t('identityChanged'));
+        return;
+      }
+      setBackendMessage(props.t('backendUnavailableHint'));
+    }
+  };
+
+  const newBackend = () => {
+    setBackendDraft({
+      id: crypto.randomUUID(),
+      name: props.t('remoteBackend'),
+      kind: 'remote',
+      address: 'https://',
+      instanceId: null,
+      hasCredential: false,
+      requiresAuth: true,
+      capabilities: [],
+    });
+    if (backendPairingRef.current) backendPairingRef.current.value = '';
+    setBackendMessage('');
+    setPendingIdentity(null);
+  };
 
   const submit = async () => {
     setSaving(true);
@@ -115,17 +177,130 @@ export function SettingsDialog(props: SettingsDialogProps) {
               </SettingsRow>
             </SettingsSection>
             <SettingsSection icon={<MonitorCog />} title={props.t('workspaceSettings')}>
+              {desktopShell ? (
+                <>
+              {props.backends.state.profiles.length > 0 && (
+                <SettingsRow label={props.t('backends')} stacked>
+                  <div className="flex flex-wrap gap-2">
+                    {props.backends.state.profiles.map(profile => (
+                      <Button
+                        key={profile.id}
+                        size="sm"
+                        variant={profile.id === backendDraft.id ? 'secondary' : 'outline'}
+                        onClick={() => {
+                          setBackendDraft(profile);
+                          if (backendPairingRef.current) backendPairingRef.current.value = '';
+                          setBackendMessage('');
+                          setPendingIdentity(null);
+                        }}
+                      >
+                        <Server className="size-3.5" /> {profile.name}
+                      </Button>
+                    ))}
+                    <Button size="sm" variant="outline" onClick={newBackend}>
+                      <Plus className="size-3.5" /> {props.t('addBackend')}
+                    </Button>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label="Move backend up"
+                      onClick={() => {
+                        const ids = props.backends.state.profiles.map(profile => profile.id);
+                        const index = ids.indexOf(backendDraft.id);
+                        if (index > 0) [ids[index - 1], ids[index]] = [ids[index], ids[index - 1]];
+                        void props.backends.reorder(ids);
+                      }}
+                    >
+                      <ArrowUp />
+                    </Button>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label="Move backend down"
+                      onClick={() => {
+                        const ids = props.backends.state.profiles.map(profile => profile.id);
+                        const index = ids.indexOf(backendDraft.id);
+                        if (index >= 0 && index < ids.length - 1) [ids[index], ids[index + 1]] = [ids[index + 1], ids[index]];
+                        void props.backends.reorder(ids);
+                      }}
+                    >
+                      <ArrowDown />
+                    </Button>
+                  </div>
+                </SettingsRow>
+              )}
+              <SettingsRow label={props.t('backendName')} stacked>
+                <input
+                  className="text-field"
+                  value={backendDraft.name}
+                  disabled={backendDraft.id === 'local'}
+                  onChange={event => setBackendDraft(value => ({ ...value, name: event.target.value }))}
+                />
+              </SettingsRow>
+              <SettingsRow label={props.t('backends')} baseline>
+                <div className="segmented-control segmented-control-language">
+                  {(['local', 'remote'] as const).map(kind => (
+                    <button key={kind} disabled data-active={backendDraft.kind === kind}>
+                      {props.t(kind === 'local' ? 'localBackend' : 'remoteBackend')}
+                    </button>
+                  ))}
+                </div>
+              </SettingsRow>
               <SettingsRow label={props.t('backendAddress')} hint={props.t('backendHint')} stacked>
                 <input
                   className="text-field"
                   name="akmux-backend-address"
                   autoComplete="off"
                   spellCheck={false}
-                  value={draft.backendAddress}
-                  onChange={event => setDraft(value => ({ ...value, backendAddress: event.target.value }))}
+                  value={backendDraft.address}
+                  onChange={event => setBackendDraft(value => ({ ...value, address: event.target.value }))}
                 />
               </SettingsRow>
-              <SettingsRow label={props.t('generalRoot')} stacked>
+              {backendDraft.kind === 'remote' && (
+                <SettingsRow label={props.t('backendPairingLink')} hint={props.t('backendPairingHint')} stacked>
+                  <input
+                    className="text-field"
+                    ref={backendPairingRef}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  {backendDraft.requiresAuth && <span className="text-xs text-destructive">{props.t('backendReauthRequired')}</span>}
+                </SettingsRow>
+              )}
+              <SettingsRow label={props.t('testConnection')} stacked>
+                <div className="flex items-center gap-2">
+                  <Button variant="outline" onClick={() => void testBackend()}>{props.t('testConnection')}</Button>
+                  <Button onClick={() => void saveBackend()}>{pendingIdentity ? props.t('confirm') : props.t('save')}</Button>
+                  {backendDraft.id !== 'local' && props.backends.state.profiles.some(profile => profile.id === backendDraft.id) && (
+                    <Button
+                      variant="destructive"
+                      size="icon"
+                      aria-label={props.t('remove')}
+                      onClick={() => void props.backends.remove(backendDraft.id).then(next => {
+                        setBackendDraft(next.profiles.find(profile => profile.id === next.activeProfileId) || next.profiles[0]);
+                        if (next.revocationWarning) setBackendMessage(next.revocationWarning);
+                      })}
+                    >
+                      <Trash2 />
+                    </Button>
+                  )}
+                  {backendMessage && <span className="text-xs text-muted-foreground">{backendMessage}</span>}
+                </div>
+              </SettingsRow>
+                </>
+              ) : (
+                <SettingsRow label={props.t('backendAddress')} hint={props.t('backendHint')} stacked>
+                  <input
+                    className="text-field"
+                    name="akmux-backend-address"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={draft.backendAddress}
+                    onChange={event => setDraft(value => ({ ...value, backendAddress: event.target.value }))}
+                  />
+                </SettingsRow>
+              )}
+              {props.workspaceEnabled ? <SettingsRow label={props.t('generalRoot')} stacked>
                 <div className="flex gap-2">
                   <div className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border border-border px-3 text-sm">
                     <Folder className="size-4 shrink-0 text-primary" />
@@ -135,7 +310,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
                     {props.t('browse')}
                   </Button>
                 </div>
-              </SettingsRow>
+              </SettingsRow> : <p className="px-1 text-xs text-muted-foreground">{props.t('workspaceCapabilityUnavailable')}</p>}
             </SettingsSection>
             {error && (
               <InlineErrorState
@@ -149,7 +324,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
             <Button variant="ghost" onClick={() => props.onOpenChange(false)}>
               {props.t('cancel')}
             </Button>
-            <Button disabled={saving || !root} onClick={() => void submit()}>
+            <Button disabled={saving || (props.workspaceEnabled && !root)} onClick={() => void submit()}>
               {props.t('save')}
             </Button>
           </DialogFooter>
@@ -157,7 +332,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       </Dialog>
       <DirectoryDialog
         open={pickerOpen}
-        backendAddress={draft.backendAddress}
+        backendAddress={desktopShell ? props.backends.active.address : draft.backendAddress}
         initialPath=""
         t={props.t}
         onOpenChange={setPickerOpen}

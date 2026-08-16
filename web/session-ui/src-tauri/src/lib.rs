@@ -18,7 +18,19 @@ fn sync_native_backdrop(window: tauri::WebviewWindow, dark: bool, material_trans
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![sync_native_backdrop])
+        .invoke_handler(tauri::generate_handler![
+            sync_native_backdrop,
+            backend::list_backend_profiles,
+            backend::save_backend_profile,
+            backend::pair_backend_profile,
+            backend::activate_backend_profile,
+            backend::reorder_backend_profiles,
+            backend::delete_backend_profile,
+            backend::test_backend_profile,
+            backend::refresh_backend_profile,
+            backend::backend_request
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run AkironMux desktop application");
 }
+mod backend;

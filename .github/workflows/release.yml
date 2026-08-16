@@ -316,6 +316,9 @@ jobs:
         working-directory: web/session-ui
         run: pnpm install --frozen-lockfile
 
+      - name: Test Windows credential integration
+        run: cargo test --manifest-path web/session-ui/src-tauri/Cargo.toml --lib backend::tests::windows_credential_adapter_round_trips_without_plaintext_profile_storage
+
       - name: Build Windows GUI installer
         uses: tauri-apps/tauri-action@v0
         env:

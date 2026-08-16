@@ -1,4 +1,5 @@
 import type { Agent, DirectoryListing, Project, SessionDetails, SessionInfo, SettingsResponse, SortMode, WorkspaceResponse } from '@/types';
+import { desktopBackendRequest } from '@/features/backends/desktop-backend';
 
 export class ApiRequestError extends Error {
   constructor(
@@ -35,6 +36,14 @@ export function websocketUrl(address: string, path: string) {
 }
 
 export async function request<T>(address: string, path: string, init?: RequestInit): Promise<T> {
+  const native = await desktopBackendRequest(init?.method || 'GET', path, init?.body ? JSON.parse(String(init.body)) : undefined);
+  if (native) {
+    if (native.status < 200 || native.status >= 300) {
+      const body = native.body as { error?: string };
+      throw new ApiRequestError(body?.error || `Backend request failed (${native.status})`, native.status);
+    }
+    return native.body as T;
+  }
   const response = await fetch(apiUrl(address, path), {
     ...init,
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
@@ -61,6 +70,8 @@ export const sessionApi = {
     }),
   restartSession: (address: string, id: string) => request<void>(address, `/api/sessions/${encodeURIComponent(id)}/restart`, { method: 'POST' }),
   closeSession: (address: string, id: string) => request<void>(address, `/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  wsTicket: (address: string, sessionId: string) =>
+    request<{ ticket: string; expires_in_seconds: number }>(address, '/api/auth/ws-ticket', { method: 'POST', body: JSON.stringify({ session_id: sessionId }) }),
   directories: (address: string, path: string, showHidden: boolean) =>
     request<DirectoryListing>(address, `/api/directories${path ? `?path=${encodeURIComponent(path)}&show_hidden=${showHidden}` : `?show_hidden=${showHidden}`}`),
   createDirectory: (address: string, parent: string, name: string) => request(address, '/api/directories', { method: 'POST', body: JSON.stringify({ parent, name }) }),

@@ -6,15 +6,53 @@ function isCompletedNormally(session: SessionInfo) {
   return session.status === 'exited' && (session.exit_code === null || session.exit_code === 0) && !session.error;
 }
 
-export function useSessions(backendAddress: string) {
+export function useSessions(backendAddress: string, backendKey = backendAddress || 'embedded', enabled = true) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [attention, setAttention] = useState<Record<string, AttentionKind>>({});
   const [nativeAttention, setNativeAttention] = useState<Record<string, AttentionKind>>({});
+  const [stateBackendKey, setStateBackendKey] = useState(backendKey);
   const historyMap = useRef(new Map<string, string>());
+  const generation = useRef(0);
+  const currentBackendKey = useRef(backendKey);
+  const removalTimers = useRef<number[]>([]);
+  const skipPersistenceForBackend = useRef<string | null>(backendKey);
+
+  if (currentBackendKey.current !== backendKey) {
+    currentBackendKey.current = backendKey;
+    generation.current += 1;
+    skipPersistenceForBackend.current = backendKey;
+  }
+
+  useEffect(() => {
+    setSessions([]);
+    setAttention({});
+    setNativeAttention({});
+    historyMap.current.clear();
+    removalTimers.current.forEach(window.clearTimeout);
+    removalTimers.current = [];
+    setActiveId(localStorage.getItem(`akmux.active-session:${backendKey}`));
+    setStateBackendKey(backendKey);
+    return () => {
+      removalTimers.current.forEach(window.clearTimeout);
+      removalTimers.current = [];
+    };
+  }, [backendKey]);
+
+  useEffect(() => {
+    if (skipPersistenceForBackend.current === backendKey) {
+      skipPersistenceForBackend.current = null;
+      return;
+    }
+    if (activeId) localStorage.setItem(`akmux.active-session:${backendKey}`, activeId);
+    else localStorage.removeItem(`akmux.active-session:${backendKey}`);
+  }, [activeId, backendKey]);
 
   const load = useCallback(async () => {
+    if (!enabled) return;
+    const requestGeneration = generation.current;
     const incoming = (await sessionApi.sessions(backendAddress)).filter(session => !isCompletedNormally(session));
+    if (requestGeneration !== generation.current) return;
     setSessions(current => {
       // Keep the mounted terminal surface during a transient reconnect. An empty
       // successful response is not enough evidence that running PTYs disappeared.
@@ -25,13 +63,14 @@ export function useSessions(backendAddress: string) {
       if (!incoming.length) return current;
       return current && incoming.some(session => session.id === current) ? current : incoming[0].id;
     });
-  }, [backendAddress]);
+  }, [backendAddress, backendKey, enabled]);
 
   useEffect(() => {
+    if (!enabled) return;
     void load().catch(() => undefined);
     const timer = window.setInterval(() => void load().catch(() => undefined), 10_000);
     return () => window.clearInterval(timer);
-  }, [load]);
+  }, [enabled, load]);
 
   const add = (session: SessionInfo, historyKey?: string) => {
     setSessions(current => [...current.filter(item => item.id !== session.id), session]);
@@ -64,11 +103,14 @@ export function useSessions(backendAddress: string) {
   };
 
   const create = async (agent: Agent, cwd: string) => {
+    const requestGeneration = generation.current;
     const session = await sessionApi.createSession(backendAddress, agent, cwd);
+    if (requestGeneration !== generation.current) return;
     add(session);
   };
 
   const resume = async (item: HistoryItem) => {
+    const requestGeneration = generation.current;
     const key = `${item.agent}:${item.id}`;
     setNativeAttention(current => {
       const next = { ...current };
@@ -81,6 +123,7 @@ export function useSessions(backendAddress: string) {
       return;
     }
     const session = await sessionApi.createSession(backendAddress, item.agent, item.cwd, item.id);
+    if (requestGeneration !== generation.current) return;
     add(session, key);
   };
 
@@ -113,18 +156,35 @@ export function useSessions(backendAddress: string) {
       if (session.native_session_id) setNativeAttention(current => ({ ...current, [`${session.agent}:${session.native_session_id}`]: 'exited' }));
     }
     if (isCompletedNormally(session)) {
-      window.setTimeout(() => remove(session.id), 650);
+      removalTimers.current.push(window.setTimeout(() => remove(session.id), 650));
       return;
     }
     setSessions(current => current.map(item => (item.id === session.id ? session : item)));
   };
 
   const close = async (id: string) => {
+    const requestGeneration = generation.current;
     await sessionApi.closeSession(backendAddress, id);
+    if (requestGeneration !== generation.current) return;
     remove(id);
   };
 
-  const active = useMemo(() => sessions.find(session => session.id === activeId), [sessions, activeId]);
+  const visibleSessions = stateBackendKey === backendKey ? sessions : [];
+  const visibleActiveId = stateBackendKey === backendKey ? activeId : null;
+  const active = useMemo(() => visibleSessions.find(session => session.id === visibleActiveId), [visibleSessions, visibleActiveId]);
 
-  return { sessions, active, activeId, setActiveId: select, attention, nativeAttention, create, resume, update, close, markAttention, load };
+  return {
+    sessions: visibleSessions,
+    active,
+    activeId: visibleActiveId,
+    setActiveId: select,
+    attention: stateBackendKey === backendKey ? attention : {},
+    nativeAttention: stateBackendKey === backendKey ? nativeAttention : {},
+    create,
+    resume,
+    update,
+    close,
+    markAttention,
+    load,
+  };
 }

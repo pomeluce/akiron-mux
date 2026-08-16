@@ -1,6 +1,6 @@
 import * as Collapsible from '@radix-ui/react-collapsible';
 import { Bell, Check, ChevronRight, CircleStop, Ellipsis, FolderPlus, Image, Pencil, Pin, Plus, RefreshCw, Search, Settings, Trash2 } from 'lucide-react';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AgentIcon } from '@/shared/components/agent-icon';
 import { WorkspaceIcon, type WorkspaceIconName } from '@/shared/components/workspace-icon';
 import { basename, cn } from '@/shared/lib/utils';
@@ -11,12 +11,14 @@ import type { AttentionKind, HistoryItem, Locale, Project, SettingsResponse, Sor
 import type { MessageKey } from '@/shared/lib/i18n';
 
 interface AppSidebarProps {
+  backendKey: string;
   workspace: WorkspaceResponse;
   settings: SettingsResponse;
   icons: Record<string, WorkspaceIconName>;
   activeNativeId?: string | null;
   attentionByNativeId: Record<string, AttentionKind>;
   open: boolean;
+  workspaceEnabled: boolean;
   width: number;
   locale: Locale;
   t: (key: MessageKey) => string;
@@ -35,6 +37,15 @@ interface AppSidebarProps {
   onReorder: (kind: 'projects' | 'directories' | 'sessions', scope: string, ids: string[]) => void;
   onSettings: () => void;
   onWidthChange: (width: number) => void;
+}
+
+function loadExpansionState(backendKey: string) {
+  try {
+    const value = JSON.parse(localStorage.getItem(`akmux.sidebar-expansion:${backendKey}`) || '[]');
+    return new Set<string>(Array.isArray(value) ? value.filter(item => typeof item === 'string') : []);
+  } catch {
+    return new Set<string>();
+  }
 }
 
 function SortMenu({ section, value, t, onSort }: { section: 'projects' | 'general' | 'other'; value: SortMode; t: AppSidebarProps['t']; onSort: AppSidebarProps['onSort'] }) {
@@ -250,6 +261,17 @@ export function AppSidebar(props: AppSidebarProps) {
   const { workspace, settings, t } = props;
   const resizeStart = useRef<{ pointerX: number; width: number } | null>(null);
   const startReorder = usePointerReorder(props.onReorder);
+  const [expanded, setExpanded] = useState(() => loadExpansionState(props.backendKey));
+
+  const setExpandedKey = (key: string, open: boolean) => {
+    setExpanded(current => {
+      const next = new Set(current);
+      if (open) next.add(key);
+      else next.delete(key);
+      localStorage.setItem(`akmux.sidebar-expansion:${props.backendKey}`, JSON.stringify([...next]));
+      return next;
+    });
+  };
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     if (window.innerWidth <= 760) return;
@@ -282,6 +304,7 @@ export function AppSidebar(props: AppSidebarProps) {
       data-open={props.open}
       style={{ width: props.width }}
     >
+      <fieldset disabled={!props.workspaceEnabled} className="contents">
       <div className="flex gap-1.5 px-3 pb-2 pt-3">
         <Button id="new-general" variant="ghost" className="h-9 flex-1 justify-start px-2.5 text-foreground" onClick={props.onNewGeneral}>
           <Plus />
@@ -300,7 +323,11 @@ export function AppSidebar(props: AppSidebarProps) {
       </div>
 
       <div data-scroll-region="sidebar" className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
-        <Collapsible.Root className="group/section mb-2">
+        <Collapsible.Root
+          className="group/section mb-2"
+          open={expanded.has('section:projects')}
+          onOpenChange={open => setExpandedKey('section:projects', open)}
+        >
           <SectionHeading title={t('projects')}>
             <SortMenu section="projects" value={settings.project_sort} t={t} onSort={props.onSort} />
             <Tooltip label={t('addProject')}>
@@ -312,7 +339,13 @@ export function AppSidebar(props: AppSidebarProps) {
           <Collapsible.Content>
             {workspace.projects.length ? (
               workspace.projects.map(group => (
-                <Collapsible.Root key={group.project.id} defaultOpen={false} className="group/project" data-project-group={group.project.id}>
+                <Collapsible.Root
+                  key={group.project.id}
+                  open={expanded.has(`project:${group.project.id}`)}
+                  onOpenChange={open => setExpandedKey(`project:${group.project.id}`, open)}
+                  className="group/project"
+                  data-project-group={group.project.id}
+                >
                   <div
                     className="draggable-row flex min-h-9 items-center rounded-lg px-1 hover:bg-accent"
                     data-project-row={group.project.id}
@@ -382,7 +415,11 @@ export function AppSidebar(props: AppSidebarProps) {
           </Collapsible.Content>
         </Collapsible.Root>
 
-        <Collapsible.Root className="group/section mb-2">
+        <Collapsible.Root
+          className="group/section mb-2"
+          open={expanded.has('section:general')}
+          onOpenChange={open => setExpandedKey('section:general', open)}
+        >
           <SectionHeading title={t('general')}>
             <SortMenu section="general" value={settings.general_sort} t={t} onSort={props.onSort} />
             <Tooltip label={t('newGeneral')}>
@@ -396,7 +433,8 @@ export function AppSidebar(props: AppSidebarProps) {
               workspace.general.map(group => (
                 <Collapsible.Root
                   key={group.path}
-                  defaultOpen={false}
+                  open={expanded.has(`directory:${group.path}`)}
+                  onOpenChange={open => setExpandedKey(`directory:${group.path}`, open)}
                   className="group/directory opacity-100 data-[unavailable=true]:opacity-55"
                   data-unavailable={!group.available}
                 >
@@ -458,14 +496,23 @@ export function AppSidebar(props: AppSidebarProps) {
           </Collapsible.Content>
         </Collapsible.Root>
 
-        <Collapsible.Root className="group/section">
+        <Collapsible.Root
+          className="group/section"
+          open={expanded.has('section:other')}
+          onOpenChange={open => setExpandedKey('section:other', open)}
+        >
           <SectionHeading title={t('other')}>
             <SortMenu section="other" value={settings.other_sort} t={t} onSort={props.onSort} />
           </SectionHeading>
           <Collapsible.Content>
             {workspace.other.length ? (
               workspace.other.map(group => (
-                <Collapsible.Root key={group.path} defaultOpen={false} className="group/directory">
+                <Collapsible.Root
+                  key={group.path}
+                  open={expanded.has(`directory:${group.path}`)}
+                  onOpenChange={open => setExpandedKey(`directory:${group.path}`, open)}
+                  className="group/directory"
+                >
                   <div
                     className="draggable-row flex min-h-9 items-center rounded-lg px-1 hover:bg-accent"
                     data-directory-row={group.path}
@@ -524,6 +571,7 @@ export function AppSidebar(props: AppSidebarProps) {
           </Collapsible.Content>
         </Collapsible.Root>
       </div>
+      </fieldset>
 
       <div className="border-t border-border/60 p-2.5">
         <Button variant="ghost" className="h-10 w-full justify-start px-2.5 text-foreground" onClick={props.onSettings}>

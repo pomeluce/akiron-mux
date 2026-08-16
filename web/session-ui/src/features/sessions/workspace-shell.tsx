@@ -19,6 +19,7 @@ interface WorkspaceShellProps {
   terminalFontSize: number;
   detailsOpen: boolean;
   connected: boolean;
+  workspaceEnabled: boolean;
   locale: Locale;
   t: (key: MessageKey) => string;
   onSelect: (id: string) => void;
@@ -136,7 +137,14 @@ export function WorkspaceShell(props: WorkspaceShellProps) {
         </div>
       )}
 
-      {active ? (
+      {!props.workspaceEnabled ? (
+        <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden">
+          <div className="max-w-md px-8 text-center">
+            <CircleAlert className="mx-auto size-8 text-muted-foreground" />
+            <p className="mt-3 text-sm text-muted-foreground">{t('workspaceCapabilityUnavailable')}</p>
+          </div>
+        </div>
+      ) : active ? (
         <>
           <div className="relative min-h-0 flex-1 overflow-hidden bg-[#0b0f12]">
             <div className="terminal-stack terminal-surface">
@@ -163,7 +171,7 @@ export function WorkspaceShell(props: WorkspaceShellProps) {
             </div>
             <h1 className="m-0 text-xl font-semibold">{t('emptyTitle')}</h1>
             <p className="mx-auto mt-2 max-w-none whitespace-nowrap text-sm text-muted-foreground max-[520px]:whitespace-normal">{t('emptyBody')}</p>
-            <Button variant="secondary" className="mt-5" onClick={props.onNew}>
+            <Button variant="secondary" className="mt-5" onClick={props.onNew} disabled={!props.workspaceEnabled}>
               <Plus />
               {t('newSession')}
             </Button>

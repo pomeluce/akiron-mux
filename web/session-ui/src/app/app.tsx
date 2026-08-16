@@ -1,6 +1,7 @@
-import { PanelLeft } from 'lucide-react';
+import { Check, PanelLeft, Server } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { desktopShell } from '@/features/desktop/desktop-shell';
+import { useBackends } from '@/features/backends/use-backends';
 import { WindowControls, toggleDesktopMaximize } from '@/features/desktop/window-controls';
 import { SettingsDialog } from '@/features/preferences/settings-dialog';
 import { usePreferences } from '@/features/preferences/use-preferences';
@@ -20,11 +21,12 @@ import { translate } from '@/shared/lib/i18n';
 import { basename } from '@/shared/lib/utils';
 import type { WorkspaceIconName } from '@/shared/components/workspace-icon';
 import { Button } from '@/shared/ui/button';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/shared/ui/dropdown-menu';
 import { Tooltip, TooltipProvider } from '@/shared/ui/tooltip';
-import type { ClientPreferences, Project, SortMode } from '@/types';
+import type { BackendProfile, ClientPreferences, Project, SortMode } from '@/types';
 
 type SessionDialogState = { open: boolean; mode: 'general' | 'project'; path: string };
-type ConfirmState = { kind: 'session' } | { kind: 'project'; project: Project } | null;
+type ConfirmState = { kind: 'session' } | { kind: 'project'; project: Project } | { kind: 'backend'; profile: BackendProfile; instanceId: string } | null;
 
 const SIDEBAR_MIN_WIDTH = 188;
 const SIDEBAR_DEFAULT_WIDTH = 224;
@@ -36,10 +38,16 @@ function clampSidebarWidth(width: number) {
 
 export function App() {
   const { preferences, persist } = usePreferences();
+  const backends = useBackends();
+  const backendReady = !desktopShell || !backends.loading;
+  const workspaceSupported = !desktopShell || backends.active.kind === 'local' || backends.active.capabilities.includes('workspace-v1');
+  const backendFeaturesReady = backendReady && workspaceSupported;
+  const backendAddress = desktopShell ? (backendReady ? backends.active.address : '') : preferences.backendAddress;
+  const backendKey = desktopShell ? (backendReady ? backends.active.id : 'desktop-loading') : backendAddress || 'embedded';
   const workspaceIcons = useWorkspaceIcons();
   const t = useMemo(() => (key: Parameters<typeof translate>[1]) => translate(preferences.locale, key), [preferences.locale]);
-  const workspaces = useWorkspaces(preferences.backendAddress);
-  const sessionState = useSessions(preferences.backendAddress);
+  const workspaces = useWorkspaces(backendAddress, backendKey, backendFeaturesReady);
+  const sessionState = useSessions(backendAddress, backendKey, backendFeaturesReady);
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 760);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = Number(localStorage.getItem('akironmux-sidebar-width')) || SIDEBAR_DEFAULT_WIDTH;
@@ -53,6 +61,7 @@ export function App() {
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [iconPath, setIconPath] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState>(null);
+  const [imeComposing, setImeComposing] = useState(false);
 
   useEffect(() => {
     const clamp = () => setSidebarWidth(value => clampSidebarWidth(value));
@@ -60,35 +69,54 @@ export function App() {
     return () => window.removeEventListener('resize', clamp);
   }, []);
 
+  useEffect(() => {
+    const start = () => setImeComposing(true);
+    const end = () => setImeComposing(false);
+    document.addEventListener('compositionstart', start);
+    document.addEventListener('compositionend', end);
+    return () => {
+      document.removeEventListener('compositionstart', start);
+      document.removeEventListener('compositionend', end);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!desktopShell || backends.loading || backends.active.kind !== 'remote' || backends.active.requiresAuth) return;
+    const refresh = () => void backends.refreshActive(backends.active.id).catch(() => undefined);
+    refresh();
+    const timer = window.setInterval(refresh, 10_000);
+    return () => window.clearInterval(timer);
+  }, [backends.active.id, backends.active.kind, backends.active.requiresAuth, backends.loading, backends.refreshActive]);
+
   const openGeneralSession = () => setSessionDialog({ open: true, mode: 'general', path: workspaces.workspace.general_root });
   const openProjectSession = (path: string) => setSessionDialog({ open: true, mode: 'project', path });
 
   const saveProject = async (path: string, name: string, icon: WorkspaceIconName) => {
     const project = editingProject
-      ? await sessionApi.updateProject(preferences.backendAddress, editingProject.id, { name, path })
-      : await sessionApi.createProject(preferences.backendAddress, path, name);
+      ? await sessionApi.updateProject(backendAddress, editingProject.id, { name, path })
+      : await sessionApi.createProject(backendAddress, path, name);
     workspaceIcons.setIcon(`project:${project.id}`, icon);
     await workspaces.load();
   };
 
   const saveSettings = async (next: ClientPreferences, generalRoot: string) => {
-    await sessionApi.updateSettings(next.backendAddress, { general_root: generalRoot });
+    if (workspaceSupported) await sessionApi.updateSettings(backendAddress, { general_root: generalRoot });
     persist(next);
-    await workspaces.load();
+    if (workspaceSupported) await workspaces.load();
   };
 
   const updateSort = async (section: 'projects' | 'general' | 'other', mode: SortMode) => {
-    await sessionApi.updateSort(preferences.backendAddress, section, mode);
+    await sessionApi.updateSort(backendAddress, section, mode);
     await workspaces.load();
   };
 
   const updateDirectorySort = async (path: string, mode: SortMode) => {
-    await sessionApi.updateDirectorySort(preferences.backendAddress, path, mode);
+    await sessionApi.updateDirectorySort(backendAddress, path, mode);
     await workspaces.load();
   };
 
   const reorderItems = async (kind: 'projects' | 'directories' | 'sessions', scope: string, ids: string[]) => {
-    await sessionApi.reorder(preferences.backendAddress, kind, scope, ids);
+    await sessionApi.reorder(backendAddress, kind, scope, ids);
     await workspaces.load();
   };
 
@@ -103,8 +131,27 @@ export function App() {
     void notifySession(session, 'input', preferences.locale);
   };
 
-  const confirmTitle = confirm?.kind === 'project' ? t('remove') : t('closeTitle');
-  const confirmBody = confirm?.kind === 'project' ? `${t('remove')}: ${confirm.project.name}` : t('closeBody');
+  const selectBackend = async (profile: BackendProfile) => {
+    if (profile.kind === 'remote') {
+      try {
+        const health = await backends.test(profile);
+        if (!profile.instanceId || profile.instanceId !== health.instanceId) {
+          setConfirm({ kind: 'backend', profile, instanceId: health.instanceId });
+          return;
+        }
+        if (profile.capabilities.join('\0') !== health.capabilities.join('\0')) {
+          await backends.save(profile);
+        }
+      } catch {
+        await backends.select(profile.id);
+        return;
+      }
+    }
+    await backends.select(profile.id);
+  };
+
+  const confirmTitle = confirm?.kind === 'project' ? t('remove') : confirm?.kind === 'backend' ? t('confirm') : t('closeTitle');
+  const confirmBody = confirm?.kind === 'project' ? `${t('remove')}: ${confirm.project.name}` : confirm?.kind === 'backend' ? t('identityChanged') : t('closeBody');
 
   return (
     <TooltipProvider>
@@ -126,6 +173,31 @@ export function App() {
           <strong className="ml-1.5 min-w-0 truncate text-xs font-semibold" data-app-title data-tauri-drag-region={desktopShell ? '' : undefined}>
             AkironMux
           </strong>
+          {desktopShell && backendReady && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="ml-2 max-w-44 gap-1.5 text-xs"
+                  title={!workspaceSupported ? t('workspaceCapabilityUnavailable') : undefined}
+                >
+                  <Server className="size-3.5" />
+                  <span className="truncate">{backends.active.name}</span>
+                  <span className={`size-1.5 rounded-full ${workspaces.connected ? 'bg-emerald-500' : 'bg-destructive'}`} />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="min-w-52">
+                {backends.state.profiles.map(profile => (
+                  <DropdownMenuItem key={profile.id} disabled={imeComposing} title={imeComposing ? t('finishComposition') : undefined} onSelect={() => void selectBackend(profile)}>
+                    <Check className={profile.id === backends.active.id ? '' : 'opacity-0'} />
+                    <span className="min-w-0 flex-1 truncate">{profile.name}</span>
+                    <span className="text-[10px] text-muted-foreground">{profile.kind === 'local' ? t('localBackend') : t('remoteBackend')}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
           <span className="ml-auto hidden items-center gap-2 px-2 text-[11px] text-muted-foreground sm:flex" data-tauri-drag-region={desktopShell ? '' : undefined}>
             <span className={`size-1.5 rounded-full ${workspaces.connected ? 'bg-emerald-500' : 'bg-destructive'}`} />
             {t(workspaces.connected ? 'connected' : 'disconnected')}
@@ -140,12 +212,15 @@ export function App() {
             onClick={() => setSidebarOpen(false)}
           />
           <AppSidebar
+            key={backendKey}
+            backendKey={backendKey}
             workspace={workspaces.workspace}
             settings={workspaces.settings}
             icons={workspaceIcons.icons}
             activeNativeId={sessionState.active?.native_session_id}
             attentionByNativeId={sessionState.nativeAttention}
             open={sidebarOpen}
+            workspaceEnabled={workspaceSupported}
             width={sidebarWidth}
             locale={preferences.locale}
             t={t}
@@ -162,7 +237,7 @@ export function App() {
               setProjectOpen(true);
             }}
             onEditDirectoryIcon={path => setIconPath(path)}
-            onToggleProjectPin={project => void sessionApi.updateProject(preferences.backendAddress, project.id, { pinned: !project.pinned }).then(workspaces.load)}
+            onToggleProjectPin={project => void sessionApi.updateProject(backendAddress, project.id, { pinned: !project.pinned }).then(workspaces.load)}
             onDeleteProject={project => setConfirm({ kind: 'project', project })}
             onResume={item => void sessionState.resume(item)}
             onSort={(section, mode) => void updateSort(section, mode)}
@@ -176,7 +251,7 @@ export function App() {
             }}
           />
           <WorkspaceShell
-            backendAddress={preferences.backendAddress}
+            backendAddress={backendAddress}
             sessions={sessionState.sessions}
             active={sessionState.active}
             activeId={sessionState.activeId}
@@ -184,6 +259,7 @@ export function App() {
             terminalFontSize={preferences.terminalFontSize}
             detailsOpen={detailsOpen}
             connected={workspaces.connected}
+            workspaceEnabled={workspaceSupported}
             locale={preferences.locale}
             t={t}
             onSelect={sessionState.setActiveId}
@@ -191,7 +267,7 @@ export function App() {
             onAttention={handleSessionAttention}
             onNew={openGeneralSession}
             onDetails={() => setDetailsOpen(value => !value)}
-            onRestart={() => sessionState.active && void sessionApi.restartSession(preferences.backendAddress, sessionState.active.id)}
+            onRestart={() => sessionState.active && void sessionApi.restartSession(backendAddress, sessionState.active.id)}
             onClose={() => setConfirm({ kind: 'session' })}
           />
         </div>
@@ -200,7 +276,7 @@ export function App() {
       <SessionDialog
         open={sessionDialog.open}
         mode={sessionDialog.mode}
-        backendAddress={preferences.backendAddress}
+        backendAddress={backendAddress}
         initialDirectory={sessionDialog.path}
         t={t}
         onOpenChange={open => setSessionDialog(value => ({ ...value, open }))}
@@ -210,7 +286,7 @@ export function App() {
         open={projectOpen}
         project={editingProject}
         icon={workspaceIcons.icons[`project:${editingProject?.id || ''}`] || 'folder'}
-        backendAddress={preferences.backendAddress}
+        backendAddress={backendAddress}
         initialPath=""
         t={t}
         onOpenChange={setProjectOpen}
@@ -232,6 +308,8 @@ export function App() {
       <SettingsDialog
         open={settingsOpen}
         preferences={preferences}
+        backends={backends}
+        workspaceEnabled={workspaceSupported}
         generalRoot={workspaces.settings.general_root || workspaces.workspace.general_root}
         t={t}
         onOpenChange={setSettingsOpen}
@@ -241,7 +319,7 @@ export function App() {
         open={confirm !== null}
         title={confirmTitle}
         body={confirmBody}
-        confirmLabel={confirm?.kind === 'project' ? t('remove') : t('close')}
+        confirmLabel={confirm?.kind === 'project' ? t('remove') : confirm?.kind === 'backend' ? t('confirm') : t('close')}
         cancelLabel={t('cancel')}
         destructive
         onOpenChange={open => {
@@ -249,7 +327,10 @@ export function App() {
         }}
         onConfirm={() => {
           if (confirm?.kind === 'session' && sessionState.active) void sessionState.close(sessionState.active.id);
-          if (confirm?.kind === 'project') void sessionApi.deleteProject(preferences.backendAddress, confirm.project.id).then(workspaces.load);
+          if (confirm?.kind === 'project') void sessionApi.deleteProject(backendAddress, confirm.project.id).then(workspaces.load);
+          if (confirm?.kind === 'backend') {
+            void backends.save(confirm.profile, confirm.instanceId).then(() => backends.select(confirm.profile.id));
+          }
         }}
       />
     </TooltipProvider>

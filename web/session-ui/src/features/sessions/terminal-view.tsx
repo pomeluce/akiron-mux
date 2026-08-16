@@ -1,7 +1,8 @@
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import { useEffect, useRef, useState } from 'react';
-import { websocketUrl } from '@/shared/lib/api';
+import { sessionApi, websocketUrl } from '@/shared/lib/api';
+import { currentDesktopBackend } from '@/features/backends/desktop-backend';
 import type { MessageKey } from '@/shared/lib/i18n';
 import { Button } from '@/shared/ui/button';
 import { cn } from '@/shared/lib/utils';
@@ -93,6 +94,7 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
     let outputTail = '';
     let lastAttentionAt = 0;
     let lastResizeAt = 0;
+    let reconnectAttempts = 0;
     const recoveryKey = `akmux.lease-recovery:${backendAddress}:${session.id}`;
 
     const signalAttention = () => {
@@ -108,15 +110,34 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
       if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', rows, cols }));
     };
 
-    const connect = () => {
+    const scheduleReconnect = () => {
+      if (disposed || reconnectTimer !== null) return;
+      const delay = Math.min(1_200 * 2 ** reconnectAttempts, 30_000);
+      reconnectAttempts += 1;
+      reconnectTimer = window.setTimeout(() => void connect(), delay);
+    };
+
+    const connect = async () => {
       if (disposed) return;
       const url = new URL(websocketUrl(backendAddress, `/api/sessions/${encodeURIComponent(session.id)}/terminal`));
+      const backend = currentDesktopBackend();
+      if (backend?.kind === 'remote') {
+        try {
+          const ticket = await sessionApi.wsTicket(backendAddress, session.id);
+          url.searchParams.set('ticket', ticket.ticket);
+        } catch {
+          scheduleReconnect();
+          return;
+        }
+      }
+      if (disposed) return;
       const recoveryCredential = sessionStorage.getItem(recoveryKey);
       socket = new WebSocket(url);
       socketRef.current = socket;
       socket.binaryType = 'arraybuffer';
       socket.addEventListener('open', () => {
         reconnectTimer = null;
+        reconnectAttempts = 0;
         if (recoveryCredential) socket?.send(JSON.stringify({ type: 'recover-control', credential: recoveryCredential }));
         fit.fit();
         sendResize();
@@ -153,7 +174,7 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
         if (message.type === 'authorization-revoked') sessionStorage.removeItem(recoveryKey);
       });
       socket.addEventListener('close', () => {
-        if (!disposed && reconnectTimer === null) reconnectTimer = window.setTimeout(connect, 1_200);
+        scheduleReconnect();
       });
     };
 
@@ -176,7 +197,7 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
     });
     const observer = new ResizeObserver(() => requestAnimationFrame(() => fit.fit()));
     observer.observe(host);
-    connect();
+    void connect();
 
     return () => {
       disposed = true;
@@ -200,7 +221,7 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
 
   return (
     <div className={cn('terminal-view-shell', !active && 'invisible pointer-events-none')} aria-hidden={!active}>
-      <div ref={hostRef} className="terminal-host" />
+      <div ref={hostRef} className="terminal-host" aria-hidden={!active} />
       {lease && !canWrite && (
         <div className="terminal-lease-banner">
           <span>

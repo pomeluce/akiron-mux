@@ -392,6 +392,22 @@ test('manual ordering exposes drag affordances and persists workspace order', as
     .toContainEqual({ kind: 'directories', scope: 'other', ids: ['/home/test/other-b', '/home/test/other-a'] });
 });
 
+test('sidebar expansion is restored for the active backend', async ({ page }) => {
+  await page.getByText('Workspaces', { exact: true }).click();
+  await page.locator('[data-project-row="project-a"] button[title="/home/test/project-a"]').click();
+  await expect(page.locator('[data-project-group="project-a"] .history-row')).toHaveCount(2);
+
+  await page.reload();
+
+  await expect(page.locator('[data-project-group="project-a"] .history-row')).toHaveCount(2);
+});
+
+test('the active session is restored without briefly overwriting its backend key', async ({ page }) => {
+  await page.locator('[data-session-tab="session-codex-secondary"]').click();
+  await page.reload();
+  await expect(page.locator('[data-session-tab="session-codex-secondary"]')).toHaveAttribute('data-active', 'true');
+});
+
 test('desktop controls do not expose browser focus outlines', async ({ page }) => {
   const search = page.locator('#search-button');
   await search.focus();

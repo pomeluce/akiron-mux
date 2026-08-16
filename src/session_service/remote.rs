@@ -77,17 +77,20 @@ pub struct RemoteSecurity {
     tickets: Arc<Mutex<HashMap<String, Ticket>>>,
     pairings: Arc<Mutex<HashMap<String, PendingPairing>>>,
     rate_limits: Arc<Mutex<HashMap<String, RateLimitEntry>>>,
+    revocations: broadcast::Sender<String>,
 }
 
 impl RemoteSecurity {
     pub fn ephemeral() -> Self {
         let mut pepper = [0_u8; 32];
         OsRng.fill_bytes(&mut pepper);
+        let (revocations, _) = broadcast::channel(64);
         Self {
             pepper: Arc::new(pepper),
             tickets: Arc::new(Mutex::new(HashMap::new())),
             pairings: Arc::new(Mutex::new(HashMap::new())),
             rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            revocations,
         }
     }
 
@@ -116,11 +119,13 @@ impl RemoteSecurity {
             file.sync_all()?;
             pepper
         };
+        let (revocations, _) = broadcast::channel(64);
         Ok(Self {
             pepper: Arc::new(pepper),
             tickets: Arc::new(Mutex::new(HashMap::new())),
             pairings: Arc::new(Mutex::new(HashMap::new())),
             rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            revocations,
         })
     }
 
@@ -198,6 +203,20 @@ impl RemoteSecurity {
 
     pub fn clear_auth_failures(&self, key: &str) {
         self.rate_limits.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(key);
+    }
+
+    pub fn revoke_device(&self, db: &Db, token_id: &str) -> anyhow::Result<bool> {
+        let now = now_ms();
+        let revoked = db.revoke_backend_device(token_id, now)?;
+        if revoked {
+            db.record_backend_audit("device.revoked", Some(token_id), Some("local-api"), now)?;
+            let _ = self.revocations.send(token_id.to_owned());
+        }
+        Ok(revoked)
+    }
+
+    pub fn subscribe_revocations(&self) -> broadcast::Receiver<String> {
+        self.revocations.subscribe()
     }
 
     pub fn issue_ticket(&self, device: DeviceIdentity, session_id: String) -> String {
@@ -371,16 +390,18 @@ impl ControlLeases {
         state
     }
 
-    pub fn take_control(&self, session_id: &str, connection_id: &str, device_name: &str) -> LeaseState {
+    pub fn take_control(&self, session_id: &str, connection_id: &str, device_name: &str, expected_version: u64) -> LeaseState {
         let mut registry = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let lease = registry.states.entry(session_id.to_owned()).or_insert(LeaseState {
             version: 0,
             controller_connection_id: None,
             controller_device_name: None,
         });
-        lease.version += 1;
-        lease.controller_connection_id = Some(connection_id.to_owned());
-        lease.controller_device_name = Some(device_name.to_owned());
+        if lease.version == expected_version {
+            lease.version += 1;
+            lease.controller_connection_id = Some(connection_id.to_owned());
+            lease.controller_device_name = Some(device_name.to_owned());
+        }
         let state = lease.clone();
         Self::broadcast(&mut registry, session_id, &state);
         state
@@ -472,10 +493,13 @@ mod tests {
         let leases = ControlLeases::default();
         leases.connect("session", "first", "Desktop");
         assert!(leases.can_write("session", "first"));
-        let state = leases.take_control("session", "second", "Phone");
+        let state = leases.take_control("session", "second", "Phone", 1);
         assert_eq!(state.controller_device_name.as_deref(), Some("Phone"));
         assert!(!leases.can_write("session", "first"));
         assert!(leases.can_write("session", "second"));
+        let stale = leases.take_control("session", "third", "Tablet", 1);
+        assert_eq!(stale.controller_device_name.as_deref(), Some("Phone"));
+        assert!(!leases.can_write("session", "third"));
     }
 
     #[test]

@@ -89,6 +89,19 @@ impl Db {
         self.conn().execute("DELETE FROM backend_audit WHERE created_at_ms < ?1", params![cutoff])?;
         Ok(())
     }
+
+    pub fn record_backend_last_use_audit(&self, device_id: &str, source: Option<&str>, now_ms: i64) -> Result<(), rusqlite::Error> {
+        self.conn().execute(
+            "INSERT INTO backend_audit (event, device_id, source, created_at_ms)
+             SELECT 'device.last_used', ?1, ?2, ?3
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM backend_audit
+                 WHERE event = 'device.last_used' AND device_id = ?1 AND created_at_ms >= ?4
+             )",
+            params![device_id, source, now_ms, now_ms - 5 * 60 * 1000],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

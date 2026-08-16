@@ -52,6 +52,7 @@ struct AppState {
     instance_id: String,
     remote_security: Option<remote::RemoteSecurity>,
     leases: remote::ControlLeases,
+    remote_websockets: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Debug, Clone)]
@@ -239,7 +240,7 @@ struct CreateSessionRequest {
 #[serde(tag = "type", rename_all = "lowercase")]
 enum ClientControl {
     Resize { rows: u16, cols: u16 },
-    TakeControl,
+    TakeControl { expected_version: u64 },
 }
 
 #[derive(Debug, Serialize)]
@@ -286,7 +287,7 @@ struct PairResponse {
     device_name: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoteConfig {
     bind: SocketAddr,
     public_url: Url,
@@ -356,27 +357,50 @@ pub async fn run(port: u16) -> anyhow::Result<()> {
     }
     tracing::info!("AkironMux session service listening on http://{}", address);
 
-    let remote_config = remote_config(&state)?;
-    let remote_task = if let Some(config) = remote_config {
-        let listener = TcpListener::bind(config.bind)
-            .await
-            .map_err(|error| anyhow::anyhow!("Failed to bind Remote backend on {}: {error}", config.bind))?;
-        tracing::info!("AkironMux Remote backend listening on http://{} for {}", listener.local_addr()?, config.public_url);
-        let app = remote_router(Arc::clone(&state), config.public_url);
-        Some(tokio::spawn(
-            async move { axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await },
-        ))
-    } else {
-        None
-    };
+    let remote_supervisor = tokio::spawn(supervise_remote_listener(Arc::clone(&state)));
     let result = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await;
-    if let Some(task) = remote_task {
-        task.abort();
-    }
+    remote_supervisor.abort();
     manager.shutdown();
     let _ = std::fs::remove_file(service_state_path());
     result?;
     Ok(())
+}
+
+async fn supervise_remote_listener(state: Arc<AppState>) {
+    let mut active: Option<(RemoteConfig, tokio::task::JoinHandle<()>)> = None;
+    loop {
+        let desired = match remote_config(&state) {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!("Remote backend configuration rejected: {error:#}");
+                None
+            }
+        };
+        let unchanged = active.as_ref().map(|(config, _)| config) == desired.as_ref();
+        if !unchanged {
+            if let Some((_, task)) = active.take() {
+                task.abort();
+                tracing::info!("AkironMux Remote listener stopped without affecting managed sessions");
+            }
+            if let Some(config) = desired {
+                match TcpListener::bind(config.bind).await {
+                    Ok(listener) => {
+                        let address = listener.local_addr().unwrap_or(config.bind);
+                        tracing::info!("AkironMux Remote backend listening on http://{} for {}", address, config.public_url);
+                        let app = remote_router(Arc::clone(&state), config.public_url.clone());
+                        let task = tokio::spawn(async move {
+                            if let Err(error) = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await {
+                                tracing::warn!("Remote listener stopped unexpectedly: {error}");
+                            }
+                        });
+                        active = Some((config, task));
+                    }
+                    Err(error) => tracing::warn!("Unable to bind Remote listener on {}: {error}", config.bind),
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 }
 
 #[allow(dead_code)]
@@ -395,6 +419,7 @@ fn app_state(manager: SessionManager, db: Db, remote_security: remote::RemoteSec
         instance_id,
         remote_security: Some(remote_security),
         leases: remote::ControlLeases::default(),
+        remote_websockets: Arc::new(tokio::sync::Semaphore::new(32)),
     });
     start_title_sync(Arc::clone(&state));
     Ok(state)
@@ -423,6 +448,7 @@ fn local_router(state: Arc<AppState>) -> Router {
     api_routes()
         .route("/api/pairing", get(list_pending_pairings).post(create_pairing))
         .route("/api/pairing/:id/confirm", post(confirm_pairing))
+        .route("/api/devices/:id/revoke", post(revoke_device))
         .route("/", get(index))
         .route("/app.js", get(app_js))
         .route("/style.css", get(style_css))
@@ -556,7 +582,7 @@ async fn validate_remote_request(State((state, public_url)): State<(Arc<AppState
             || !requested_headers
                 .split(',')
                 .map(|value| value.trim().to_ascii_lowercase())
-                .all(|value| value == "authorization" || value == "content-type")
+                .all(|value| value == "authorization" || value == "content-type" || value == "x-akmux-protocol")
         {
             return remote_error(StatusCode::FORBIDDEN, "Remote CORS preflight is not allowed");
         }
@@ -565,6 +591,13 @@ async fn validate_remote_request(State((state, public_url)): State<(Arc<AppState
 
     let anonymous = request.uri().path() == "/healthz" || request.uri().path() == "/api/pair" || request.uri().path().ends_with("/terminal");
     if !anonymous {
+        let protocol_major = request.headers().get("x-akmux-protocol").and_then(|value| value.to_str().ok());
+        if protocol_major != Some("1") {
+            return remote_cors(
+                remote_error(StatusCode::UPGRADE_REQUIRED, "Remote API protocol major version 1 is required"),
+                origin.as_deref(),
+            );
+        }
         let token = request
             .headers()
             .get(header::AUTHORIZATION)
@@ -594,6 +627,9 @@ async fn validate_remote_request(State((state, public_url)): State<(Arc<AppState
             return remote_cors(remote_error(StatusCode::UNAUTHORIZED, "A valid device credential is required"), origin.as_deref());
         };
         security.clear_auth_failures(&limit_key);
+        if let Ok(db) = state.db.lock() {
+            let _ = db.record_backend_last_use_audit(&device.token_id, Some(&source), remote::now_ms());
+        }
         request.extensions_mut().insert(RequestDevice(device));
     }
     request.extensions_mut().insert(RequestAccess::Remote);
@@ -611,9 +647,10 @@ fn remote_cors(mut response: Response, origin: Option<&str>) -> Response {
         response
             .headers_mut()
             .insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, PATCH, DELETE, OPTIONS"));
-        response
-            .headers_mut()
-            .insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("Authorization, Content-Type"));
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("Authorization, Content-Type, X-Akmux-Protocol"),
+        );
     }
     response
 }
@@ -770,16 +807,44 @@ async fn confirm_pairing(State(state): State<Arc<AppState>>, Path(id): Path<Stri
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn pair_device(State(state): State<Arc<AppState>>, Json(request): Json<PairRequest>) -> Result<Json<PairResponse>, ApiError> {
+async fn revoke_device(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
     let security = state.remote_security.as_ref().ok_or_else(|| ApiError::internal("Remote security is unavailable"))?;
-    let claim = security
-        .begin_pairing_claim(&request.code, &request.device_name)
-        .map_err(|error| ApiError::unauthorized(error.to_string()))?;
+    let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
+    if !security.revoke_device(&db, &id).map_err(|error| ApiError::internal(error.to_string()))? {
+        return Err(ApiError::not_found(anyhow::anyhow!("Active device not found")));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn pair_device(
+    State(state): State<Arc<AppState>>,
+    source: Option<axum::extract::ConnectInfo<SocketAddr>>,
+    Json(request): Json<PairRequest>,
+) -> Result<Json<PairResponse>, ApiError> {
+    let security = state.remote_security.as_ref().ok_or_else(|| ApiError::internal("Remote security is unavailable"))?;
+    let source = source.map_or_else(|| "unknown".into(), |source| source.0.ip().to_string());
+    let limit_key = format!("pair:{source}:{}", request.code.chars().take(12).collect::<String>());
+    if !security.rate_limit_allows(&limit_key) {
+        return Err(ApiError::too_many_requests("Pairing is temporarily rate limited"));
+    }
+    let claim = match security.begin_pairing_claim(&request.code, &request.device_name) {
+        Ok(claim) => {
+            security.clear_auth_failures(&limit_key);
+            claim
+        }
+        Err(error) => {
+            security.record_auth_failure(&limit_key);
+            return Err(ApiError::unauthorized(error.to_string()));
+        }
+    };
     let device_name = security.finish_pairing(claim).await.map_err(|error| ApiError::unauthorized(error.to_string()))?;
     let (device, token) = {
         let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
         security.create_device(&db, &device_name).map_err(|error| ApiError::internal(error.to_string()))?
     };
+    if let Ok(db) = state.db.lock() {
+        let _ = db.record_backend_audit("pairing.completed", Some(&device.token_id), Some(&source), remote::now_ms());
+    }
     Ok(Json(PairResponse {
         token,
         token_id: device.token_id,
@@ -1389,19 +1454,48 @@ async fn terminal_websocket(
         }),
         RequestAccess::Remote => {
             let ticket = query.ticket.ok_or_else(|| ApiError::unauthorized("A WebSocket ticket is required"))?;
-            state
+            let device = state
                 .remote_security
                 .as_ref()
                 .and_then(|security| security.consume_ticket(&ticket, &id))
-                .ok_or_else(|| ApiError::unauthorized("WebSocket ticket is invalid or expired"))?
+                .ok_or_else(|| ApiError::unauthorized("WebSocket ticket is invalid or expired"))?;
+            let active = state
+                .db
+                .lock()
+                .ok()
+                .and_then(|db| db.backend_device_digest(&device.token_id).ok().flatten())
+                .is_some_and(|(record, _)| record.revoked_at_ms.is_none());
+            if !active {
+                return Err(ApiError::unauthorized("Device credential has been revoked"));
+            }
+            device
         }
+    };
+    let websocket_permit = if access == RequestAccess::Remote {
+        Some(
+            state
+                .remote_websockets
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| ApiError::service_unavailable("Remote WebSocket limit reached"))?,
+        )
+    } else {
+        None
     };
     let leases = state.leases.clone();
     let app_state = state.clone();
-    Ok(ws.on_upgrade(move |socket| terminal_socket(socket, session, leases, id, device, app_state)))
+    Ok(ws.on_upgrade(move |socket| terminal_socket(socket, session, leases, id, device, app_state, websocket_permit)))
 }
 
-async fn terminal_socket(socket: WebSocket, session: SessionHandle, leases: remote::ControlLeases, session_id: String, device: remote::DeviceIdentity, state: Arc<AppState>) {
+async fn terminal_socket(
+    socket: WebSocket,
+    session: SessionHandle,
+    leases: remote::ControlLeases,
+    session_id: String,
+    device: remote::DeviceIdentity,
+    state: Arc<AppState>,
+    _websocket_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+) {
     let connection_id = remote::random_id();
     let initial_lease = leases.connect(&session_id, &connection_id, &device.name);
     let mut lease_events = leases.subscribe(&session_id);
@@ -1420,10 +1514,18 @@ async fn terminal_socket(socket: WebSocket, session: SessionHandle, leases: remo
     }
     let mut events = session.subscribe();
     let mut credential_check = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut revocations = state
+        .remote_security
+        .as_ref()
+        .map(remote::RemoteSecurity::subscribe_revocations)
+        .expect("remote security is initialized with application state");
+    let mut idle_check = tokio::time::interval(std::time::Duration::from_secs(30));
+    let mut last_client_activity = std::time::Instant::now();
 
     loop {
         tokio::select! {
             incoming = receiver.next() => {
+                last_client_activity = std::time::Instant::now();
                 match incoming {
                     Some(Ok(Message::Binary(bytes))) => {
                         if leases.can_write(&session_id, &connection_id) && session.write(bytes.to_vec()).is_err() {
@@ -1440,8 +1542,8 @@ async fn terminal_socket(socket: WebSocket, session: SessionHandle, leases: remo
                                     break;
                                 }
                             }
-                            ClientControl::TakeControl => {
-                                leases.take_control(&session_id, &connection_id, &device.name);
+                            ClientControl::TakeControl { expected_version } => {
+                                leases.take_control(&session_id, &connection_id, &device.name, expected_version);
                             }
                         }
                     }
@@ -1498,6 +1600,18 @@ async fn terminal_socket(socket: WebSocket, session: SessionHandle, leases: remo
                     break;
                 }
             }
+            revoked = revocations.recv(), if device.token_id != "local" => {
+                if revoked.ok().as_deref() == Some(device.token_id.as_str()) {
+                    let _ = sender.send(Message::Text(serde_json::json!({ "type": "authorization-revoked" }).to_string())).await;
+                    break;
+                }
+            }
+            _ = idle_check.tick() => {
+                if last_client_activity.elapsed() > std::time::Duration::from_secs(10 * 60) {
+                    let _ = sender.send(Message::Close(None)).await;
+                    break;
+                }
+            }
         }
     }
     leases.disconnect(&session_id, &connection_id);
@@ -1522,6 +1636,20 @@ impl ApiError {
     fn unauthorized(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
+    fn too_many_requests(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: message.into(),
+        }
+    }
+
+    fn service_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
             message: message.into(),
         }
     }
@@ -1956,6 +2084,7 @@ mod tests {
                 Request::builder()
                     .uri("/api/health")
                     .header(header::HOST, "backend.example.com")
+                    .header("x-akmux-protocol", "1")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1981,17 +2110,32 @@ mod tests {
                     .uri("/api/health")
                     .header(header::HOST, "backend.example.com")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header("x-akmux-protocol", "1")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         let wrong_host = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/health")
                     .header(header::HOST, "evil.example.com")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header("x-akmux-protocol", "1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let wrong_protocol = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header(header::HOST, "backend.example.com")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header("x-akmux-protocol", "2")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2000,5 +2144,6 @@ mod tests {
 
         assert_eq!(valid.status(), StatusCode::OK);
         assert_eq!(wrong_host.status(), StatusCode::FORBIDDEN);
+        assert_eq!(wrong_protocol.status(), StatusCode::UPGRADE_REQUIRED);
     }
 }

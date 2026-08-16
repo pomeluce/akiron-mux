@@ -159,19 +159,19 @@ fn handle_remote_backend(mgr: &ConfigManager, action: RemoteBackendAction) -> Re
             );
             mgr.set_setting("remote.bind", &bind.to_string())?;
             mgr.set_setting("remote.public_url", public_url.as_str())?;
-            println!("Remote backend configured. Restart akmux-sessiond after enabling it.");
+            println!("Remote backend configured. A running daemon will apply the change automatically.");
             Ok(())
         }
         RemoteBackendAction::Enable => {
             anyhow::ensure!(mgr.get_setting("remote.public_url").is_some(), "Configure Remote before enabling it");
             anyhow::ensure!(mgr.db().has_active_backend_device()?, "Create at least one device credential before enabling Remote");
             mgr.set_setting("remote.enabled", "true")?;
-            println!("Remote backend enabled. Restart akmux-sessiond to apply the listener change.");
+            println!("Remote backend enabled.");
             Ok(())
         }
         RemoteBackendAction::Disable => {
             mgr.set_setting("remote.enabled", "false")?;
-            println!("Remote backend disabled. Restart akmux-sessiond to remove the listener.");
+            println!("Remote backend disabled without stopping managed sessions.");
             Ok(())
         }
         RemoteBackendAction::Status => {
@@ -215,9 +215,27 @@ fn handle_backend_device(mgr: &ConfigManager, action: BackendDeviceAction) -> Re
             Ok(())
         }
         BackendDeviceAction::Revoke { token_id } => {
-            let now = crate::session_service::remote::now_ms();
-            anyhow::ensure!(mgr.db().revoke_backend_device(&token_id, now)?, "Active device not found: {token_id}");
-            mgr.db().record_backend_audit("device.revoked", Some(&token_id), Some("cli"), now)?;
+            if crate::session_service::control::is_running() {
+                let port = std::env::var("AKMUX_SESSION_PORT")
+                    .or_else(|_| std::env::var("CCSWITCH_SESSION_PORT"))
+                    .ok()
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .unwrap_or(17321);
+                let runtime = tokio::runtime::Runtime::new()?;
+                runtime.block_on(async {
+                    let response = reqwest::Client::new()
+                        .post(format!("http://127.0.0.1:{port}/api/devices/{token_id}/revoke"))
+                        .json(&serde_json::json!({}))
+                        .send()
+                        .await?;
+                    anyhow::ensure!(response.status().is_success(), "Active device not found: {token_id}");
+                    Ok::<_, anyhow::Error>(())
+                })?;
+            } else {
+                let now = crate::session_service::remote::now_ms();
+                anyhow::ensure!(mgr.db().revoke_backend_device(&token_id, now)?, "Active device not found: {token_id}");
+                mgr.db().record_backend_audit("device.revoked", Some(&token_id), Some("cli"), now)?;
+            }
             println!("Device revoked: {token_id}");
             Ok(())
         }

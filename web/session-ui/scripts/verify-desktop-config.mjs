@@ -7,8 +7,12 @@ const cargoManifest = fs.readFileSync(new URL('../src-tauri/Cargo.toml', import.
 const desktopLibrary = fs.readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
 const backendHook = fs.readFileSync(new URL('../src/features/backends/use-backends.ts', import.meta.url), 'utf8');
 const settingsDialog = fs.readFileSync(new URL('../src/features/preferences/settings-dialog.tsx', import.meta.url), 'utf8');
+const releaseWorkflow = fs.readFileSync(new URL('../../../.github/workflows/release.yml', import.meta.url), 'utf8');
 const window = config.app.windows.find(candidate => candidate.label === 'main');
 const nsis = config.bundle.windows.nsis;
+const windowsGuiJob = releaseWorkflow.slice(releaseWorkflow.indexOf('  gui-windows:'), releaseWorkflow.indexOf('\n  publish:'));
+const windowsFrontendBuild = windowsGuiJob.indexOf('pnpm build');
+const windowsCredentialTest = windowsGuiJob.indexOf('Test Windows credential integration');
 
 assert.equal(nsis.installMode, 'perMachine', 'Windows installer must target Program Files');
 assert.equal(nsis.installerIcon, 'icons/icon.ico', 'NSIS installer must use the application icon');
@@ -30,5 +34,9 @@ assert.ok(capability.permissions.includes('core:window:allow-toggle-maximize'));
 assert.ok(capability.permissions.includes('notification:default'), 'desktop notifications must be permitted');
 assert.match(cargoManifest, /tauri-plugin-notification\s*=/, 'notification plugin must be a desktop dependency');
 assert.match(desktopLibrary, /tauri_plugin_notification::init\(\)/, 'notification plugin must be registered with Tauri');
+assert.ok(
+  windowsFrontendBuild >= 0 && windowsCredentialTest >= 0 && windowsFrontendBuild < windowsCredentialTest,
+  'Windows credential tests must build frontendDist before compiling the Tauri context',
+);
 
 console.log('Desktop packaging configuration is valid.');

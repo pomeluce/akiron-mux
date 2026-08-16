@@ -316,6 +316,10 @@ jobs:
         working-directory: web/session-ui
         run: pnpm install --frozen-lockfile
 
+      - name: Build frontend for desktop tests
+        working-directory: web/session-ui
+        run: pnpm build
+
       - name: Test Windows credential integration
         run: cargo test --manifest-path web/session-ui/src-tauri/Cargo.toml --lib backend::tests::windows_credential_adapter_round_trips_without_plaintext_profile_storage
 

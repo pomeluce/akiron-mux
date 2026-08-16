@@ -2,7 +2,7 @@ use anyhow::Context;
 use rusqlite::Connection;
 
 /// Current schema version. Increment each time we add a migration step.
-pub(crate) const CURRENT_USER_VERSION: i32 = 7;
+pub(crate) const CURRENT_USER_VERSION: i32 = 8;
 
 /// Apply schema migrations on the given connection.
 pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), anyhow::Error> {
@@ -38,7 +38,36 @@ pub(crate) fn apply_migrations(conn: &Connection) -> Result<(), anyhow::Error> {
     if version < 7 {
         migrate_v7(conn).context("migrate v7")?;
     }
+    if version < 8 {
+        migrate_v8(conn).context("migrate v8")?;
+    }
 
+    Ok(())
+}
+
+fn migrate_v8(conn: &Connection) -> Result<(), anyhow::Error> {
+    let transaction = conn.unchecked_transaction()?;
+    transaction.execute_batch(
+        "CREATE TABLE backend_devices (
+             token_id TEXT PRIMARY KEY,
+             name TEXT NOT NULL,
+             token_digest BLOB NOT NULL,
+             created_at_ms INTEGER NOT NULL,
+             last_used_at_ms INTEGER,
+             revoked_at_ms INTEGER
+         );
+         CREATE TABLE backend_audit (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             event TEXT NOT NULL,
+             device_id TEXT,
+             source TEXT,
+             created_at_ms INTEGER NOT NULL
+         );
+         CREATE INDEX idx_backend_audit_created_at ON backend_audit(created_at_ms);
+         PRAGMA user_version = 8;",
+    )?;
+    transaction.commit()?;
+    tracing::info!("Migration v8 complete: authenticated backend devices added");
     Ok(())
 }
 

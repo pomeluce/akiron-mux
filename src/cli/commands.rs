@@ -1,4 +1,4 @@
-use crate::cli::args::{CliArgs, Commands, ProxyAction, ServiceAction};
+use crate::cli::args::{BackendAction, BackendDeviceAction, BackendPairAction, CliArgs, Commands, ProxyAction, RemoteBackendAction, ServiceAction};
 use crate::core::config::ConfigManager;
 use crate::core::models::SwitchMode;
 use crate::core::switcher::switch_profile;
@@ -66,6 +66,9 @@ pub fn run_cli(args: CliArgs) -> Result<()> {
         Commands::Service { action } => {
             handle_service(action)?;
         }
+        Commands::Backend { action } => {
+            handle_backend(&mgr, action)?;
+        }
         Commands::Usage { range, profile } => {
             handle_usage(&mgr, &range, profile.as_deref())?;
         }
@@ -76,6 +79,149 @@ pub fn run_cli(args: CliArgs) -> Result<()> {
         Commands::Completions { .. } | Commands::Man => unreachable!(),
     }
     Ok(())
+}
+
+fn handle_backend(mgr: &ConfigManager, action: BackendAction) -> Result<()> {
+    match action {
+        BackendAction::Remote { action } => handle_remote_backend(mgr, action),
+        BackendAction::Device { action } => handle_backend_device(mgr, action),
+        BackendAction::Pair { action } => handle_backend_pair(action),
+    }
+}
+
+fn handle_backend_pair(action: BackendPairAction) -> Result<()> {
+    let port = std::env::var("AKMUX_SESSION_PORT")
+        .or_else(|_| std::env::var("CCSWITCH_SESSION_PORT"))
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(17321);
+    let base_url = format!("http://127.0.0.1:{port}");
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async move {
+        let client = reqwest::Client::new();
+        match action {
+            BackendPairAction::Create => {
+                let response = client.post(format!("{base_url}/api/pairing")).json(&serde_json::json!({})).send().await?;
+                let status = response.status();
+                let body: serde_json::Value = response.json().await?;
+                anyhow::ensure!(
+                    status.is_success(),
+                    "{}",
+                    body.get("error").and_then(|value| value.as_str()).unwrap_or("Unable to create pairing request")
+                );
+                println!("Pairing ID: {}", body["id"].as_str().unwrap_or_default());
+                println!("Expires at: {}", body["expires_at_ms"]);
+                println!("Deep link: {}", body["deep_link"].as_str().unwrap_or_default());
+            }
+            BackendPairAction::Pending => {
+                let response = client.get(format!("{base_url}/api/pairing")).send().await?;
+                anyhow::ensure!(response.status().is_success(), "Unable to list pending pairing requests");
+                let pairings: Vec<serde_json::Value> = response.json().await?;
+                for pairing in pairings {
+                    println!(
+                        "{}\t{}\t{}",
+                        pairing["id"].as_str().unwrap_or_default(),
+                        pairing["device_name"].as_str().unwrap_or("waiting for device"),
+                        pairing["expires_at_ms"]
+                    );
+                }
+            }
+            BackendPairAction::Confirm { id } => {
+                let response = client.post(format!("{base_url}/api/pairing/{id}/confirm")).json(&serde_json::json!({})).send().await?;
+                if !response.status().is_success() {
+                    let body: serde_json::Value = response.json().await.unwrap_or_default();
+                    anyhow::bail!("{}", body.get("error").and_then(|value| value.as_str()).unwrap_or("Unable to confirm pairing request"));
+                }
+                println!("Pairing approved: {id}");
+            }
+        }
+        Ok(())
+    })
+}
+
+fn handle_remote_backend(mgr: &ConfigManager, action: RemoteBackendAction) -> Result<()> {
+    match action {
+        RemoteBackendAction::Configure { bind, public_url } => {
+            let bind = bind.parse::<std::net::SocketAddr>().context("Remote bind must be an IP address and port")?;
+            anyhow::ensure!(
+                crate::session_service::is_safe_remote_bind(bind.ip()),
+                "Remote bind must be loopback, private LAN, or Tailnet; public and wildcard addresses are rejected"
+            );
+            let public_url = url::Url::parse(&public_url).context("Remote public URL is invalid")?;
+            anyhow::ensure!(public_url.scheme() == "https", "Remote public URL must use HTTPS");
+            anyhow::ensure!(
+                public_url.username().is_empty() && public_url.password().is_none(),
+                "Remote public URL cannot contain user information"
+            );
+            anyhow::ensure!(
+                public_url.path() == "/" && public_url.query().is_none() && public_url.fragment().is_none(),
+                "Remote public URL cannot contain a path, query, or fragment"
+            );
+            mgr.set_setting("remote.bind", &bind.to_string())?;
+            mgr.set_setting("remote.public_url", public_url.as_str())?;
+            println!("Remote backend configured. Restart akmux-sessiond after enabling it.");
+            Ok(())
+        }
+        RemoteBackendAction::Enable => {
+            anyhow::ensure!(mgr.get_setting("remote.public_url").is_some(), "Configure Remote before enabling it");
+            anyhow::ensure!(mgr.db().has_active_backend_device()?, "Create at least one device credential before enabling Remote");
+            mgr.set_setting("remote.enabled", "true")?;
+            println!("Remote backend enabled. Restart akmux-sessiond to apply the listener change.");
+            Ok(())
+        }
+        RemoteBackendAction::Disable => {
+            mgr.set_setting("remote.enabled", "false")?;
+            println!("Remote backend disabled. Restart akmux-sessiond to remove the listener.");
+            Ok(())
+        }
+        RemoteBackendAction::Status => {
+            println!(
+                "Remote backend: {}",
+                if mgr.get_setting("remote.enabled").as_deref() == Some("true") {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!("Bind: {}", mgr.get_setting("remote.bind").unwrap_or_else(|| "127.0.0.1:17322".into()));
+            println!("Public URL: {}", mgr.get_setting("remote.public_url").unwrap_or_else(|| "not configured".into()));
+            println!(
+                "Active devices: {}",
+                mgr.db().list_backend_devices()?.iter().filter(|device| device.revoked_at_ms.is_none()).count()
+            );
+            Ok(())
+        }
+    }
+}
+
+fn handle_backend_device(mgr: &ConfigManager, action: BackendDeviceAction) -> Result<()> {
+    use std::io::IsTerminal;
+
+    let security = crate::session_service::remote::RemoteSecurity::load_or_create(&crate::core::config::data_dir().join("remote-auth.pepper"))?;
+    match action {
+        BackendDeviceAction::Create { name, show_token } => {
+            anyhow::ensure!(show_token, "Device creation requires --show-token because the credential can only be displayed once");
+            anyhow::ensure!(std::io::stdout().is_terminal(), "Refusing to print a device credential to non-interactive output");
+            let (device, token) = security.create_device(mgr.db(), &name)?;
+            println!("Device created: {} ({})", device.name, device.token_id);
+            println!("Token (shown once): {token}");
+            Ok(())
+        }
+        BackendDeviceAction::List => {
+            for device in mgr.db().list_backend_devices()? {
+                let state = if device.revoked_at_ms.is_some() { "revoked" } else { "active" };
+                println!("{}\t{}\t{}", device.token_id, state, device.name);
+            }
+            Ok(())
+        }
+        BackendDeviceAction::Revoke { token_id } => {
+            let now = crate::session_service::remote::now_ms();
+            anyhow::ensure!(mgr.db().revoke_backend_device(&token_id, now)?, "Active device not found: {token_id}");
+            mgr.db().record_backend_audit("device.revoked", Some(&token_id), Some("cli"), now)?;
+            println!("Device revoked: {token_id}");
+            Ok(())
+        }
+    }
 }
 
 fn handle_switch(mgr: &ConfigManager, target: Option<String>, mode: SwitchMode) -> Result<()> {

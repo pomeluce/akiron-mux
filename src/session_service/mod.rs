@@ -9,7 +9,7 @@ use axum::{
     body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, Query, Request, State,
+        DefaultBodyLimit, Extension, Path, Query, Request, State,
     },
     http::{header, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
@@ -20,6 +20,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
+use url::Url;
 
 use crate::{
     agent::{AgentKind, LaunchMode},
@@ -29,6 +30,7 @@ use crate::{
 };
 
 pub mod control;
+pub mod remote;
 
 const DEFAULT_PORT: u16 = 17321;
 const INDEX_HTML: &str = include_str!("../../web/session-ui/dist/index.html");
@@ -47,6 +49,18 @@ struct AppState {
     manager: SessionManager,
     db: Arc<Mutex<Db>>,
     workspaces: Arc<Mutex<WorkspaceState>>,
+    instance_id: String,
+    remote_security: Option<remote::RemoteSecurity>,
+    leases: remote::ControlLeases,
+}
+
+#[derive(Debug, Clone)]
+struct RequestDevice(remote::DeviceIdentity);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestAccess {
+    Local,
+    Remote,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +239,7 @@ struct CreateSessionRequest {
 #[serde(tag = "type", rename_all = "lowercase")]
 enum ClientControl {
     Resize { rows: u16, cols: u16 },
+    TakeControl,
 }
 
 #[derive(Debug, Serialize)]
@@ -232,6 +247,49 @@ struct HealthResponse {
     status: &'static str,
     version: &'static str,
     default_cwd: String,
+    instance_id: String,
+    api_protocol: &'static str,
+    capabilities: &'static [&'static str],
+}
+
+#[derive(Debug, Serialize)]
+struct ReachabilityResponse {
+    status: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct TicketRequest {
+    session_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TicketResponse {
+    ticket: String,
+    expires_in_seconds: u8,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalQuery {
+    ticket: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PairRequest {
+    code: String,
+    device_name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PairResponse {
+    token: String,
+    token_id: String,
+    device_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteConfig {
+    bind: SocketAddr,
+    public_url: Url,
 }
 
 #[derive(Debug, Deserialize)]
@@ -286,7 +344,9 @@ pub async fn run(port: u16) -> anyhow::Result<()> {
     if let Err(error) = refresh_native_history(&db) {
         tracing::warn!("Native history refresh failed during service startup: {error:#}");
     }
-    let app = router_with_db(manager.clone(), db);
+    let security = remote::RemoteSecurity::load_or_create(&config::data_dir().join("remote-auth.pepper"))?;
+    let state = app_state(manager.clone(), db, security)?;
+    let app = local_router(Arc::clone(&state));
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port)))
         .await
         .map_err(|error| anyhow::anyhow!("Failed to bind session service on 127.0.0.1:{port}: {error}"))?;
@@ -296,7 +356,23 @@ pub async fn run(port: u16) -> anyhow::Result<()> {
     }
     tracing::info!("AkironMux session service listening on http://{}", address);
 
+    let remote_config = remote_config(&state)?;
+    let remote_task = if let Some(config) = remote_config {
+        let listener = TcpListener::bind(config.bind)
+            .await
+            .map_err(|error| anyhow::anyhow!("Failed to bind Remote backend on {}: {error}", config.bind))?;
+        tracing::info!("AkironMux Remote backend listening on http://{} for {}", listener.local_addr()?, config.public_url);
+        let app = remote_router(Arc::clone(&state), config.public_url);
+        Some(tokio::spawn(
+            async move { axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await },
+        ))
+    } else {
+        None
+    };
     let result = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await;
+    if let Some(task) = remote_task {
+        task.abort();
+    }
     manager.shutdown();
     let _ = std::fs::remove_file(service_state_path());
     result?;
@@ -306,30 +382,28 @@ pub async fn run(port: u16) -> anyhow::Result<()> {
 #[allow(dead_code)]
 fn router(manager: SessionManager) -> Router {
     let db = Db::open(FsPath::new(":memory:")).expect("in-memory session service database");
-    router_with_db(manager, db)
+    local_router(app_state(manager, db, remote::RemoteSecurity::ephemeral()).expect("local app state"))
 }
 
-fn router_with_db(manager: SessionManager, db: Db) -> Router {
+fn app_state(manager: SessionManager, db: Db, remote_security: remote::RemoteSecurity) -> anyhow::Result<Arc<AppState>> {
     let workspace = load_workspace(&db);
+    let instance_id = persisted_instance_id(&db)?;
     let state = Arc::new(AppState {
         manager,
         db: Arc::new(Mutex::new(db)),
         workspaces: Arc::new(Mutex::new(workspace)),
+        instance_id,
+        remote_security: Some(remote_security),
+        leases: remote::ControlLeases::default(),
     });
     start_title_sync(Arc::clone(&state));
+    Ok(state)
+}
+
+fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/", get(index))
-        .route("/app.js", get(app_js))
-        .route("/style.css", get(style_css))
-        .route("/akiron.svg", get(akiron_icon))
-        .route("/openai.svg", get(openai_icon))
-        .route("/claude.svg", get(claude_icon))
-        .route("/fonts/MapleMonoNormalNL-NF-Regular.woff2", get(maple_mono_regular))
-        .route("/fonts/MapleMonoNormalNL-NF-Bold.woff2", get(maple_mono_bold))
-        .route("/fonts/MapleMonoNormalNL-NF-CN-Medium.woff2", get(maple_mono_cn))
-        .route("/fonts/OFL.txt", get(maple_mono_license))
-        .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
-        .route("/api/health", get(health))
+        .route("/api/health", get(health_with_state))
+        .route("/api/auth/ws-ticket", post(issue_ws_ticket))
         .route("/api/directories", get(list_directories).post(create_directory))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/:id/details", get(session_details))
@@ -343,8 +417,35 @@ fn router_with_db(manager: SessionManager, db: Db) -> Router {
         .route("/api/history/refresh", post(refresh_history))
         .route("/api/settings", get(settings).patch(update_settings))
         .route("/api/reorder", post(reorder_workspace_items))
+}
+
+fn local_router(state: Arc<AppState>) -> Router {
+    api_routes()
+        .route("/api/pairing", get(list_pending_pairings).post(create_pairing))
+        .route("/api/pairing/:id/confirm", post(confirm_pairing))
+        .route("/", get(index))
+        .route("/app.js", get(app_js))
+        .route("/style.css", get(style_css))
+        .route("/akiron.svg", get(akiron_icon))
+        .route("/openai.svg", get(openai_icon))
+        .route("/claude.svg", get(claude_icon))
+        .route("/fonts/MapleMonoNormalNL-NF-Regular.woff2", get(maple_mono_regular))
+        .route("/fonts/MapleMonoNormalNL-NF-Bold.woff2", get(maple_mono_bold))
+        .route("/fonts/MapleMonoNormalNL-NF-CN-Medium.woff2", get(maple_mono_cn))
+        .route("/fonts/OFL.txt", get(maple_mono_license))
+        .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
         .with_state(state)
+        .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(middleware::from_fn(validate_local_request))
+}
+
+fn remote_router(state: Arc<AppState>, public_url: Url) -> Router {
+    api_routes()
+        .route("/healthz", get(|| async { Json(ReachabilityResponse { status: "ok" }) }))
+        .route("/api/pair", post(pair_device))
+        .with_state(state.clone())
+        .layer(DefaultBodyLimit::max(64 * 1024))
+        .layer(middleware::from_fn_with_state((state, public_url), validate_remote_request))
 }
 
 fn start_title_sync(state: Arc<AppState>) {
@@ -396,6 +497,7 @@ fn history_time_ms(value: &str) -> Option<i64> {
 }
 
 async fn validate_local_request(request: Request, next: Next) -> Response {
+    let mut request = request;
     let headers = request.headers();
     let valid_host = headers.get(header::HOST).and_then(|value| value.to_str().ok()).is_some_and(is_local_authority);
     let origin = headers.get(header::ORIGIN).and_then(|value| value.to_str().ok()).map(str::to_owned);
@@ -410,6 +512,11 @@ async fn validate_local_request(request: Request, next: Next) -> Response {
             .into_response();
     }
     let preflight = request.method() == Method::OPTIONS;
+    request.extensions_mut().insert(RequestAccess::Local);
+    request.extensions_mut().insert(RequestDevice(remote::DeviceIdentity {
+        token_id: "local".into(),
+        name: "Local client".into(),
+    }));
     let mut response = if preflight { StatusCode::NO_CONTENT.into_response() } else { next.run(request).await };
     if let Some(origin) = origin.and_then(|origin| HeaderValue::from_str(&origin).ok()) {
         response.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
@@ -422,6 +529,112 @@ async fn validate_local_request(request: Request, next: Next) -> Response {
             .insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("Content-Type"));
     }
     response
+}
+
+async fn validate_remote_request(State((state, public_url)): State<(Arc<AppState>, Url)>, mut request: Request, next: Next) -> Response {
+    let expected_host = public_url.host_str().unwrap_or_default();
+    let expected_port = public_url.port_or_known_default();
+    let request_host = request.headers().get(header::HOST).and_then(|value| value.to_str().ok());
+    let valid_host = request_host.is_some_and(|authority| remote_authority_matches(authority, expected_host, expected_port));
+    if !valid_host {
+        return remote_error(StatusCode::FORBIDDEN, "Remote Host does not match the configured public URL");
+    }
+
+    let origin = request.headers().get(header::ORIGIN).and_then(|value| value.to_str().ok()).map(str::to_owned);
+    if origin.as_deref().is_some_and(|value| !remote_origin_matches(value, &public_url)) {
+        return remote_error(StatusCode::FORBIDDEN, "Remote Origin is not allowed");
+    }
+
+    if request.method() == Method::OPTIONS {
+        let requested_method = request.headers().get(header::ACCESS_CONTROL_REQUEST_METHOD).and_then(|value| value.to_str().ok());
+        let requested_headers = request
+            .headers()
+            .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if !matches!(requested_method, Some("GET" | "POST" | "PATCH" | "DELETE"))
+            || !requested_headers
+                .split(',')
+                .map(|value| value.trim().to_ascii_lowercase())
+                .all(|value| value == "authorization" || value == "content-type")
+        {
+            return remote_error(StatusCode::FORBIDDEN, "Remote CORS preflight is not allowed");
+        }
+        return remote_cors(StatusCode::NO_CONTENT.into_response(), origin.as_deref());
+    }
+
+    let anonymous = request.uri().path() == "/healthz" || request.uri().path() == "/api/pair" || request.uri().path().ends_with("/terminal");
+    if !anonymous {
+        let token = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "));
+        let source = request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<SocketAddr>>()
+            .map_or_else(|| "unknown".into(), |source| source.0.ip().to_string());
+        let token_id = token.and_then(remote::token_public_id).unwrap_or("unknown");
+        let limit_key = format!("{source}:{token_id}");
+        let Some(security) = state.remote_security.as_ref() else {
+            return remote_error(StatusCode::INTERNAL_SERVER_ERROR, "Remote security is unavailable");
+        };
+        if !security.rate_limit_allows(&limit_key) {
+            return remote_cors(remote_error(StatusCode::TOO_MANY_REQUESTS, "Authentication is temporarily rate limited"), origin.as_deref());
+        }
+        let device = token.and_then(|token| {
+            let db = state.db.lock().ok()?;
+            security.authenticate(&db, token).ok().flatten()
+        });
+        let Some(device) = device else {
+            security.record_auth_failure(&limit_key);
+            if let Ok(db) = state.db.lock() {
+                let _ = db.record_backend_audit("auth.failed", (token_id != "unknown").then_some(token_id), Some(&source), remote::now_ms());
+            }
+            return remote_cors(remote_error(StatusCode::UNAUTHORIZED, "A valid device credential is required"), origin.as_deref());
+        };
+        security.clear_auth_failures(&limit_key);
+        request.extensions_mut().insert(RequestDevice(device));
+    }
+    request.extensions_mut().insert(RequestAccess::Remote);
+    remote_cors(next.run(request).await, origin.as_deref())
+}
+
+fn remote_error(status: StatusCode, message: &str) -> Response {
+    (status, Json(ErrorResponse { error: message.into() })).into_response()
+}
+
+fn remote_cors(mut response: Response, origin: Option<&str>) -> Response {
+    if let Some(origin) = origin.and_then(|origin| HeaderValue::from_str(origin).ok()) {
+        response.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        response.headers_mut().insert(header::VARY, HeaderValue::from_static("Origin"));
+        response
+            .headers_mut()
+            .insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, PATCH, DELETE, OPTIONS"));
+        response
+            .headers_mut()
+            .insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("Authorization, Content-Type"));
+    }
+    response
+}
+
+fn remote_authority_matches(authority: &str, expected_host: &str, expected_port: Option<u16>) -> bool {
+    let Ok(url) = Url::parse(&format!("https://{authority}")) else {
+        return false;
+    };
+    url.host_str().is_some_and(|host| host.eq_ignore_ascii_case(expected_host)) && url.port_or_known_default() == expected_port
+}
+
+fn remote_origin_matches(origin: &str, public_url: &Url) -> bool {
+    if matches!(origin, "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost") {
+        return true;
+    }
+    let Ok(origin) = Url::parse(origin) else {
+        return false;
+    };
+    origin.scheme() == public_url.scheme()
+        && origin.host_str().map(str::to_ascii_lowercase) == public_url.host_str().map(str::to_ascii_lowercase)
+        && origin.port_or_known_default() == public_url.port_or_known_default()
 }
 
 fn is_local_authority(authority: &str) -> bool {
@@ -500,12 +713,121 @@ fn static_response(body: &[u8], content_type: &'static str, no_store: bool) -> R
     response
 }
 
-async fn health() -> Json<HealthResponse> {
+async fn health_with_state(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         default_cwd: default_working_directory().display().to_string(),
+        instance_id: state.instance_id.clone(),
+        api_protocol: "1.0",
+        capabilities: &["device-auth", "ws-ticket", "control-lease", "workspace-v1"],
     })
+}
+
+async fn issue_ws_ticket(
+    State(state): State<Arc<AppState>>,
+    Extension(device): Extension<RequestDevice>,
+    Json(request): Json<TicketRequest>,
+) -> Result<Json<TicketResponse>, ApiError> {
+    if state.manager.get(&request.session_id).is_none() {
+        return Err(ApiError::not_found(anyhow::anyhow!("Managed session does not exist")));
+    }
+    let ticket = state
+        .remote_security
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("Remote security is unavailable"))?
+        .issue_ticket(device.0, request.session_id);
+    Ok(Json(TicketResponse { ticket, expires_in_seconds: 30 }))
+}
+
+async fn create_pairing(State(state): State<Arc<AppState>>) -> Result<Json<remote::PairingOffer>, ApiError> {
+    let public_url = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("Database lock poisoned"))?
+        .get_setting("remote.public_url")
+        .ok_or_else(|| ApiError::bad_request(anyhow::anyhow!("Remote public URL is not configured")))?;
+    let offer = state
+        .remote_security
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("Remote security is unavailable"))?
+        .create_pairing(&public_url, "AkironMux")
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(offer))
+}
+
+async fn list_pending_pairings(State(state): State<Arc<AppState>>) -> Json<Vec<remote::PendingPairingInfo>> {
+    Json(state.remote_security.as_ref().map_or_else(Vec::new, remote::RemoteSecurity::pending_pairings))
+}
+
+async fn confirm_pairing(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    state
+        .remote_security
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("Remote security is unavailable"))?
+        .approve_pairing(&id)
+        .map_err(ApiError::bad_request)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn pair_device(State(state): State<Arc<AppState>>, Json(request): Json<PairRequest>) -> Result<Json<PairResponse>, ApiError> {
+    let security = state.remote_security.as_ref().ok_or_else(|| ApiError::internal("Remote security is unavailable"))?;
+    let claim = security
+        .begin_pairing_claim(&request.code, &request.device_name)
+        .map_err(|error| ApiError::unauthorized(error.to_string()))?;
+    let device_name = security.finish_pairing(claim).await.map_err(|error| ApiError::unauthorized(error.to_string()))?;
+    let (device, token) = {
+        let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
+        security.create_device(&db, &device_name).map_err(|error| ApiError::internal(error.to_string()))?
+    };
+    Ok(Json(PairResponse {
+        token,
+        token_id: device.token_id,
+        device_name: device.name,
+    }))
+}
+
+fn persisted_instance_id(db: &Db) -> anyhow::Result<String> {
+    if let Some(value) = db.get_setting("remote.instance_id") {
+        return Ok(value);
+    }
+    let value = remote::random_id();
+    db.set_setting("remote.instance_id", &value)?;
+    Ok(value)
+}
+
+fn remote_config(state: &AppState) -> anyhow::Result<Option<RemoteConfig>> {
+    let db = state.db.lock().map_err(|_| anyhow::anyhow!("Database lock poisoned"))?;
+    if db.get_setting("remote.enabled").as_deref() != Some("true") {
+        return Ok(None);
+    }
+    anyhow::ensure!(db.has_active_backend_device()?, "Remote backend requires at least one active device credential");
+    let bind = db.get_setting("remote.bind").unwrap_or_else(|| "127.0.0.1:17322".into()).parse::<SocketAddr>()?;
+    anyhow::ensure!(
+        is_safe_remote_bind(bind.ip()),
+        "Remote bind must be loopback, private LAN, or Tailnet; public and wildcard addresses are rejected"
+    );
+    let public_url = Url::parse(&db.get_setting("remote.public_url").ok_or_else(|| anyhow::anyhow!("Remote public URL is required"))?)?;
+    anyhow::ensure!(public_url.scheme() == "https", "Remote public URL must use HTTPS");
+    anyhow::ensure!(
+        public_url.username().is_empty() && public_url.password().is_none(),
+        "Remote public URL cannot contain user information"
+    );
+    anyhow::ensure!(
+        public_url.path() == "/" && public_url.query().is_none() && public_url.fragment().is_none(),
+        "Remote public URL cannot contain a path, query, or fragment"
+    );
+    Ok(Some(RemoteConfig { bind, public_url }))
+}
+
+pub(crate) fn is_safe_remote_bind(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        }
+        std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
+    }
 }
 
 fn refresh_native_history(db: &Db) -> anyhow::Result<()> {
@@ -1048,31 +1370,63 @@ async fn close_session(State(state): State<Arc<AppState>>, Path(id): Path<String
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn terminal_websocket(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Result<Response, ApiError> {
+async fn terminal_websocket(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<TerminalQuery>,
+    Extension(access): Extension<RequestAccess>,
+    device: Option<Extension<RequestDevice>>,
+) -> Result<Response, ApiError> {
     let session = state
         .manager
         .get(&id)
         .ok_or_else(|| ApiError::not_found(anyhow::anyhow!("Managed session does not exist")))?;
-    Ok(ws.on_upgrade(move |socket| terminal_socket(socket, session)))
+    let device = match access {
+        RequestAccess::Local => device.map(|device| device.0 .0).unwrap_or(remote::DeviceIdentity {
+            token_id: "local".into(),
+            name: "Local client".into(),
+        }),
+        RequestAccess::Remote => {
+            let ticket = query.ticket.ok_or_else(|| ApiError::unauthorized("A WebSocket ticket is required"))?;
+            state
+                .remote_security
+                .as_ref()
+                .and_then(|security| security.consume_ticket(&ticket, &id))
+                .ok_or_else(|| ApiError::unauthorized("WebSocket ticket is invalid or expired"))?
+        }
+    };
+    let leases = state.leases.clone();
+    let app_state = state.clone();
+    Ok(ws.on_upgrade(move |socket| terminal_socket(socket, session, leases, id, device, app_state)))
 }
 
-async fn terminal_socket(socket: WebSocket, session: SessionHandle) {
+async fn terminal_socket(socket: WebSocket, session: SessionHandle, leases: remote::ControlLeases, session_id: String, device: remote::DeviceIdentity, state: Arc<AppState>) {
+    let connection_id = remote::random_id();
+    let initial_lease = leases.connect(&session_id, &connection_id, &device.name);
+    let mut lease_events = leases.subscribe(&session_id);
     let (mut sender, mut receiver) = socket.split();
     let scrollback = session.scrollback();
     if !scrollback.is_empty() && sender.send(Message::Binary(scrollback)).await.is_err() {
         return;
     }
     if send_status(&mut sender, &session.info()).await.is_err() {
+        leases.disconnect(&session_id, &connection_id);
+        return;
+    }
+    if send_lease(&mut sender, &initial_lease).await.is_err() {
+        leases.disconnect(&session_id, &connection_id);
         return;
     }
     let mut events = session.subscribe();
+    let mut credential_check = tokio::time::interval(std::time::Duration::from_secs(1));
 
     loop {
         tokio::select! {
             incoming = receiver.next() => {
                 match incoming {
                     Some(Ok(Message::Binary(bytes))) => {
-                        if session.write(bytes.to_vec()).is_err() {
+                        if leases.can_write(&session_id, &connection_id) && session.write(bytes.to_vec()).is_err() {
                             break;
                         }
                     }
@@ -1082,9 +1436,12 @@ async fn terminal_socket(socket: WebSocket, session: SessionHandle) {
                         };
                         match control {
                             ClientControl::Resize { rows, cols } => {
-                                if session.resize(rows, cols).is_err() {
+                                if leases.can_write(&session_id, &connection_id) && session.resize(rows, cols).is_err() {
                                     break;
                                 }
+                            }
+                            ClientControl::TakeControl => {
+                                leases.take_control(&session_id, &connection_id, &device.name);
                             }
                         }
                     }
@@ -1122,13 +1479,37 @@ async fn terminal_socket(socket: WebSocket, session: SessionHandle) {
                     }
                 }
             }
+            lease = lease_events.recv() => {
+                if let Ok(lease) = lease {
+                    if send_lease(&mut sender, &lease).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            _ = credential_check.tick(), if device.token_id != "local" => {
+                let active = state
+                    .db
+                    .lock()
+                    .ok()
+                    .and_then(|db| db.backend_device_digest(&device.token_id).ok().flatten())
+                    .is_some_and(|(device, _)| device.revoked_at_ms.is_none());
+                if !active {
+                    let _ = sender.send(Message::Text(serde_json::json!({ "type": "authorization-revoked" }).to_string())).await;
+                    break;
+                }
+            }
         }
     }
+    leases.disconnect(&session_id, &connection_id);
 }
 
 async fn send_status(sender: &mut futures_util::stream::SplitSink<WebSocket, Message>, info: &SessionInfo) -> Result<(), axum::Error> {
     let message = serde_json::json!({ "type": "status", "session": info }).to_string();
     sender.send(Message::Text(message)).await
+}
+
+async fn send_lease(sender: &mut futures_util::stream::SplitSink<WebSocket, Message>, lease: &remote::LeaseState) -> Result<(), axum::Error> {
+    sender.send(Message::Text(serde_json::json!({ "type": "lease", "lease": lease }).to_string())).await
 }
 
 #[derive(Debug)]
@@ -1138,6 +1519,13 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
     fn bad_request(error: anyhow::Error) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -1222,7 +1610,9 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{directory_listing, is_local_authority, is_local_origin, router, workspace_response, Project, SortMode, WorkspaceDirectory, WorkspaceState};
+    use super::{
+        app_state, directory_listing, is_local_authority, is_local_origin, remote_router, router, workspace_response, Project, SortMode, WorkspaceDirectory, WorkspaceState,
+    };
     use crate::db::{sessions::SessionRecord, Db};
     use crate::session_runtime::SessionManager;
     use axum::{
@@ -1262,6 +1652,18 @@ mod tests {
         assert!(is_local_origin("http://tauri.localhost"));
         assert!(!is_local_origin("https://example.com"));
         assert!(!is_local_origin("https://tauri.localhost.example.com"));
+    }
+
+    #[test]
+    fn remote_bind_rejects_wildcard_and_public_addresses() {
+        use std::net::IpAddr;
+
+        for value in ["127.0.0.1", "192.168.1.10", "10.0.0.4", "100.64.0.2", "::1", "fd00::1"] {
+            assert!(super::is_safe_remote_bind(value.parse::<IpAddr>().unwrap()), "{value}");
+        }
+        for value in ["0.0.0.0", "8.8.8.8", "1.1.1.1", "::", "2001:4860:4860::8888"] {
+            assert!(!super::is_safe_remote_bind(value.parse::<IpAddr>().unwrap()), "{value}");
+        }
     }
 
     #[test]
@@ -1535,5 +1937,68 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn remote_router_exposes_only_minimal_health_anonymously() {
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        let security = super::remote::RemoteSecurity::ephemeral();
+        let state = app_state(SessionManager::new(), db, security).unwrap();
+        let app = remote_router(state, url::Url::parse("https://backend.example.com").unwrap());
+
+        let reachability = app
+            .clone()
+            .oneshot(Request::builder().uri("/healthz").header(header::HOST, "backend.example.com").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let protected = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header(header::HOST, "backend.example.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(reachability.status(), StatusCode::OK);
+        assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn remote_router_authenticates_device_and_rejects_wrong_host() {
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        let security = super::remote::RemoteSecurity::ephemeral();
+        let (_, token) = security.create_device(&db, "Test desktop").unwrap();
+        let state = app_state(SessionManager::new(), db, security).unwrap();
+        let app = remote_router(state, url::Url::parse("https://backend.example.com").unwrap());
+
+        let valid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header(header::HOST, "backend.example.com")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let wrong_host = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header(header::HOST, "evil.example.com")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(valid.status(), StatusCode::OK);
+        assert_eq!(wrong_host.status(), StatusCode::FORBIDDEN);
     }
 }

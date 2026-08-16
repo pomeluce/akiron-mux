@@ -64,6 +64,12 @@ pub enum Commands {
         action: ServiceAction,
     },
 
+    /// Configure authenticated Local/Remote session backends
+    Backend {
+        #[command(subcommand)]
+        action: BackendAction,
+    },
+
     /// Show token usage statistics
     Usage {
         #[arg(long, default_value = "week")]
@@ -88,6 +94,67 @@ pub enum Commands {
 
     /// Output man page (roff format)
     Man,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BackendAction {
+    /// Configure and control the authenticated Remote listener
+    Remote {
+        #[command(subcommand)]
+        action: RemoteBackendAction,
+    },
+    /// Create, list, and revoke Remote client devices
+    Device {
+        #[command(subcommand)]
+        action: BackendDeviceAction,
+    },
+    /// Create and approve short-lived mobile pairing requests
+    Pair {
+        #[command(subcommand)]
+        action: BackendPairAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BackendPairAction {
+    /// Create a 60-second pairing deep link
+    Create,
+    /// List pending pairing requests
+    Pending,
+    /// Approve a pending pairing request
+    Confirm { id: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RemoteBackendAction {
+    /// Save the private bind address and public HTTPS URL
+    Configure {
+        #[arg(long, default_value = "127.0.0.1:17322")]
+        bind: String,
+        #[arg(long)]
+        public_url: String,
+    },
+    /// Enable Remote on the next daemon start
+    Enable,
+    /// Disable Remote on the next daemon start
+    Disable,
+    /// Show Remote configuration without credentials
+    Status,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BackendDeviceAction {
+    /// Create a device credential and print it exactly once
+    Create {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        show_token: bool,
+    },
+    /// List devices without credential material
+    List,
+    /// Revoke a device immediately
+    Revoke { token_id: String },
 }
 
 #[derive(Subcommand, Debug)]

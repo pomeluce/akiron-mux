@@ -15,6 +15,7 @@
 - **Token 用量**：按模型统计 Token 消耗，带缓存避免每帧查询
 - **多语言**：内置中文 / English 切换，设置持久化
 - **桌面会话工作区**：通过可选的本地后端，在一个 GUI 中运行和恢复 Claude Code / Codex 会话
+- **认证远程后端**：独立 Remote 监听器、逐设备凭证、60 秒配对、单次 WebSocket 票据和终端控制租约
 
 ## 安装
 
@@ -224,6 +225,21 @@ akmux service uninstall            # 卸载后台服务
 #   macOS   → launchd agent
 #   Windows → 计划任务 (Schtasks)
 
+# 远程会话后端（明文监听器只绑定 loopback、LAN 或 Tailnet 地址）
+akmux backend remote configure --bind 127.0.0.1:17322 --public-url https://akmux.example.com
+akmux backend device create --name "My desktop" --show-token
+akmux backend remote enable
+akmux backend remote status
+
+# 60 秒移动端配对；手机提交后再确认 pending ID
+akmux backend pair create
+akmux backend pair pending
+akmux backend pair confirm <pairing-id>
+
+# 设备管理（输出不包含凭证明文）
+akmux backend device list
+akmux backend device revoke <token-id>
+
 # 用量与历史
 akmux usage                        # Token 用量统计（默认本周）
 akmux usage --day|--week|--month   # 按日/周/月
@@ -252,6 +268,26 @@ akmux man                          # 输出 roff 格式 man page
 首次启动 `akmux` 时会先显示终端进度条导入 Claude Code 历史会话数据（从 `~/.claude/projects/` 扫描 JSONL 文件）。导入完成后自动进入 TUI。后续启动跳过导入直接进入。
 
 用量数据在进入 TUI 后通过后台异步扫描。Claude 数据来自 `~/.claude/projects`，Codex 数据来自 `~/.codex/sessions`；会话与用量面板约每秒检测变化并实时刷新。Codex rename 后的会话标题从 `~/.codex/session_index.jsonl` 同步。
+
+### 远程后端部署
+
+Remote API 默认使用 `127.0.0.1:17322`，自身不终止 TLS。设备 Token 等同于宿主机当前用户权限下的终端控制凭证，应分别为每台设备创建并及时撤销；Token 明文只显示一次，数据库仅保存 HMAC 摘要，`~/.config/akmux/remote-auth.pepper` 必须与数据库一同备份。
+
+推荐让 Caddy 在同一主机终止 TLS：
+
+```caddyfile
+akmux.example.com {
+  reverse_proxy 127.0.0.1:17322
+}
+```
+
+也可以使用 Tailscale Serve 将 loopback 服务发布到 Tailnet：
+
+```bash
+tailscale serve --bg https / http://127.0.0.1:17322
+```
+
+随后将 `--public-url` 配置为实际的 HTTPS 地址。AkironMux 不会自动修改 DNS、防火墙、Caddy 或 Tailnet；不要把 17322 的明文 HTTP 监听器直接暴露到公网。Remote 默认拒绝 wildcard 和公网 IP 直绑，只允许 loopback、私网、link-local 和 Tailnet/共享地址。
 
 ### defaults.toml
 

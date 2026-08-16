@@ -22,6 +22,7 @@ pub struct SettingsTab {
     mode_idx: usize,
     lang_idx: usize,
     session_service_enabled: bool,
+    remote_backend_enabled: bool,
 }
 
 impl SettingsTab {
@@ -45,6 +46,7 @@ impl SettingsTab {
 
         let mode_idx = if mgr.get_setting("proxy_mode").map(|v| v == "true").unwrap_or(false) { 1 } else { 0 };
         let session_service_enabled = crate::session_service::control::enabled(&mgr);
+        let remote_backend_enabled = mgr.get_setting("remote.enabled").as_deref() == Some("true");
         if let Err(error) = crate::session_service::control::reconcile(&mgr) {
             tracing::warn!("Failed to reconcile AkironMux session service: {error:#}");
         }
@@ -55,6 +57,7 @@ impl SettingsTab {
             mode_idx,
             lang_idx,
             session_service_enabled,
+            remote_backend_enabled,
         }
     }
 
@@ -69,6 +72,14 @@ impl SettingsTab {
                 lang::pick(
                     if self.session_service_enabled { "Enabled" } else { "Disabled" },
                     if self.session_service_enabled { "开启" } else { "关闭" },
+                )
+                .to_string(),
+            ),
+            (
+                lang::pick("Remote backend", "远程后端"),
+                lang::pick(
+                    if self.remote_backend_enabled { "Enabled" } else { "Disabled" },
+                    if self.remote_backend_enabled { "开启" } else { "关闭" },
                 )
                 .to_string(),
             ),
@@ -152,6 +163,22 @@ impl SettingsTab {
             Err(error) => tracing::warn!("Failed to update AkironMux session service: {error:#}"),
         }
     }
+
+    fn toggle_remote_backend(&mut self) {
+        let next = !self.remote_backend_enabled;
+        if next {
+            let configured = self.mgr.get_setting("remote.public_url").is_some();
+            let has_device = self.mgr.db().has_active_backend_device().unwrap_or(false);
+            if !configured || !has_device {
+                tracing::warn!("Configure Remote and create a device with the CLI before enabling it");
+                return;
+            }
+        }
+        match self.mgr.set_setting("remote.enabled", &next.to_string()) {
+            Ok(()) => self.remote_backend_enabled = next,
+            Err(error) => tracing::warn!("Failed to update Remote backend: {error:#}"),
+        }
+    }
 }
 
 impl TabContent for SettingsTab {
@@ -167,7 +194,7 @@ impl TabContent for SettingsTab {
             .unwrap_or(0);
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(7), Constraint::Length(5), Constraint::Length(5), Constraint::Min(5)])
+            .constraints([Constraint::Length(7), Constraint::Length(5), Constraint::Length(7), Constraint::Min(5)])
             .split(area);
 
         let appearance = vec![
@@ -183,7 +210,11 @@ impl TabContent for SettingsTab {
         let claude = vec![setting_line(2, self.selected, items[2].0, &items[2].1, max_label_dw)];
         f.render_widget(section("Claude".into(), claude), sections[1]);
 
-        let backend = vec![setting_line(3, self.selected, items[3].0, &items[3].1, max_label_dw)];
+        let backend = vec![
+            setting_line(3, self.selected, items[3].0, &items[3].1, max_label_dw),
+            Line::from(""),
+            setting_line(4, self.selected, items[4].0, &items[4].1, max_label_dw),
+        ];
         f.render_widget(section(lang::pick("Services", "服务").into(), backend), sections[2]);
 
         let database = shorten_home(&config::db_path().display().to_string());
@@ -209,6 +240,7 @@ impl TabContent for SettingsTab {
                 1 => self.cycle_lang(true),
                 2 => self.cycle_mode(true),
                 3 => self.toggle_session_service(),
+                4 => self.toggle_remote_backend(),
                 _ => {}
             },
             KeyCode::Char('h') | KeyCode::Left => match self.selected {
@@ -216,6 +248,7 @@ impl TabContent for SettingsTab {
                 1 => self.cycle_lang(false),
                 2 => self.cycle_mode(false),
                 3 => self.toggle_session_service(),
+                4 => self.toggle_remote_backend(),
                 _ => {}
             },
             _ => return false,

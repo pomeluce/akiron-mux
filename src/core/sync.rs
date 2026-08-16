@@ -1,5 +1,5 @@
 use crate::core::config::ConfigManager;
-use crate::core::models::AppType;
+use crate::core::models::{AppType, OFFICIAL_CODEX_PROVIDER_ID};
 
 /// Sync active provider/profile from Claude Code's settings.json (akmux.last_switch.source).
 /// Called on app startup to align AkironMux's active selection with the last switch.
@@ -65,7 +65,14 @@ pub fn sync_codex_active_from_config(mgr: &ConfigManager) {
 fn sync_codex_active_from_path(mgr: &ConfigManager, config_path: &std::path::Path) {
     let content = match std::fs::read_to_string(config_path) {
         Ok(content) => content,
-        Err(_) => return,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            set_official_codex_active(mgr);
+            return;
+        }
+        Err(error) => {
+            tracing::warn!("Failed to read Codex config.toml for sync: {}", error);
+            return;
+        }
     };
     let parsed: toml::Value = match toml::from_str(&content) {
         Ok(value) => value,
@@ -84,6 +91,7 @@ fn sync_codex_active_from_path(mgr: &ConfigManager, config_path: &std::path::Pat
         .and_then(toml::Value::as_str)
         .or_else(|| parsed.get("model_provider").and_then(toml::Value::as_str));
     let Some(provider_id) = provider_id else {
+        set_official_codex_active(mgr);
         return;
     };
     let model = if let Some(switch) = managed_switch {
@@ -106,12 +114,37 @@ fn sync_codex_active_from_path(mgr: &ConfigManager, config_path: &std::path::Pat
     }
 }
 
+fn set_official_codex_active(mgr: &ConfigManager) {
+    if let Err(error) = mgr.set_setting(AppType::Codex.active_provider_key(), OFFICIAL_CODEX_PROVIDER_ID) {
+        tracing::warn!("Failed to select the official Codex provider: {}", error);
+    }
+    if let Err(error) = mgr.set_setting("active_codex_model", "") {
+        tracing::warn!("Failed to clear the active official Codex model: {}", error);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::sync_codex_active_from_path;
     use crate::core::config::ConfigManager;
-    use crate::core::models::{AppType, Provider, Source};
+    use crate::core::models::{AppType, Provider, Source, OFFICIAL_CODEX_PROVIDER_ID};
     use tempfile::tempdir;
+
+    #[test]
+    fn missing_or_provider_free_codex_config_selects_official_openai() {
+        let dir = tempdir().unwrap();
+        let mgr = ConfigManager::new(&dir.path().join("akmux.db"), Some(&dir.path().join("missing-defaults.toml"))).unwrap();
+        let config_path = dir.path().join("config.toml");
+
+        sync_codex_active_from_path(&mgr, &config_path);
+        assert_eq!(mgr.get_setting("active_codex_provider").as_deref(), Some(OFFICIAL_CODEX_PROVIDER_ID));
+
+        std::fs::write(&config_path, "model = \"gpt-5\"\n").unwrap();
+        mgr.set_setting("active_codex_provider", "stale").unwrap();
+        sync_codex_active_from_path(&mgr, &config_path);
+        assert_eq!(mgr.get_setting("active_codex_provider").as_deref(), Some(OFFICIAL_CODEX_PROVIDER_ID));
+        assert_eq!(mgr.get_setting("active_codex_model").as_deref(), Some(""));
+    }
 
     #[test]
     fn managed_builtin_switch_does_not_import_unrelated_model() {

@@ -1,5 +1,5 @@
 use ccswitch::core::config::ConfigManager;
-use ccswitch::core::models::{CodexCatalog, CodexModel, Provider, Source, SwitchMode};
+use ccswitch::core::models::{CodexCatalog, CodexModel, Provider, Source, SwitchMode, OFFICIAL_CODEX_PROVIDER_ID};
 use ccswitch::core::switcher::{remove_codex_provider, switch_codex_model, switch_codex_provider, switch_profile};
 use ccswitch::db::Db;
 use std::fs;
@@ -121,7 +121,7 @@ fn custom_codex_model_writes_aggregated_catalog_and_model_config() {
 }
 
 #[test]
-fn switching_from_custom_to_builtin_removes_ccswitch_model_fields() {
+fn switching_from_custom_to_builtin_removes_managed_model_fields() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("ccswitch.db");
     let db = Db::open(&db_path).unwrap();
@@ -178,6 +178,61 @@ fn switching_from_custom_to_builtin_removes_ccswitch_model_fields() {
     assert!(config.get("model_catalog_json").is_none());
     assert!(config.get("model").is_none());
     assert!(config.get("model_reasoning_effort").is_none());
+}
+
+#[test]
+fn switching_between_official_and_third_party_codex_preserves_separate_auth_files() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("akmux.db");
+    let db = Db::open(&db_path).unwrap();
+    db.insert_provider(
+        &Provider {
+            id: "third-party".into(),
+            name: "Third Party".into(),
+            api_url: "https://api.example.com/v1".into(),
+            api_key: "sk-third-party".into(),
+            codex_catalog: CodexCatalog::BuiltIn,
+            profiles: vec![],
+            models: vec![],
+            source: Source::User,
+        },
+        "codex",
+    )
+    .unwrap();
+    drop(db);
+    let mgr = ConfigManager::new(&db_path, Some(&dir.path().join("missing-defaults.toml"))).unwrap();
+    let codex_dir = dir.path().join("codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    let config_path = codex_dir.join("config.toml");
+    let auth_path = codex_dir.join("auth.json");
+    let official_auth = r#"{"auth_mode":"chatgpt","tokens":{"access_token":"official-session"}}"#;
+    fs::write(&config_path, "model_provider = \"openai\"\nmodel = \"gpt-5\"\n").unwrap();
+    fs::write(&auth_path, official_auth).unwrap();
+
+    switch_codex_provider(&mgr, "third-party", Some(&config_path), Some(&auth_path)).unwrap();
+
+    let third_party_config: toml::Value = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(third_party_config["model_provider"].as_str(), Some("akmux"));
+    assert_eq!(third_party_config["model_providers"]["akmux"]["base_url"].as_str(), Some("https://api.example.com/v1"));
+    assert_eq!(fs::read_to_string(codex_dir.join("auth_openai.json")).unwrap(), official_auth);
+    let third_party_auth: serde_json::Value = serde_json::from_str(&fs::read_to_string(&auth_path).unwrap()).unwrap();
+    assert_eq!(third_party_auth["OPENAI_API_KEY"], "sk-third-party");
+
+    switch_codex_provider(&mgr, OFFICIAL_CODEX_PROVIDER_ID, Some(&config_path), Some(&auth_path)).unwrap();
+
+    let official_config: toml::Value = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(official_config["model_provider"].as_str(), Some("akmux"));
+    assert_eq!(official_config["model_providers"]["akmux"]["name"].as_str(), Some("OpenAI"));
+    assert_eq!(
+        official_config["model_providers"]["akmux"]["base_url"].as_str(),
+        Some("https://chatgpt.com/backend-api/codex")
+    );
+    assert_eq!(official_config["akmux"]["last_switch"]["source"].as_str(), Some(OFFICIAL_CODEX_PROVIDER_ID));
+    assert_eq!(fs::read_to_string(&auth_path).unwrap(), official_auth);
+    let akmux_auth: serde_json::Value = serde_json::from_str(&fs::read_to_string(codex_dir.join("auth_akmux.json")).unwrap()).unwrap();
+    assert_eq!(akmux_auth["OPENAI_API_KEY"], "sk-third-party");
+    assert!(!codex_dir.join("auth_openai.json").exists());
+    assert_eq!(mgr.get_setting("active_codex_provider").as_deref(), Some(OFFICIAL_CODEX_PROVIDER_ID));
 }
 
 #[test]
@@ -299,6 +354,12 @@ base_url = "https://old.example.com/v1"
 wire_api = "responses"
 requires_openai_auth = true
 
+[model_providers.openai]
+name = "Old AkironMux Provider"
+base_url = "https://old-openai.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
 [ccswitch.last_switch]
 source = "legacy-provider"
 "#,
@@ -315,18 +376,21 @@ source = "legacy-provider"
     assert!(!config_text.contains("[ccswitch.last_switch]"));
     let config: toml::Value = toml::from_str(&config_text).unwrap();
     assert_eq!(config["model"].as_str(), Some("gpt-test"));
-    assert_eq!(config["model_provider"].as_str(), Some("ccs"));
+    assert_eq!(config["model_provider"].as_str(), Some("akmux"));
     assert_eq!(config["model_providers"]["existing"]["name"].as_str(), Some("Existing"));
-    assert_eq!(config["model_providers"]["ccs"]["name"].as_str(), Some("Codex Proxy"));
-    assert_eq!(config["model_providers"]["ccs"]["base_url"].as_str(), Some("https://codex.example.com/v1"));
-    assert_eq!(config["model_providers"]["ccs"]["wire_api"].as_str(), Some("responses"));
-    assert_eq!(config["model_providers"]["ccs"]["requires_openai_auth"].as_bool(), Some(true));
+    assert_eq!(config["model_providers"]["akmux"]["name"].as_str(), Some("Codex Proxy"));
+    assert_eq!(config["model_providers"]["akmux"]["base_url"].as_str(), Some("https://codex.example.com/v1"));
+    assert_eq!(config["model_providers"]["akmux"]["wire_api"].as_str(), Some("responses"));
+    assert_eq!(config["model_providers"]["akmux"]["requires_openai_auth"].as_bool(), Some(true));
+    assert!(config["model_providers"].get("openai").is_none());
+    assert!(config["model_providers"].get("ccs").is_none());
     assert_eq!(config["model_providers"]["codex-proxy"]["base_url"].as_str(), Some("https://legacy.example.com/v1"));
     assert_eq!(config["akmux"]["last_switch"]["source"].as_str(), Some("codex-proxy"));
 
     let auth: serde_json::Value = serde_json::from_str(&fs::read_to_string(&auth_path).unwrap()).unwrap();
     assert_eq!(auth["OPENAI_API_KEY"], "sk-codex");
-    assert_eq!(auth["other"], "preserved");
+    assert!(auth.get("other").is_none());
+    assert_eq!(fs::read_to_string(dir.path().join("auth_openai.json")).unwrap(), r#"{"other":"preserved"}"#);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -337,8 +401,8 @@ source = "legacy-provider"
     remove_codex_provider(&mgr, "codex-proxy", Some(&config_path)).unwrap();
     let removed_text = fs::read_to_string(&config_path).unwrap();
     let removed: toml::Value = toml::from_str(&removed_text).unwrap();
-    assert_eq!(removed["model_provider"].as_str(), Some("ccs"));
-    assert_eq!(removed["model_providers"]["ccs"]["base_url"].as_str(), Some("https://codex.example.com/v1"));
+    assert_eq!(removed["model_provider"].as_str(), Some("akmux"));
+    assert_eq!(removed["model_providers"]["akmux"]["base_url"].as_str(), Some("https://codex.example.com/v1"));
     assert_eq!(removed["model_providers"]["codex-proxy"]["base_url"].as_str(), Some("https://legacy.example.com/v1"));
     assert_eq!(removed["model_providers"]["existing"]["name"].as_str(), Some("Existing"));
     assert!(removed.get("akmux").and_then(|item| item.get("last_switch")).is_none());
@@ -350,16 +414,22 @@ source = "legacy-provider"
     assert!(new_config_path.exists());
     assert!(new_auth_path.exists());
     let new_config: toml::Value = toml::from_str(&fs::read_to_string(&new_config_path).unwrap()).unwrap();
-    assert_eq!(new_config["model_provider"].as_str(), Some("ccs"));
-    assert_eq!(new_config["model_providers"]["ccs"]["base_url"].as_str(), Some("https://codex.example.com/v1"));
+    assert_eq!(new_config["model_provider"].as_str(), Some("akmux"));
+    assert_eq!(new_config["model_providers"]["akmux"]["base_url"].as_str(), Some("https://codex.example.com/v1"));
 
-    let guarded_config_path = dir.path().join("guarded-config.toml");
-    let corrupt_auth_path = dir.path().join("corrupt-auth.json");
+    let guarded_dir = dir.path().join("guarded");
+    fs::create_dir_all(&guarded_dir).unwrap();
+    let guarded_config_path = guarded_dir.join("config.toml");
+    let corrupt_auth_path = guarded_dir.join("auth.json");
     let original_config = "model = \"preserved\"\n";
     fs::write(&guarded_config_path, original_config).unwrap();
     fs::write(&corrupt_auth_path, "{ invalid json").unwrap();
-    assert!(switch_codex_provider(&mgr, "codex-proxy", Some(&guarded_config_path), Some(&corrupt_auth_path),).is_err());
-    assert_eq!(fs::read_to_string(&guarded_config_path).unwrap(), original_config);
+    switch_codex_provider(&mgr, "codex-proxy", Some(&guarded_config_path), Some(&corrupt_auth_path)).unwrap();
+    assert_eq!(fs::read_to_string(guarded_dir.join("auth_openai.json")).unwrap(), "{ invalid json");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&corrupt_auth_path).unwrap()).unwrap()["OPENAI_API_KEY"],
+        "sk-codex"
+    );
 
     let invalid_table_path = dir.path().join("invalid-table.toml");
     let invalid_table = "model_providers = \"do not overwrite\"\n";

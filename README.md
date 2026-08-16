@@ -59,6 +59,8 @@
                   ];
                 }
               ];
+              # 官方 Codex 套餐对应的 OpenAI Provider 已内建；这里的配置
+              # 额外保留按 API Key 计费的 OpenAI API Provider。
               codex_providers = [
                 {
                   id = "openai-api";
@@ -104,6 +106,8 @@ Home Manager 会自动：
             defaults = {
               version = 1;
               claude_providers = [ ... ];
+              # 官方 Codex 套餐对应的 OpenAI Provider 已内建；这里的配置
+              # 额外保留按 API Key 计费的 OpenAI API Provider。
               codex_providers = [
                 {
                   id = "openai-api";
@@ -264,7 +268,9 @@ akmux man                          # 输出 roff 格式 man page
 - `~/.config/akmux/defaults.toml` — 系统默认配置（Home Manager / NixOS 生成）
 - `~/.local/share/akmux/akmux.log` — TUI 运行日志
 - `~/.codex/config.toml` — Codex Provider 配置
-- `~/.codex/auth.json` — Codex API Key
+- `~/.codex/auth.json` — 当前生效的 Codex 登录凭证或第三方 API Key
+- `~/.codex/auth_openai.json` — 切换第三方 Provider 时备份的官方 Codex 登录凭证
+- `~/.codex/auth_akmux.json` — 切回官方 Provider 时备份的第三方 API Key
 
 ### 首次启动
 
@@ -442,15 +448,15 @@ Opus/Sonnet/Haiku 变量不在 settings.json 中设置，由 proxy server 透明
 
 ### Codex Provider 切换
 
-Codex 不使用 Claude Profile，也不区分 local/proxy。第三方 Responses Provider 的所有模型会聚合写入 `~/.codex/akmux/models.json`。切换时保留其他设置和已有 Provider，并统一更新兼容字段 `model_providers.ccs`：
+Codex 不使用 Claude Profile，也不区分 local/proxy。TUI 内建不可编辑的 `OpenAI` Provider，用于恢复官方 Codex 套餐。第三方 Responses Provider 的所有模型会聚合写入 `~/.codex/akmux/models.json`。官方套餐和第三方都统一使用 AkironMux 保留的 `akmux` Provider ID，避免覆盖 Codex 内建的 `openai`，并保证两种认证方式创建的历史会话互相兼容：
 
 ```toml
-model_provider = "ccs"
+model_provider = "akmux"
 model = "third-party-coder"
 model_reasoning_effort = "high"
 model_catalog_json = "/home/user/.codex/akmux/models.json"
 
-[model_providers.ccs]
+[model_providers.akmux]
 name = "Codex Proxy"
 base_url = "https://api.example.com/v1"
 wire_api = "responses"
@@ -461,7 +467,7 @@ source = "codex-proxy"
 at = "2026-01-01 12:00:00"
 ```
 
-同时更新 `~/.codex/auth.json`：
+切换到第三方 Provider 时，当前官方 `auth.json` 会移动到 `auth_openai.json`，然后创建只包含第三方 Key 的 `auth.json`：
 
 ```json
 {
@@ -469,7 +475,7 @@ at = "2026-01-01 12:00:00"
 }
 ```
 
-固定的 Codex Catalog 兼容字段由 AkironMux 的版本化模板生成；每个模型只配置名称、上下文、推理档位和能力差异。切回 `codex_catalog = "built-in"` 的 Provider 时，AkironMux 只移除自己管理的 `model_catalog_json` 引用，不覆盖其他外部 Catalog 文件。
+切回内建 `OpenAI` 时，第三方 `auth.json` 会备份为 `auth_akmux.json`，`auth_openai.json` 恢复为 `auth.json`，并将 `model_providers.akmux` 更新为 `name = "OpenAI"`、`base_url = "https://chatgpt.com/backend-api/codex"`。其他使用 `codex_catalog = "built-in"` 的第三方 Provider 同样通过 `model_providers.akmux` 工作；切换这类 Provider 时，AkironMux 只移除自己管理的 `model_catalog_json` 引用，不覆盖其他外部 Catalog 文件。
 
 ## 模式
 

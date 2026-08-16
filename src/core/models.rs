@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+pub const OFFICIAL_CODEX_PROVIDER_ID: &str = "openai-official";
+pub const OFFICIAL_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AppType {
     #[default]

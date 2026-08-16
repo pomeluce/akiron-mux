@@ -15,7 +15,8 @@ haiku = "deepseek-v4-flash"
 subagent = "deepseek-v4-flash"
 default = true
 
-# Codex providers do not use profiles. They can also be added from the TUI.
+# The official OpenAI Codex subscription provider is built in. This separate
+# provider keeps API-key billing available when OPENAI_API_KEY is configured.
 [[codex_providers]]
 id = "openai-api"
 name = "OpenAI API"

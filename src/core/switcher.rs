@@ -1,14 +1,17 @@
 use crate::core::codex_catalog::{default_catalog_path, write_catalog};
 use crate::core::config::ConfigManager;
 use crate::core::env::{resolve_api_key, resolve_codex_api_key, ApiKeyUnavailable};
-use crate::core::models::{validate_profile, validate_provider, ActiveConfig, AppType, Provider, SwitchMode};
+use crate::core::models::{validate_profile, validate_provider, ActiveConfig, AppType, Provider, SwitchMode, OFFICIAL_CODEX_BASE_URL, OFFICIAL_CODEX_PROVIDER_ID};
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::io::Write;
 use std::path::Path;
 
 const DEFAULT_PROXY_PORT: u16 = 15721;
-const CODEX_MANAGED_PROVIDER_ID: &str = "ccs";
+const CODEX_MANAGED_PROVIDER_ID: &str = "akmux";
+const LEGACY_CODEX_MANAGED_PROVIDER_IDS: [&str; 2] = ["openai", "ccs"];
+const OFFICIAL_CODEX_AUTH_BACKUP: &str = "auth_openai.json";
+const AKMUX_CODEX_AUTH_BACKUP: &str = "auth_akmux.json";
 
 pub fn switch_profile(mgr: &ConfigManager, provider_id: &str, profile_id: &str, mode: SwitchMode, settings_path: Option<&Path>) -> Result<ActiveConfig> {
     let (provider, profile) = mgr
@@ -143,7 +146,8 @@ fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Pa
 }
 
 /// Switch Codex to a provider and update ~/.codex/config.toml + auth.json.
-/// Existing unrelated settings and provider definitions are preserved.
+/// Official and third-party sessions share the reserved `akmux` provider ID;
+/// authentication files are swapped independently from the provider metadata.
 #[allow(dead_code)]
 pub fn switch_codex_provider(mgr: &ConfigManager, provider_id: &str, config_path: Option<&Path>, auth_path: Option<&Path>) -> Result<Provider> {
     let provider = mgr
@@ -164,7 +168,8 @@ pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Op
         .find_provider_for(AppType::Codex, provider_id)?
         .with_context(|| format!("Codex provider not found: {}", provider_id))?;
     validate_provider(&provider)?;
-    let selected_model = if provider.codex_catalog == crate::core::models::CodexCatalog::Custom {
+    let official = provider.id == OFFICIAL_CODEX_PROVIDER_ID;
+    let selected_model = if !official && provider.codex_catalog == crate::core::models::CodexCatalog::Custom {
         let slug = model_slug.context("This third-party Codex provider has no configured model")?;
         Some(
             provider
@@ -176,10 +181,15 @@ pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Op
     } else {
         None
     };
-    let auth_token = resolve_codex_api_key(&provider.api_key);
-    if auth_token.is_empty() {
-        return Err(ApiKeyUnavailable::new(&provider.id, &provider.api_key, "OPENAI_API_KEY").into());
-    }
+    let auth_token = if official {
+        None
+    } else {
+        let token = resolve_codex_api_key(&provider.api_key);
+        if token.is_empty() {
+            return Err(ApiKeyUnavailable::new(&provider.id, &provider.api_key, "OPENAI_API_KEY").into());
+        }
+        Some(token)
+    };
 
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let codex_dir = Path::new(&home).join(".codex");
@@ -200,17 +210,7 @@ pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Op
     } else {
         toml_edit::DocumentMut::new()
     };
-    let mut auth: serde_json::Value = if auth_path.exists() {
-        let content = std::fs::read_to_string(&auth_path)?;
-        serde_json::from_str(&content).context("Failed to parse Codex auth.json")?
-    } else {
-        json!({})
-    };
-    if !auth.is_object() {
-        anyhow::bail!("Codex auth.json root must be an object");
-    }
-
-    config["model_provider"] = toml_edit::value(CODEX_MANAGED_PROVIDER_ID);
+    let previously_third_party = uses_third_party_codex_provider(&config);
     let previous_managed_model = managed_last_switch(&config)
         .and_then(|table| table.get("model"))
         .and_then(toml_edit::Item::as_str)
@@ -232,6 +232,22 @@ pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Op
         config.as_table_mut().remove("model");
         config.as_table_mut().remove("model_reasoning_effort");
     }
+
+    configure_managed_codex_provider(&mut config, &provider, selected_model)?;
+    if official {
+        restore_official_codex_auth(&auth_path, previously_third_party)?;
+    } else {
+        activate_akmux_codex_auth(&auth_path, auth_token.as_deref().expect("non-official provider resolved a token"), previously_third_party)?;
+    }
+    write_private_file(&config_path, config.to_string().as_bytes())?;
+
+    mgr.set_setting(AppType::Codex.active_provider_key(), &provider.id)?;
+    mgr.set_setting("active_codex_model", selected_model.map(|model| model.slug.as_str()).unwrap_or(""))?;
+    Ok(provider)
+}
+
+fn configure_managed_codex_provider(config: &mut toml_edit::DocumentMut, provider: &Provider, selected_model: Option<&crate::core::models::CodexModel>) -> Result<()> {
+    config["model_provider"] = toml_edit::value(CODEX_MANAGED_PROVIDER_ID);
     if config.as_table().get("model_providers").is_some_and(|item| !item.is_table()) {
         anyhow::bail!("Codex config.toml 'model_providers' must be a table");
     }
@@ -241,6 +257,9 @@ pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Op
     let providers = config["model_providers"].as_table_mut().expect("table created above");
     if providers.iter().all(|(_, item)| item.is_table()) {
         providers.set_implicit(true);
+    }
+    for legacy_id in LEGACY_CODEX_MANAGED_PROVIDER_IDS {
+        providers.remove(legacy_id);
     }
     if providers.get(CODEX_MANAGED_PROVIDER_ID).is_some_and(|item| !item.is_table()) {
         anyhow::bail!("Codex provider '{}' must be a table", CODEX_MANAGED_PROVIDER_ID);
@@ -257,7 +276,6 @@ pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Op
     provider_table.insert("wire_api", toml_edit::value("responses"));
     provider_table.insert("requires_openai_auth", toml_edit::value(true));
 
-    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     if config.as_table().get("akmux").is_some_and(|item| !item.is_table()) {
         anyhow::bail!("Codex config.toml 'akmux' must be a table");
     }
@@ -281,23 +299,68 @@ pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Op
     } else {
         last_switch.remove("model");
     }
-    last_switch.insert("at", toml_edit::value(now));
+    last_switch.insert("at", toml_edit::value(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()));
     if akmux.iter().all(|(key, item)| key == "last_switch" && item.is_table()) {
         akmux.set_implicit(true);
     }
-    if let Some(legacy) = config.as_table_mut().get_mut("ccswitch").and_then(toml_edit::Item::as_table_mut) {
-        legacy.remove("last_switch");
-        if legacy.is_empty() {
-            config.as_table_mut().remove("ccswitch");
-        }
-    }
-    auth["OPENAI_API_KEY"] = json!(auth_token);
-    write_private_file(&auth_path, serde_json::to_string_pretty(&auth)?.as_bytes())?;
-    write_private_file(&config_path, config.to_string().as_bytes())?;
+    clear_legacy_last_switch(config);
+    Ok(())
+}
 
-    mgr.set_setting(AppType::Codex.active_provider_key(), &provider.id)?;
-    mgr.set_setting("active_codex_model", selected_model.map(|model| model.slug.as_str()).unwrap_or(""))?;
-    Ok(provider)
+fn uses_third_party_codex_provider(config: &toml_edit::DocumentMut) -> bool {
+    let provider = config.get("model_provider").and_then(toml_edit::Item::as_str);
+    if !provider.is_some_and(is_managed_codex_provider_id) {
+        return false;
+    }
+    let source = managed_last_switch(config).and_then(|table| table.get("source")).and_then(toml_edit::Item::as_str);
+    if source == Some(OFFICIAL_CODEX_PROVIDER_ID) {
+        return false;
+    }
+    if source.is_some() {
+        return true;
+    }
+    let Some(provider_table) = config
+        .get("model_providers")
+        .and_then(toml_edit::Item::as_table)
+        .and_then(|providers| provider.and_then(|provider| providers.get(provider)))
+        .and_then(toml_edit::Item::as_table)
+    else {
+        return false;
+    };
+    provider_table.get("name").and_then(toml_edit::Item::as_str) != Some("OpenAI")
+        || provider_table.get("base_url").and_then(toml_edit::Item::as_str) != Some(OFFICIAL_CODEX_BASE_URL)
+}
+
+fn is_managed_codex_provider_id(provider: &str) -> bool {
+    provider == CODEX_MANAGED_PROVIDER_ID || LEGACY_CODEX_MANAGED_PROVIDER_IDS.contains(&provider)
+}
+
+fn clear_legacy_last_switch(config: &mut toml_edit::DocumentMut) {
+    let remove_legacy = config.as_table_mut().get_mut("ccswitch").and_then(toml_edit::Item::as_table_mut).is_some_and(|legacy| {
+        legacy.remove("last_switch");
+        legacy.is_empty()
+    });
+    if remove_legacy {
+        config.as_table_mut().remove("ccswitch");
+    }
+}
+
+fn activate_akmux_codex_auth(auth_path: &Path, token: &str, previously_third_party: bool) -> Result<()> {
+    if !previously_third_party && auth_path.exists() {
+        move_private_file(auth_path, &auth_path.with_file_name(OFFICIAL_CODEX_AUTH_BACKUP))?;
+    }
+    write_private_file(auth_path, serde_json::to_string_pretty(&json!({ "OPENAI_API_KEY": token }))?.as_bytes())
+}
+
+fn restore_official_codex_auth(auth_path: &Path, previously_third_party: bool) -> Result<()> {
+    if previously_third_party && auth_path.exists() {
+        move_private_file(auth_path, &auth_path.with_file_name(AKMUX_CODEX_AUTH_BACKUP))?;
+    }
+    let official_backup = auth_path.with_file_name(OFFICIAL_CODEX_AUTH_BACKUP);
+    if !auth_path.exists() && official_backup.exists() {
+        move_private_file(&official_backup, auth_path)?;
+    }
+    Ok(())
 }
 
 /// Remove AkironMux's association with a Codex provider. Provider definitions
@@ -333,6 +396,13 @@ fn managed_last_switch(config: &toml_edit::DocumentMut) -> Option<&toml_edit::Ta
             .and_then(|table| table.get("last_switch"))
             .and_then(toml_edit::Item::as_table)
     })
+}
+
+fn move_private_file(source: &Path, destination: &Path) -> Result<()> {
+    let content = std::fs::read(source).with_context(|| format!("Failed to read {}", source.display()))?;
+    write_private_file(destination, &content)?;
+    std::fs::remove_file(source).with_context(|| format!("Failed to remove {} after creating its backup", source.display()))?;
+    Ok(())
 }
 
 fn write_private_file(path: &Path, content: &[u8]) -> Result<()> {

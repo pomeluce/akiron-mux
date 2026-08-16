@@ -1,4 +1,7 @@
-use crate::core::models::{validate_codex_provider_models, validate_profile, validate_provider, AppType, CodexCatalog, CodexModel, Profile, Provider, Source};
+use crate::core::models::{
+    validate_codex_provider_models, validate_profile, validate_provider, AppType, CodexCatalog, CodexModel, Profile, Provider, Source, OFFICIAL_CODEX_BASE_URL,
+    OFFICIAL_CODEX_PROVIDER_ID,
+};
 use crate::db::Db;
 use anyhow::Context;
 use serde::Deserialize;
@@ -199,13 +202,26 @@ fn into_provider(p: ProviderToml, include_profiles: bool) -> Provider {
     }
 }
 
+fn official_codex_provider() -> Provider {
+    Provider {
+        id: OFFICIAL_CODEX_PROVIDER_ID.into(),
+        name: "OpenAI".into(),
+        api_url: OFFICIAL_CODEX_BASE_URL.into(),
+        api_key: String::new(),
+        codex_catalog: CodexCatalog::BuiltIn,
+        profiles: Vec::new(),
+        models: Vec::new(),
+        source: Source::System,
+    }
+}
+
 impl ConfigManager {
     pub fn new(db_path: &Path, defaults_path: Option<&Path>) -> Result<Self, anyhow::Error> {
         let db = Db::open(db_path).context("Failed to open akmux.db")?;
 
         let default_path = default_config_path();
         let defaults_path = defaults_path.unwrap_or_else(|| &default_path);
-        let (system_claude_providers, system_codex_providers) = if defaults_path.exists() {
+        let (system_claude_providers, mut system_codex_providers) = if defaults_path.exists() {
             let content = std::fs::read_to_string(defaults_path)?;
             let defaults: DefaultsFile = toml::from_str(&content)?;
             (
@@ -215,6 +231,7 @@ impl ConfigManager {
         } else {
             (vec![], vec![])
         };
+        system_codex_providers.insert(0, official_codex_provider());
 
         validate_default_provider_ids("Claude", &system_claude_providers)?;
         validate_default_provider_ids("Codex", &system_codex_providers)?;
@@ -264,6 +281,9 @@ impl ConfigManager {
         };
 
         for dp in &db_providers {
+            if app == AppType::Codex && dp.id == OFFICIAL_CODEX_PROVIDER_ID {
+                continue;
+            }
             if let Some(existing) = result.iter_mut().find(|p| p.id == dp.id) {
                 existing.name = dp.name.clone();
                 existing.api_url = dp.api_url.clone();

@@ -5,7 +5,7 @@ use super::super::widgets::shared::{clear_popup_area, render_confirm_popup as sh
 use super::TabContent;
 use crate::core::codex_catalog::{catalog_status, default_catalog_path, model_entry, write_catalog};
 use crate::core::config::ConfigManager;
-use crate::core::models::{validate_codex_model, validate_profile, validate_provider, AppType, CodexCatalog, CodexModel, Profile, Provider};
+use crate::core::models::{validate_codex_model, validate_profile, validate_provider, AppType, CodexCatalog, CodexModel, Profile, Provider, OFFICIAL_CODEX_PROVIDER_ID};
 use crate::tui::lang;
 use crossterm::event::KeyCode;
 use form::{CodexModelForm, EditForm, ProviderForm};
@@ -73,17 +73,30 @@ pub struct ProvidersTab {
     codex_model_form: Option<CodexModelForm>,
 }
 
+fn sort_providers(app: AppType, providers: &mut [Provider]) {
+    providers.sort_by(|a, b| {
+        if app == AppType::Codex {
+            match (a.id == OFFICIAL_CODEX_PROVIDER_ID, b.id == OFFICIAL_CODEX_PROVIDER_ID) {
+                (true, false) => return Ordering::Less,
+                (false, true) => return Ordering::Greater,
+                _ => {}
+            }
+        }
+        match (a.source.can_delete(), b.source.can_delete()) {
+            (false, true) => Ordering::Less,
+            (true, false) => Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        }
+    });
+}
+
 impl ProvidersTab {
     pub fn new(mgr: Rc<ConfigManager>, app: AppType) -> Self {
         crate::core::sync::sync_active_from_settings(&mgr);
         crate::core::sync::sync_codex_active_from_config(&mgr);
 
         let mut providers = mgr.list_providers_for(app).unwrap_or_default();
-        providers.sort_by(|a, b| match (a.source.can_delete(), b.source.can_delete()) {
-            (false, true) => Ordering::Less,
-            (true, false) => Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        });
+        sort_providers(app, &mut providers);
         let active_provider = mgr.get_setting(app.active_provider_key()).unwrap_or_default();
         let active_profile = if app == AppType::Claude {
             mgr.get_setting("active_profile").unwrap_or_default()
@@ -360,11 +373,7 @@ impl ProvidersTab {
     /// Full refresh: re-fetch providers from DB (expensive, call on mutations or Enter)
     fn refresh_providers(&mut self) {
         let mut providers = self.mgr.list_providers_for(self.app).unwrap_or_default();
-        providers.sort_by(|a, b| match (a.source.can_delete(), b.source.can_delete()) {
-            (false, true) => Ordering::Less,
-            (true, false) => Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        });
+        sort_providers(self.app, &mut providers);
         self.providers = providers;
         if self.selected_provider_idx >= self.providers.len() {
             self.selected_provider_idx = 0;
@@ -1655,9 +1664,9 @@ fn compact_model_name(model: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{compact_model_name, Panel, ProviderAction, ProvidersTab};
+    use super::{compact_model_name, sort_providers, Panel, ProviderAction, ProvidersTab};
     use crate::core::config::ConfigManager;
-    use crate::core::models::{AppType, CodexCatalog, Provider, Source};
+    use crate::core::models::{AppType, CodexCatalog, Provider, Source, OFFICIAL_CODEX_PROVIDER_ID};
     use crate::tui::tabs::TabContent;
     use crossterm::event::KeyCode;
     use std::rc::Rc;
@@ -1668,6 +1677,25 @@ mod tests {
         assert_eq!(compact_model_name("deepseek-v4-pro[1m]"), "deepseek-v4-pro 1M");
         assert_eq!(compact_model_name(" claude-opus-4 "), "claude-opus-4");
         assert_eq!(compact_model_name(""), "-");
+    }
+
+    #[test]
+    fn official_openai_is_always_first_in_codex_provider_list() {
+        let provider = |id: &str, name: &str| Provider {
+            id: id.into(),
+            name: name.into(),
+            api_url: "https://api.example.com".into(),
+            api_key: String::new(),
+            codex_catalog: CodexCatalog::BuiltIn,
+            profiles: vec![],
+            models: vec![],
+            source: Source::System,
+        };
+        let mut providers = vec![provider("alphabetical-first", "AAA"), provider(OFFICIAL_CODEX_PROVIDER_ID, "OpenAI")];
+
+        sort_providers(AppType::Codex, &mut providers);
+
+        assert_eq!(providers[0].id, OFFICIAL_CODEX_PROVIDER_ID);
     }
 
     fn codex_tab(catalog: CodexCatalog) -> (TempDir, ProvidersTab) {
@@ -1690,7 +1718,11 @@ mod tests {
                 AppType::Codex.as_str(),
             )
             .unwrap();
-        let tab = ProvidersTab::new(mgr, AppType::Codex);
+        let mut tab = ProvidersTab::new(mgr, AppType::Codex);
+        let index = tab.providers.iter().position(|provider| provider.id == "test-provider").unwrap();
+        tab.selected_provider_idx = index;
+        tab.provider_state.select(Some(index));
+        tab.load_profiles();
         (dir, tab)
     }
 

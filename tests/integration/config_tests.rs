@@ -1,5 +1,5 @@
 use ccswitch::core::config::ConfigManager;
-use ccswitch::core::models::AppType;
+use ccswitch::core::models::{AppType, OFFICIAL_CODEX_PROVIDER_ID};
 use ccswitch::db::Db;
 use std::fs;
 use tempfile::tempdir;
@@ -80,9 +80,21 @@ api_key = "env:OPENAI_API_KEY"
 
     let mgr = ConfigManager::new(&dir.path().join("ccswitch.db"), Some(&defaults_path)).unwrap();
     let providers = mgr.list_providers_for(AppType::Codex).unwrap();
-    assert_eq!(providers.len(), 1);
-    assert_eq!(providers[0].id, "codex-proxy");
-    assert!(providers[0].profiles.is_empty());
+    assert_eq!(providers.len(), 2);
+    assert!(providers.iter().any(|provider| provider.id == OFFICIAL_CODEX_PROVIDER_ID && provider.name == "OpenAI"));
+    assert!(providers.iter().find(|provider| provider.id == "codex-proxy").unwrap().profiles.is_empty());
+}
+
+#[test]
+fn official_codex_provider_is_available_without_defaults() {
+    let dir = tempdir().unwrap();
+    let mgr = ConfigManager::new(&dir.path().join("akmux.db"), Some(&dir.path().join("missing-defaults.toml"))).unwrap();
+
+    let provider = mgr.find_provider_for(AppType::Codex, OFFICIAL_CODEX_PROVIDER_ID).unwrap().unwrap();
+    assert_eq!(provider.name, "OpenAI");
+    assert_eq!(provider.api_url, "https://chatgpt.com/backend-api/codex");
+    assert_eq!(provider.source, ccswitch::core::models::Source::System);
+    assert!(provider.api_key.is_empty());
 }
 
 #[test]
@@ -112,9 +124,10 @@ default = true
     .unwrap();
     let mgr = ConfigManager::new(&dir.path().join("ccswitch.db"), Some(&defaults_path)).unwrap();
     let providers = mgr.list_providers_for(AppType::Codex).unwrap();
-    assert_eq!(providers[0].codex_catalog, ccswitch::core::models::CodexCatalog::Custom);
-    assert_eq!(providers[0].models.len(), 1);
-    assert_eq!(providers[0].models[0].slug, "third-party-coder");
+    let provider = providers.iter().find(|provider| provider.id == "third-party").unwrap();
+    assert_eq!(provider.codex_catalog, ccswitch::core::models::CodexCatalog::Custom);
+    assert_eq!(provider.models.len(), 1);
+    assert_eq!(provider.models[0].slug, "third-party-coder");
 }
 
 #[test]
@@ -151,7 +164,14 @@ codex_catalog = "custom"
     )
     .unwrap();
     let mgr = ConfigManager::new(&db_path, Some(&defaults_path)).unwrap();
-    assert!(mgr.list_providers_for(AppType::Codex).unwrap()[0].models.is_empty());
+    assert!(mgr
+        .list_providers_for(AppType::Codex)
+        .unwrap()
+        .iter()
+        .find(|provider| provider.id == "third-party")
+        .unwrap()
+        .models
+        .is_empty());
 }
 
 #[test]

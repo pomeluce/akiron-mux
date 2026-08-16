@@ -2,6 +2,19 @@ import { useCallback, useEffect, useState } from 'react';
 import { sessionApi } from '@/shared/lib/api';
 import { emptySettings, emptyWorkspace, type SettingsResponse, type WorkspaceResponse } from '@/types';
 
+function normalizeSettings(settings: SettingsResponse): SettingsResponse {
+  return {
+    ...emptySettings,
+    ...settings,
+    other_directories: (settings.other_directories || []).map((directory, index) => ({
+      ...directory,
+      sort_order: directory.sort_order ?? index,
+    })),
+    directory_sort: settings.directory_sort || {},
+    session_order: settings.session_order || {},
+  };
+}
+
 export function useWorkspaces(backendAddress: string) {
   const [workspace, setWorkspace] = useState<WorkspaceResponse>(emptyWorkspace);
   const [settings, setSettings] = useState<SettingsResponse>(emptySettings);
@@ -12,7 +25,7 @@ export function useWorkspaces(backendAddress: string) {
     try {
       const [nextWorkspace, nextSettings] = await Promise.all([sessionApi.workspace(backendAddress), sessionApi.settings(backendAddress)]);
       setWorkspace(nextWorkspace);
-      setSettings(nextSettings);
+      setSettings(normalizeSettings(nextSettings));
       setConnected(true);
       setError(null);
     } catch (cause) {

@@ -1,5 +1,5 @@
 import { ChevronLeft, ChevronRight, Eye, EyeOff, Folder, Home } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { sessionApi } from '@/shared/lib/api';
 import { Button } from '@/shared/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/shared/ui/dialog';
@@ -22,12 +22,13 @@ export function DirectoryDialog(props: DirectoryDialogProps) {
   const [showHidden, setShowHidden] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const pathInputRef = useRef<HTMLInputElement>(null);
 
-  const load = async (nextPath: string) => {
+  const load = async (nextPath: string, hidden = showHidden) => {
     setLoading(true);
     setError(null);
     try {
-      const next = await sessionApi.directories(props.backendAddress, nextPath, showHidden);
+      const next = await sessionApi.directories(props.backendAddress, nextPath, hidden);
       setListing(next);
       setPath(next.path);
     } catch (cause) {
@@ -38,19 +39,35 @@ export function DirectoryDialog(props: DirectoryDialogProps) {
   };
 
   useEffect(() => {
-    if (props.open) void load(props.initialPath);
-  }, [props.open, props.initialPath, showHidden]);
+    if (!props.open) return;
+    setShowHidden(false);
+    void load(props.initialPath, false);
+  }, [props.open, props.initialPath]);
 
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogContent className="w-[min(720px,calc(100vw-28px))]">
+      <DialogContent
+        className="directory-dialog w-[min(720px,calc(100vw-28px))]"
+        onOpenAutoFocus={event => {
+          event.preventDefault();
+          requestAnimationFrame(() => pathInputRef.current?.focus({ preventScroll: true }));
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{props.t('chooseDirectory')}</DialogTitle>
         </DialogHeader>
         <div className="p-5">
           <div className="flex items-center gap-1.5">
             <Tooltip label={props.t(showHidden ? 'hideHidden' : 'showHidden')}>
-              <Button variant="ghost" size="icon" onClick={() => setShowHidden(value => !value)}>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => {
+                  const next = !showHidden;
+                  setShowHidden(next);
+                  void load(listing?.path || path || props.initialPath, next);
+                }}
+              >
                 {showHidden ? <EyeOff /> : <Eye />}
               </Button>
             </Tooltip>
@@ -71,7 +88,15 @@ export function DirectoryDialog(props: DirectoryDialogProps) {
                 void load(path);
               }}
             >
-              <input className="text-field" value={path} onChange={event => setPath(event.target.value)} />
+              <input
+                ref={pathInputRef}
+                className="text-field"
+                name="akmux-directory-path"
+                autoComplete="off"
+                spellCheck={false}
+                value={path}
+                onChange={event => setPath(event.target.value)}
+              />
             </form>
           </div>
           <div className="mt-3 h-[min(390px,48vh)] overflow-y-auto rounded-lg border border-border bg-surface p-1">

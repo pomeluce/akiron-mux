@@ -1,5 +1,5 @@
 import * as Collapsible from '@radix-ui/react-collapsible';
-import { Check, ChevronRight, Ellipsis, FolderPlus, Image, Pencil, Pin, Plus, RefreshCw, Search, Settings, Trash2 } from 'lucide-react';
+import { Bell, Check, ChevronRight, CircleStop, Ellipsis, FolderPlus, Image, Pencil, Pin, Plus, RefreshCw, Search, Settings, Trash2 } from 'lucide-react';
 import { useRef } from 'react';
 import { AgentIcon } from '@/shared/components/agent-icon';
 import { WorkspaceIcon, type WorkspaceIconName } from '@/shared/components/workspace-icon';
@@ -7,7 +7,7 @@ import { basename, cn } from '@/shared/lib/utils';
 import { Button } from '@/shared/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/shared/ui/dropdown-menu';
 import { Tooltip } from '@/shared/ui/tooltip';
-import type { HistoryItem, Locale, Project, SettingsResponse, SortMode, WorkspaceResponse } from '@/types';
+import type { AttentionKind, HistoryItem, Locale, Project, SettingsResponse, SortMode, WorkspaceResponse } from '@/types';
 import type { MessageKey } from '@/shared/lib/i18n';
 
 interface AppSidebarProps {
@@ -15,6 +15,7 @@ interface AppSidebarProps {
   settings: SettingsResponse;
   icons: Record<string, WorkspaceIconName>;
   activeNativeId?: string | null;
+  attentionByNativeId: Record<string, AttentionKind>;
   open: boolean;
   width: number;
   locale: Locale;
@@ -30,6 +31,8 @@ interface AppSidebarProps {
   onDeleteProject: (project: Project) => void;
   onResume: (item: HistoryItem) => void;
   onSort: (section: 'projects' | 'general' | 'other', mode: SortMode) => void;
+  onDirectorySort: (path: string, mode: SortMode) => void;
+  onReorder: (kind: 'projects' | 'directories' | 'sessions', scope: string, ids: string[]) => void;
   onSettings: () => void;
   onWidthChange: (width: number) => void;
 }
@@ -54,9 +57,40 @@ function SortMenu({ section, value, t, onSort }: { section: 'projects' | 'genera
   );
 }
 
-function HistoryRow({ item, active, onResume }: { item: HistoryItem; active: boolean; onResume: (item: HistoryItem) => void }) {
+function moveId(ids: string[], moved: string, target: string) {
+  const next = ids.filter(id => id !== moved);
+  const targetIndex = next.indexOf(target);
+  next.splice(targetIndex < 0 ? next.length : targetIndex, 0, moved);
+  return next;
+}
+
+function setDragData(event: React.DragEvent, kind: string, scope: string, id: string) {
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('application/x-akmux-order', JSON.stringify({ kind, scope, id }));
+}
+
+function getDragData(event: React.DragEvent) {
+  try {
+    return JSON.parse(event.dataTransfer.getData('application/x-akmux-order')) as { kind: string; scope: string; id: string };
+  } catch {
+    return null;
+  }
+}
+
+function HistoryRow({ item, active, attention, draggable, onDragStart, onDrop, onResume }: { item: HistoryItem; active: boolean; attention?: AttentionKind; draggable: boolean; onDragStart: (event: React.DragEvent) => void; onDrop: (event: React.DragEvent) => void; onResume: (item: HistoryItem) => void }) {
   return (
-    <button className="history-row" data-active={active} onClick={() => onResume(item)} title={item.cwd}>
+    <button
+      className="history-row"
+      data-active={active}
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragOver={event => {
+        if (draggable) event.preventDefault();
+      }}
+      onDrop={onDrop}
+      onClick={() => onResume(item)}
+      title={item.cwd}
+    >
       <AgentIcon agent={item.agent} className="size-6" />
       <span className="min-w-0 flex-1">
         <strong className="block truncate text-xs font-medium">{item.title}</strong>
@@ -64,18 +98,53 @@ function HistoryRow({ item, active, onResume }: { item: HistoryItem; active: boo
           {item.agent === 'codex' ? 'Codex' : 'Claude Code'} · {basename(item.cwd)}
         </small>
       </span>
-      {active && <span className="size-1.5 rounded-full bg-emerald-500" />}
+      {attention === 'input' ? <Bell className="session-signal session-signal-input" /> : attention === 'exited' ? <CircleStop className="session-signal session-signal-exited" /> : active && <span className="size-1.5 rounded-full bg-emerald-500" />}
     </button>
   );
 }
 
-function HistoryList({ items, activeNativeId, onResume, empty }: { items: HistoryItem[]; activeNativeId?: string | null; onResume: (item: HistoryItem) => void; empty: string }) {
+function HistoryList({
+  items,
+  activeNativeId,
+  attentionByNativeId,
+  sortMode,
+  scope,
+  onReorder,
+  onResume,
+  empty,
+}: {
+  items: HistoryItem[];
+  activeNativeId?: string | null;
+  attentionByNativeId: Record<string, AttentionKind>;
+  sortMode: SortMode;
+  scope: string;
+  onReorder: AppSidebarProps['onReorder'];
+  onResume: (item: HistoryItem) => void;
+  empty: string;
+}) {
   if (!items.length) return <div className="px-9 py-2 text-xs text-muted-foreground">{empty}</div>;
   return (
     <div className="space-y-0.5 pb-1 pl-4">
-      {items.map(item => (
-        <HistoryRow key={`${item.agent}:${item.id}`} item={item} active={item.id === activeNativeId} onResume={onResume} />
-      ))}
+      {items.map(item => {
+        const itemId = `${item.agent}:${item.id}`;
+        return (
+        <HistoryRow
+          key={itemId}
+          item={item}
+          active={item.id === activeNativeId}
+          attention={attentionByNativeId[itemId]}
+          draggable={sortMode === 'manual'}
+          onDragStart={event => setDragData(event, 'sessions', scope, itemId)}
+          onDrop={event => {
+            const payload = getDragData(event);
+            if (sortMode !== 'manual' || payload?.kind !== 'sessions' || payload.scope !== scope) return;
+            event.preventDefault();
+            onReorder('sessions', scope, moveId(items.map(entry => `${entry.agent}:${entry.id}`), payload.id, itemId));
+          }}
+          onResume={onResume}
+        />
+        );
+      })}
     </div>
   );
 }
@@ -158,7 +227,18 @@ export function AppSidebar(props: AppSidebarProps) {
             {workspace.projects.length ? (
               workspace.projects.map(group => (
                 <Collapsible.Root key={group.project.id} defaultOpen={false} className="group/project">
-                  <div className="flex min-h-9 items-center rounded-lg px-1 hover:bg-accent">
+                  <div
+                    className="flex min-h-9 items-center rounded-lg px-1 hover:bg-accent"
+                    draggable
+                    onDragStart={event => setDragData(event, 'projects', 'projects', group.project.id)}
+                    onDragOver={event => event.preventDefault()}
+                    onDrop={event => {
+                      const payload = getDragData(event);
+                      if (payload?.kind !== 'projects') return;
+                      event.preventDefault();
+                      props.onReorder('projects', 'projects', moveId(workspace.projects.map(item => item.project.id), payload.id, group.project.id));
+                    }}
+                  >
                     <Collapsible.Trigger className="grid size-7 shrink-0 place-items-center text-muted-foreground">
                       <ChevronRight className="size-4 transition-transform group-data-[state=open]/project:rotate-90" />
                     </Collapsible.Trigger>
@@ -198,7 +278,16 @@ export function AppSidebar(props: AppSidebarProps) {
                     </Button>
                   </div>
                   <Collapsible.Content>
-                    <HistoryList items={group.history} activeNativeId={props.activeNativeId} onResume={props.onResume} empty={t('noHistory')} />
+                    <HistoryList
+                      items={group.history}
+                      activeNativeId={props.activeNativeId}
+                      attentionByNativeId={props.attentionByNativeId}
+                      sortMode={settings.project_sort}
+                      scope={`project:${group.project.id}`}
+                      onReorder={props.onReorder}
+                      onResume={props.onResume}
+                      empty={t('noHistory')}
+                    />
                   </Collapsible.Content>
                 </Collapsible.Root>
               ))
@@ -226,7 +315,18 @@ export function AppSidebar(props: AppSidebarProps) {
                   className="group/directory opacity-100 data-[unavailable=true]:opacity-55"
                   data-unavailable={!group.available}
                 >
-                  <div className="flex min-h-9 items-center rounded-lg px-1 hover:bg-accent">
+                  <div
+                    className="flex min-h-9 items-center rounded-lg px-1 hover:bg-accent"
+                    draggable
+                    onDragStart={event => setDragData(event, 'directories', 'general', group.path)}
+                    onDragOver={event => event.preventDefault()}
+                    onDrop={event => {
+                      const payload = getDragData(event);
+                      if (payload?.kind !== 'directories' || payload.scope !== 'general') return;
+                      event.preventDefault();
+                      props.onReorder('directories', 'general', moveId(workspace.general.map(item => item.path), payload.id, group.path));
+                    }}
+                  >
                     <Collapsible.Trigger className="flex min-w-0 flex-1 items-center text-left">
                       <ChevronRight className="mx-1.5 size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]/directory:rotate-90" />
                       <WorkspaceIcon name={props.icons[`directory:${group.path}`]} className="mr-2 text-foreground/80" />
@@ -242,6 +342,13 @@ export function AppSidebar(props: AppSidebarProps) {
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="start" className="min-w-36">
+                        {(['priority', 'recent', 'manual'] as const).map(mode => (
+                          <DropdownMenuItem className="text-xs" key={mode} onSelect={() => props.onDirectorySort(group.path, mode)}>
+                            <Check className={cn((settings.directory_sort[group.path] || settings.general_sort) !== mode && 'opacity-0')} />
+                            {t(mode)}
+                          </DropdownMenuItem>
+                        ))}
+                        <DropdownMenuSeparator />
                         <DropdownMenuItem onSelect={() => props.onEditDirectoryIcon(group.path)}>
                           <Image />
                           {t('editIcon')}
@@ -250,7 +357,16 @@ export function AppSidebar(props: AppSidebarProps) {
                     </DropdownMenu>
                   </div>
                   <Collapsible.Content>
-                    <HistoryList items={group.items} activeNativeId={props.activeNativeId} onResume={props.onResume} empty={t('noHistory')} />
+                    <HistoryList
+                      items={group.items}
+                      activeNativeId={props.activeNativeId}
+                      attentionByNativeId={props.attentionByNativeId}
+                      sortMode={settings.directory_sort[group.path] || settings.general_sort}
+                      scope={`directory:${group.path}`}
+                      onReorder={props.onReorder}
+                      onResume={props.onResume}
+                      empty={t('noHistory')}
+                    />
                   </Collapsible.Content>
                 </Collapsible.Root>
               ))
@@ -268,7 +384,18 @@ export function AppSidebar(props: AppSidebarProps) {
             {workspace.other.length ? (
               workspace.other.map(group => (
                 <Collapsible.Root key={group.path} defaultOpen={false} className="group/directory">
-                  <div className="flex min-h-9 items-center rounded-lg px-1 hover:bg-accent">
+                  <div
+                    className="flex min-h-9 items-center rounded-lg px-1 hover:bg-accent"
+                    draggable
+                    onDragStart={event => setDragData(event, 'directories', 'other', group.path)}
+                    onDragOver={event => event.preventDefault()}
+                    onDrop={event => {
+                      const payload = getDragData(event);
+                      if (payload?.kind !== 'directories' || payload.scope !== 'other') return;
+                      event.preventDefault();
+                      props.onReorder('directories', 'other', moveId(workspace.other.map(item => item.path), payload.id, group.path));
+                    }}
+                  >
                     <Collapsible.Trigger className="flex min-w-0 flex-1 items-center text-left">
                       <ChevronRight className="mx-1.5 size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]/directory:rotate-90" />
                       <WorkspaceIcon name={props.icons[`directory:${group.path}`]} className="mr-2 text-foreground/75" />
@@ -284,6 +411,13 @@ export function AppSidebar(props: AppSidebarProps) {
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="start" className="min-w-36">
+                        {(['priority', 'recent', 'manual'] as const).map(mode => (
+                          <DropdownMenuItem className="text-xs" key={mode} onSelect={() => props.onDirectorySort(group.path, mode)}>
+                            <Check className={cn((settings.directory_sort[group.path] || settings.other_sort) !== mode && 'opacity-0')} />
+                            {t(mode)}
+                          </DropdownMenuItem>
+                        ))}
+                        <DropdownMenuSeparator />
                         <DropdownMenuItem onSelect={() => props.onEditDirectoryIcon(group.path)}>
                           <Image />
                           {t('editIcon')}
@@ -292,7 +426,16 @@ export function AppSidebar(props: AppSidebarProps) {
                     </DropdownMenu>
                   </div>
                   <Collapsible.Content>
-                    <HistoryList items={group.items} activeNativeId={props.activeNativeId} onResume={props.onResume} empty={t('noHistory')} />
+                    <HistoryList
+                      items={group.items}
+                      activeNativeId={props.activeNativeId}
+                      attentionByNativeId={props.attentionByNativeId}
+                      sortMode={settings.directory_sort[group.path] || settings.other_sort}
+                      scope={`directory:${group.path}`}
+                      onReorder={props.onReorder}
+                      onResume={props.onResume}
+                      empty={t('noHistory')}
+                    />
                   </Collapsible.Content>
                 </Collapsible.Root>
               ))

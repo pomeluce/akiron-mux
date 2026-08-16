@@ -1,9 +1,12 @@
-import { CircleAlert, PanelRight, Plus, RefreshCw, SquareTerminal, X } from 'lucide-react';
+import { Bell, CircleAlert, CircleStop, PanelRight, Plus, RefreshCw, SquareTerminal, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { AgentIcon } from '@/shared/components/agent-icon';
+import { sessionApi } from '@/shared/lib/api';
 import { basename, cn } from '@/shared/lib/utils';
 import { Button } from '@/shared/ui/button';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/shared/ui/dropdown-menu';
 import { Tooltip } from '@/shared/ui/tooltip';
-import type { Locale, SessionInfo } from '@/types';
+import type { AttentionKind, Locale, SessionDetails, SessionInfo } from '@/types';
 import type { MessageKey } from '@/shared/lib/i18n';
 import { TerminalView } from './terminal-view';
 
@@ -12,12 +15,15 @@ interface WorkspaceShellProps {
   sessions: SessionInfo[];
   active?: SessionInfo;
   activeId: string | null;
+  attention: Record<string, AttentionKind>;
+  terminalFontSize: number;
   detailsOpen: boolean;
   connected: boolean;
   locale: Locale;
   t: (key: MessageKey) => string;
   onSelect: (id: string) => void;
   onStatus: (session: SessionInfo) => void;
+  onAttention: (session: SessionInfo) => void;
   onNew: () => void;
   onDetails: () => void;
   onRestart: () => void;
@@ -26,6 +32,14 @@ interface WorkspaceShellProps {
 
 export function WorkspaceShell(props: WorkspaceShellProps) {
   const { active, sessions, t } = props;
+  const [details, setDetails] = useState<SessionDetails | null>(null);
+
+  useEffect(() => {
+    if (!props.detailsOpen || !active) return;
+    setDetails(null);
+    void sessionApi.sessionDetails(props.backendAddress, active.id).then(setDetails).catch(() => setDetails(null));
+  }, [active?.id, props.backendAddress, props.detailsOpen]);
+
   return (
     <main className="workspace-surface ml-1.5 mt-1.5 flex min-w-0 flex-1 flex-col overflow-hidden rounded-tl-xl border border-border/60 bg-surface text-foreground max-[760px]:ml-1 max-[760px]:mt-1 max-[760px]:rounded-tl-lg">
       {sessions.length > 0 && (
@@ -34,6 +48,8 @@ export function WorkspaceShell(props: WorkspaceShellProps) {
             {sessions.map(session => (
               <button
                 key={session.id}
+                data-session-tab={session.id}
+                data-active={session.id === props.activeId}
                 className={cn(
                   'flex h-8 min-w-32 max-w-56 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs text-muted-foreground hover:bg-accent',
                   session.id === props.activeId && 'bg-surface-raised text-foreground',
@@ -42,30 +58,73 @@ export function WorkspaceShell(props: WorkspaceShellProps) {
               >
                 <AgentIcon agent={session.agent} className="size-5 rounded" />
                 <span className="min-w-0 flex-1 truncate text-left">{session.title}</span>
-                <span
-                  className={cn(
-                    'size-1.5 rounded-full bg-muted-foreground',
-                    session.status === 'running' && 'bg-emerald-500',
-                    (session.status === 'error' || session.status === 'exited') && 'bg-destructive',
-                  )}
-                />
+                {props.attention[session.id] === 'input' ? (
+                  <Bell className="session-signal session-signal-input" />
+                ) : props.attention[session.id] === 'exited' ? (
+                  <CircleStop className="session-signal session-signal-exited" />
+                ) : (
+                  <span
+                    className={cn(
+                      'size-1.5 rounded-full bg-muted-foreground',
+                      session.status === 'running' && 'bg-emerald-500',
+                      (session.status === 'error' || session.status === 'exited') && 'bg-destructive',
+                    )}
+                  />
+                )}
               </button>
             ))}
           </div>
           {active && (
             <div className="stage-actions flex shrink-0 items-center gap-0.5 border-l border-border pl-1.5">
-              <Tooltip label={t('details')}>
-                <Button variant="ghost" size="icon" onClick={props.onDetails}>
-                  <PanelRight />
-                </Button>
-              </Tooltip>
+              <DropdownMenu
+                open={props.detailsOpen}
+                onOpenChange={open => {
+                  if (open !== props.detailsOpen) props.onDetails();
+                }}
+              >
+                <Tooltip label={t('details')}>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="ghost" size="icon" aria-label={t('details')}>
+                      <PanelRight />
+                    </Button>
+                  </DropdownMenuTrigger>
+                </Tooltip>
+                <DropdownMenuContent align="end" className="session-details-popup w-[min(360px,calc(100vw-32px))] p-4">
+                  <div className="mb-3 flex items-center gap-2">
+                    <AgentIcon agent={active.agent} className="size-6" />
+                    <div className="min-w-0">
+                      <strong className="block truncate text-sm">{active.title}</strong>
+                      <span className="text-xs text-muted-foreground">{active.agent === 'codex' ? 'Codex' : 'Claude Code'}</span>
+                    </div>
+                  </div>
+                  <dl className="session-details-grid">
+                    <Detail label={t('status')} value={t(active.status)} />
+                    <Detail label={t('provider')} value={details?.provider_name || details?.provider_id || '-'} />
+                    <Detail label={t('profile')} value={details?.profile_id || '-'} />
+                    <Detail label={t('model')} value={details?.model || '-'} />
+                    <Detail label={t('inputTokens')} value={formatCount(details?.prompt_tokens)} />
+                    <Detail label={t('outputTokens')} value={formatCount(details?.completion_tokens)} />
+                    <Detail label={t('cacheRead')} value={formatCount(details?.cache_read_tokens)} />
+                    <Detail label={t('cacheCreate')} value={formatCount(details?.cache_creation_tokens)} />
+                    <Detail label={t('messageCount')} value={formatCount(details?.message_count)} />
+                    <Detail label={t('created')} value={new Date(active.created_at_ms).toLocaleString(props.locale)} />
+                  </dl>
+                  <Detail label={t('directory')} value={active.cwd} wide />
+                  {active.error && (
+                    <div className="mt-3 flex gap-2 rounded-md bg-destructive/10 p-3 text-xs text-destructive">
+                      <CircleAlert className="size-4 shrink-0" />
+                      {active.error}
+                    </div>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
               <Tooltip label={t('restart')}>
-                <Button variant="ghost" size="icon" disabled={active.status === 'starting'} onClick={props.onRestart}>
+                <Button variant="ghost" size="icon" aria-label={t('restart')} disabled={active.status === 'starting'} onClick={props.onRestart}>
                   <RefreshCw />
                 </Button>
               </Tooltip>
               <Tooltip label={t('close')}>
-                <Button variant="destructive" size="icon" onClick={props.onClose}>
+                <Button variant="destructive" size="icon" aria-label={t('close')} onClick={props.onClose}>
                   <X />
                 </Button>
               </Tooltip>
@@ -79,34 +138,17 @@ export function WorkspaceShell(props: WorkspaceShellProps) {
           <div className="relative min-h-0 flex-1 overflow-hidden bg-[#0b0f12]">
             <div className="terminal-stack terminal-surface">
               {sessions.map(session => (
-                <TerminalView key={session.id} backendAddress={props.backendAddress} session={session} active={session.id === props.activeId} onStatus={props.onStatus} />
+                <TerminalView
+                  key={session.id}
+                  backendAddress={props.backendAddress}
+                  session={session}
+                  active={session.id === props.activeId}
+                  fontSize={props.terminalFontSize}
+                  onStatus={props.onStatus}
+                  onAttention={props.onAttention}
+                />
               ))}
             </div>
-            <aside
-              className={cn(
-                'absolute inset-y-0 right-0 z-10 w-[min(340px,78%)] translate-x-full border-l border-white/10 bg-[#15212c]/96 p-5 text-slate-100 shadow-2xl backdrop-blur-xl transition-transform',
-                props.detailsOpen && 'translate-x-0',
-              )}
-            >
-              <div className="mb-5 flex items-center">
-                <strong className="text-sm">{t('details')}</strong>
-                <Button className="ml-auto text-slate-300 hover:bg-white/10 hover:text-white" variant="ghost" size="icon-sm" onClick={props.onDetails}>
-                  <X />
-                </Button>
-              </div>
-              <dl className="space-y-4 text-xs">
-                <Detail label={t('agent')} value={active.agent === 'codex' ? 'Codex' : 'Claude Code'} />
-                <Detail label={t('status')} value={t(active.status)} />
-                <Detail label={t('directory')} value={active.cwd} />
-                <Detail label={t('created')} value={new Date(active.created_at_ms).toLocaleString(props.locale)} />
-              </dl>
-              {active.error && (
-                <div className="mt-5 flex gap-2 rounded-lg bg-red-500/12 p-3 text-xs text-red-200">
-                  <CircleAlert className="size-4 shrink-0" />
-                  {active.error}
-                </div>
-              )}
-            </aside>
           </div>
         </>
       ) : (
@@ -135,11 +177,15 @@ export function WorkspaceShell(props: WorkspaceShellProps) {
   );
 }
 
-function Detail({ label, value }: { label: string; value: string }) {
+function Detail({ label, value, wide = false }: { label: string; value: string; wide?: boolean }) {
   return (
-    <div>
-      <dt className="mb-1 text-slate-400">{label}</dt>
-      <dd className="m-0 break-words text-slate-100">{value}</dd>
+    <div className={wide ? 'mt-3 border-t border-border pt-3' : ''}>
+      <dt className="mb-1 text-[11px] text-muted-foreground">{label}</dt>
+      <dd className="m-0 break-words text-xs text-foreground">{value}</dd>
     </div>
   );
+}
+
+function formatCount(value?: number) {
+  return value === undefined ? '-' : new Intl.NumberFormat().format(value);
 }

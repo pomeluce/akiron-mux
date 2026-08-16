@@ -7,6 +7,7 @@ import { usePreferences } from '@/features/preferences/use-preferences';
 import { useWorkspaceIcons } from '@/features/preferences/use-workspace-icons';
 import { SearchDialog } from '@/features/sessions/search-dialog';
 import { SessionDialog } from '@/features/sessions/session-dialog';
+import { notifySession } from '@/features/sessions/session-notifications';
 import { useSessions } from '@/features/sessions/use-sessions';
 import { WorkspaceShell } from '@/features/sessions/workspace-shell';
 import { AppSidebar } from '@/features/workspaces/app-sidebar';
@@ -81,6 +82,27 @@ export function App() {
     await workspaces.load();
   };
 
+  const updateDirectorySort = async (path: string, mode: SortMode) => {
+    await sessionApi.updateDirectorySort(preferences.backendAddress, path, mode);
+    await workspaces.load();
+  };
+
+  const reorderItems = async (kind: 'projects' | 'directories' | 'sessions', scope: string, ids: string[]) => {
+    await sessionApi.reorder(preferences.backendAddress, kind, scope, ids);
+    await workspaces.load();
+  };
+
+  const handleSessionStatus = (session: (typeof sessionState.sessions)[number]) => {
+    const previous = sessionState.sessions.find(item => item.id === session.id);
+    sessionState.update(session);
+    if (session.status === 'exited' && previous?.status !== 'exited') void notifySession(session, 'exited', preferences.locale);
+  };
+
+  const handleSessionAttention = (session: (typeof sessionState.sessions)[number]) => {
+    if (session.id !== sessionState.activeId) sessionState.markAttention(session.id, 'input');
+    void notifySession(session, 'input', preferences.locale);
+  };
+
   const confirmTitle = confirm?.kind === 'project' ? t('remove') : t('closeTitle');
   const confirmBody = confirm?.kind === 'project' ? `${t('remove')}: ${confirm.project.name}` : t('closeBody');
 
@@ -122,6 +144,7 @@ export function App() {
             settings={workspaces.settings}
             icons={workspaceIcons.icons}
             activeNativeId={sessionState.active?.native_session_id}
+            attentionByNativeId={sessionState.nativeAttention}
             open={sidebarOpen}
             width={sidebarWidth}
             locale={preferences.locale}
@@ -143,6 +166,8 @@ export function App() {
             onDeleteProject={project => setConfirm({ kind: 'project', project })}
             onResume={item => void sessionState.resume(item)}
             onSort={(section, mode) => void updateSort(section, mode)}
+            onDirectorySort={(path, mode) => void updateDirectorySort(path, mode)}
+            onReorder={(kind, scope, ids) => void reorderItems(kind, scope, ids)}
             onSettings={() => setSettingsOpen(true)}
             onWidthChange={width => {
               const next = clampSidebarWidth(width);
@@ -155,12 +180,15 @@ export function App() {
             sessions={sessionState.sessions}
             active={sessionState.active}
             activeId={sessionState.activeId}
+            attention={sessionState.attention}
+            terminalFontSize={preferences.terminalFontSize}
             detailsOpen={detailsOpen}
             connected={workspaces.connected}
             locale={preferences.locale}
             t={t}
             onSelect={sessionState.setActiveId}
-            onStatus={sessionState.update}
+            onStatus={handleSessionStatus}
+            onAttention={handleSessionAttention}
             onNew={openGeneralSession}
             onDetails={() => setDetailsOpen(value => !value)}
             onRestart={() => sessionState.active && void sessionApi.restartSession(preferences.backendAddress, sessionState.active.id)}
@@ -183,7 +211,7 @@ export function App() {
         project={editingProject}
         icon={workspaceIcons.icons[`project:${editingProject?.id || ''}`] || 'folder'}
         backendAddress={preferences.backendAddress}
-        initialPath={workspaces.workspace.general_root}
+        initialPath=""
         t={t}
         onOpenChange={setProjectOpen}
         onSave={saveProject}

@@ -1,11 +1,12 @@
 {
   "name": "akiron-mux-webui",
   "private": true,
-  "version": "1.11.0",
+  "version": "1.12.0",
   "packageManager": "pnpm@11.20.0",
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && vite build",
+    "test:e2e": "playwright test",
     "desktop:verify": "node scripts/verify-desktop-config.mjs",
     "dev": "vite",
     "desktop:dev": "cargo tauri dev",
@@ -32,6 +33,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.5",
+    "playwright": "1.61.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.2.1"

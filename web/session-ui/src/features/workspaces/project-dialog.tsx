@@ -70,7 +70,15 @@ export function ProjectDialog(props: ProjectDialogProps) {
               <label className="field-label" htmlFor="project-name">
                 {props.t('projectName')}
               </label>
-              <input id="project-name" className="text-field" value={name} onChange={event => setName(event.target.value)} />
+              <input
+                id="project-name"
+                className="text-field"
+                name="akmux-project-name"
+                autoComplete="off"
+                spellCheck={false}
+                value={name}
+                onChange={event => setName(event.target.value)}
+              />
             </div>
             <div>
               <span className="field-label">{props.t('icon')}</span>
@@ -91,7 +99,7 @@ export function ProjectDialog(props: ProjectDialogProps) {
       <DirectoryDialog
         open={pickerOpen}
         backendAddress={props.backendAddress}
-        initialPath={path || props.initialPath}
+        initialPath=""
         t={props.t}
         onOpenChange={setPickerOpen}
         onChoose={value => {

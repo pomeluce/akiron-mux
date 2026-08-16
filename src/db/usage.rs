@@ -13,6 +13,15 @@ pub struct UsageSummary {
     pub request_count: i64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SessionUsageDetails {
+    pub model: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+}
+
 pub type DailyUsage = (String, i64, i64, i64, i64);
 
 /// Progress event sent from the background scan thread to the TUI
@@ -52,6 +61,28 @@ pub struct ScanContext {
 }
 
 impl Db {
+    pub fn query_session_usage_details(&self, app_type: &str, session_id: &str) -> Result<SessionUsageDetails, rusqlite::Error> {
+        let mut stmt = self.conn().prepare(
+            "SELECT COALESCE(SUM(prompt_tokens), 0),
+                    COALESCE(SUM(completion_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens), 0),
+                    COALESCE(SUM(cache_creation_tokens), 0),
+                    COALESCE((SELECT model FROM usage_logs
+                              WHERE app_type = ?1 AND session_id = ?2
+                              ORDER BY timestamp DESC, id DESC LIMIT 1), '')
+             FROM usage_logs WHERE app_type = ?1 AND session_id = ?2",
+        )?;
+        stmt.query_row(params![app_type, session_id], |row| {
+            Ok(SessionUsageDetails {
+                prompt_tokens: row.get(0)?,
+                completion_tokens: row.get(1)?,
+                cache_read_tokens: row.get(2)?,
+                cache_creation_tokens: row.get(3)?,
+                model: row.get(4)?,
+            })
+        })
+    }
+
     pub fn query_usage(&self, app_type: &str, range: &str) -> Result<Vec<UsageSummary>, rusqlite::Error> {
         let date_filter = match range {
             "day" => "date(timestamp) = date('now')",

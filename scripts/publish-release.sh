@@ -25,6 +25,27 @@ if [[ ${#release_assets[@]} -eq 0 ]]; then
   exit 1
 fi
 
+release_version=${release_tag#v}
+asset_prefix="AkironMux-${release_version}-"
+for release_asset in "${release_assets[@]}"; do
+  asset_name=$(basename "$release_asset")
+  case "$asset_name" in
+    "${asset_prefix}linux-x86_64-cli.tar.gz" | \
+      "${asset_prefix}linux-x86_64-cli.deb" | \
+      "${asset_prefix}linux-x86_64-cli.rpm" | \
+      "${asset_prefix}linux-x86_64-desktop.deb" | \
+      "${asset_prefix}linux-x86_64-desktop.AppImage" | \
+      "${asset_prefix}macos-arm64-cli.tar.gz" | \
+      "${asset_prefix}macos-arm64-desktop.dmg" | \
+      "${asset_prefix}windows-x86_64-cli.zip" | \
+      "${asset_prefix}windows-x86_64-desktop-setup.exe") ;;
+    *)
+      echo "unexpected release asset name: $asset_name" >&2
+      exit 1
+      ;;
+  esac
+done
+
 if gh release view "$release_tag" >/dev/null 2>&1; then
   gh release upload "$release_tag" "${release_assets[@]}" --clobber
 else

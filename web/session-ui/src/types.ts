@@ -1,5 +1,6 @@
 export type Agent = 'claude' | 'codex';
 export type SessionStatus = 'starting' | 'running' | 'exited' | 'error';
+export type AttentionKind = 'input' | 'exited';
 export type SortMode = 'priority' | 'recent' | 'manual';
 export type ThemeMode = 'light' | 'dark' | 'system';
 export type Locale = 'en' | 'zh-CN';
@@ -14,6 +15,21 @@ export interface SessionInfo {
   exit_code: number | null;
   error: string | null;
   native_session_id: string | null;
+}
+
+export interface SessionDetails {
+  managed_session_id: string;
+  native_session_id: string | null;
+  agent: Agent;
+  provider_id: string | null;
+  provider_name: string | null;
+  profile_id: string | null;
+  model: string | null;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  message_count: number;
 }
 
 export interface HistoryItem {
@@ -51,10 +67,12 @@ export interface WorkspaceResponse {
 export interface SettingsResponse {
   general_root: string;
   projects: Project[];
-  other_directories: Array<{ path: string; pinned: boolean; last_opened_ms: number }>;
+  other_directories: Array<{ path: string; pinned: boolean; last_opened_ms: number; sort_order: number }>;
   project_sort: SortMode;
   general_sort: SortMode;
   other_sort: SortMode;
+  directory_sort: Record<string, SortMode>;
+  session_order: Record<string, string[]>;
 }
 
 export interface DirectoryListing {
@@ -69,6 +87,7 @@ export interface ClientPreferences {
   theme: ThemeMode;
   acrylic: boolean;
   acrylicStrength: number;
+  terminalFontSize: number;
   backendAddress: string;
 }
 
@@ -86,4 +105,6 @@ export const emptySettings: SettingsResponse = {
   project_sort: 'priority',
   general_sort: 'recent',
   other_sort: 'recent',
+  directory_sort: {},
+  session_order: {},
 };

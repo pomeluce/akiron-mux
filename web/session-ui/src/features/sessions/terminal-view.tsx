@@ -9,16 +9,50 @@ interface TerminalViewProps {
   backendAddress: string;
   session: SessionInfo;
   active: boolean;
+  fontSize: number;
   onStatus: (session: SessionInfo) => void;
+  onAttention: (session: SessionInfo) => void;
 }
 
-export function TerminalView({ backendAddress, session, active, onStatus }: TerminalViewProps) {
-  const hostRef = useRef<HTMLDivElement>(null);
-  const activeRef = useRef(active);
-  const statusRef = useRef(onStatus);
+const ATTENTION_PATTERN = /(?:allow|approve|approval|permission|confirm|proceed|continue|yes\s*\/\s*no|\(y\/n\)|授权|批准|允许|确认|继续)/i;
 
-  activeRef.current = active;
+export function TerminalView({ backendAddress, session, active, fontSize, onStatus, onAttention }: TerminalViewProps) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const statusRef = useRef(onStatus);
+  const attentionRef = useRef(onAttention);
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const syncingViewportRef = useRef(false);
+
   statusRef.current = onStatus;
+  attentionRef.current = onAttention;
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    const fit = fitRef.current;
+    if (!terminal || !fit) return;
+    terminal.options.fontSize = fontSize;
+    if (active) {
+      requestAnimationFrame(() => {
+        if (terminalRef.current !== terminal || fitRef.current !== fit) return;
+        fit.fit();
+        // xterm 6 can leave its custom viewport stale when a visibility-hidden terminal
+        // becomes active. A real one-row resize pulse rebuilds the scroll model, matching
+        // the redraw that previously happened only after the sidebar was dragged.
+        const { cols, rows } = terminal;
+        const viewportY = terminal.buffer.active.viewportY;
+        syncingViewportRef.current = true;
+        try {
+          terminal.resize(cols, rows + 1);
+          terminal.resize(cols, rows);
+        } finally {
+          syncingViewportRef.current = false;
+        }
+        terminal.scrollToLine(Math.min(viewportY, terminal.buffer.active.baseY));
+        terminal.refresh(0, terminal.rows - 1);
+      });
+    }
+  }, [active, fontSize]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -27,7 +61,7 @@ export function TerminalView({ backendAddress, session, active, onStatus }: Term
       cursorBlink: true,
       scrollback: 10_000,
       fontFamily: '"Maple Mono NF NL", "Maple Mono NF CN", monospace',
-      fontSize: 16,
+      fontSize,
       lineHeight: 1.2,
       theme: {
         background: '#0b0f12',
@@ -37,11 +71,24 @@ export function TerminalView({ backendAddress, session, active, onStatus }: Term
       },
     });
     const fit = new FitAddon();
+    terminalRef.current = terminal;
+    fitRef.current = fit;
     terminal.loadAddon(fit);
     terminal.open(host);
+    requestAnimationFrame(() => fit.fit());
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
     let disposed = false;
+    let outputTail = '';
+    let lastAttentionAt = 0;
+
+    const signalAttention = () => {
+      const now = Date.now();
+      if (now - lastAttentionAt < 2_000) return;
+      lastAttentionAt = now;
+      outputTail = '';
+      attentionRef.current(session);
+    };
 
     const connect = () => {
       if (disposed) return;
@@ -53,7 +100,11 @@ export function TerminalView({ backendAddress, session, active, onStatus }: Term
       });
       socket.addEventListener('message', event => {
         if (event.data instanceof ArrayBuffer) {
-          terminal.write(new Uint8Array(event.data));
+          const bytes = new Uint8Array(event.data);
+          terminal.write(bytes);
+          const text = new TextDecoder().decode(bytes).replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '');
+          outputTail = `${outputTail}${text}`.slice(-1_200);
+          if (ATTENTION_PATTERN.test(outputTail)) signalAttention();
           return;
         }
         const message = JSON.parse(event.data) as { type: string; session?: SessionInfo };
@@ -67,12 +118,12 @@ export function TerminalView({ backendAddress, session, active, onStatus }: Term
     const dataDisposable = terminal.onData(data => {
       if (socket?.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data));
     });
+    const bellDisposable = terminal.onBell(signalAttention);
     const resizeDisposable = terminal.onResize(size => {
+      if (syncingViewportRef.current) return;
       if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', rows: size.rows, cols: size.cols }));
     });
-    const observer = new ResizeObserver(() => {
-      if (activeRef.current) requestAnimationFrame(() => fit.fit());
-    });
+    const observer = new ResizeObserver(() => requestAnimationFrame(() => fit.fit()));
     observer.observe(host);
     connect();
 
@@ -83,6 +134,9 @@ export function TerminalView({ backendAddress, session, active, onStatus }: Term
       observer.disconnect();
       dataDisposable.dispose();
       resizeDisposable.dispose();
+      bellDisposable.dispose();
+      terminalRef.current = null;
+      fitRef.current = null;
       terminal.dispose();
     };
   }, [backendAddress, session.id]);

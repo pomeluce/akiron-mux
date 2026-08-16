@@ -1,4 +1,4 @@
-import { Folder } from 'lucide-react';
+import { Folder, Languages, MonitorCog, Palette } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Button } from '@/shared/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/shared/ui/dialog';
@@ -44,86 +44,96 @@ export function SettingsDialog(props: SettingsDialogProps) {
   return (
     <>
       <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-        <DialogContent className="w-[min(620px,calc(100vw-28px))]">
+        <DialogContent className="settings-dialog w-[min(700px,calc(100vw-28px))]">
           <DialogHeader>
             <DialogTitle>{props.t('settingsTitle')}</DialogTitle>
           </DialogHeader>
-          <div className="max-h-[68vh] space-y-6 overflow-y-auto p-6">
-            <SettingsSection title={props.t('appearance')}>
-              <div>
-                <span className="field-label">{props.t('theme')}</span>
-                <div className="segmented-control">
+          <div className="settings-content max-h-[70vh] overflow-y-auto px-6 py-2">
+            <SettingsSection icon={<Palette />} title={props.t('appearance')}>
+              <SettingsRow label={props.t('theme')} baseline>
+                <div className="segmented-control segmented-control-theme">
                   {(['system', 'light', 'dark'] as ThemeMode[]).map(theme => (
                     <button key={theme} data-active={draft.theme === theme} onClick={() => setDraft(value => ({ ...value, theme }))}>
                       {props.t(theme)}
                     </button>
                   ))}
                 </div>
-              </div>
-              <label className="flex items-center justify-between gap-4 text-sm">
-                <span>{props.t('acrylic')}</span>
-                <input
-                  type="checkbox"
-                  className="size-4 accent-primary"
-                  checked={draft.acrylic}
-                  onChange={event => setDraft(value => ({ ...value, acrylic: event.target.checked }))}
-                />
-              </label>
-              <div>
-                <div className="mb-2 flex justify-between text-sm">
-                  <span>{props.t('acrylicStrength')}</span>
-                  <span className="text-muted-foreground">{draft.acrylicStrength}%</span>
-                </div>
+              </SettingsRow>
+              <SettingsRow label={props.t('acrylic')}>
+                <label className="settings-switch">
+                  <input type="checkbox" className="sr-only" checked={draft.acrylic} onChange={event => setDraft(value => ({ ...value, acrylic: event.target.checked }))} />
+                  <span aria-hidden="true" />
+                </label>
+              </SettingsRow>
+              <SettingsRow label={props.t('acrylicStrength')} value={`${draft.acrylicStrength}%`} stacked>
                 <input
                   className="w-full accent-primary"
                   type="range"
-                  min="20"
-                  max="90"
+                  aria-label={props.t('acrylicStrength')}
+                  min="0"
+                  max="100"
                   step="5"
                   value={draft.acrylicStrength}
                   disabled={!draft.acrylic}
                   onChange={event => setDraft(value => ({ ...value, acrylicStrength: Number(event.target.value) }))}
                 />
-              </div>
+              </SettingsRow>
+              <SettingsRow label={props.t('terminalFontSize')} value={`${draft.terminalFontSize}px`} stacked>
+                <input
+                  className="w-full accent-primary"
+                  type="range"
+                  aria-label={props.t('terminalFontSize')}
+                  min="10"
+                  max="24"
+                  step="1"
+                  value={draft.terminalFontSize}
+                  onChange={event => setDraft(value => ({ ...value, terminalFontSize: Number(event.target.value) }))}
+                />
+              </SettingsRow>
             </SettingsSection>
-            <SettingsSection title={props.t('language')}>
-              <div className="grid grid-cols-2 gap-2">
-                {(
-                  [
-                    ['en', 'English'],
-                    ['zh-CN', '中文'],
-                  ] as Array<[Locale, string]>
-                ).map(([locale, label]) => (
-                  <Button
-                    key={locale}
-                    className={locale === 'zh-CN' ? 'font-zh' : ''}
-                    variant={draft.locale === locale ? 'secondary' : 'outline'}
-                    onClick={() => setDraft(value => ({ ...value, locale }))}
-                  >
-                    {label}
-                  </Button>
-                ))}
-              </div>
-            </SettingsSection>
-            <SettingsSection title={props.t('backendAddress')}>
-              <input
-                className="text-field"
-                value={draft.backendAddress}
-                onChange={event => setDraft(value => ({ ...value, backendAddress: event.target.value }))}
-                placeholder="http://127.0.0.1:17321"
-              />
-              <p className="m-0 text-xs text-muted-foreground">{props.t('backendHint')}</p>
-            </SettingsSection>
-            <SettingsSection title={props.t('generalRoot')}>
-              <div className="flex gap-2">
-                <div className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border border-border px-3 text-sm">
-                  <Folder className="size-4 shrink-0 text-primary" />
-                  <span className="truncate">{root}</span>
+            <SettingsSection icon={<Languages />} title={props.t('language')}>
+              <SettingsRow label={props.t('language')} baseline>
+                <div className="segmented-control segmented-control-language">
+                  {(
+                    [
+                      ['en', 'English'],
+                      ['zh-CN', '中文'],
+                    ] as Array<[Locale, string]>
+                  ).map(([locale, label]) => (
+                    <button
+                      key={locale}
+                      className={locale === 'zh-CN' ? 'font-zh' : ''}
+                      data-active={draft.locale === locale}
+                      onClick={() => setDraft(value => ({ ...value, locale }))}
+                    >
+                      {label}
+                    </button>
+                  ))}
                 </div>
-                <Button variant="outline" onClick={() => setPickerOpen(true)}>
-                  {props.t('browse')}
-                </Button>
-              </div>
+              </SettingsRow>
+            </SettingsSection>
+            <SettingsSection icon={<MonitorCog />} title={props.t('workspaceSettings')}>
+              <SettingsRow label={props.t('backendAddress')} hint={props.t('backendHint')} stacked>
+                <input
+                  className="text-field"
+                  name="akmux-backend-address"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={draft.backendAddress}
+                  onChange={event => setDraft(value => ({ ...value, backendAddress: event.target.value }))}
+                />
+              </SettingsRow>
+              <SettingsRow label={props.t('generalRoot')} stacked>
+                <div className="flex gap-2">
+                  <div className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border border-border px-3 text-sm">
+                    <Folder className="size-4 shrink-0 text-primary" />
+                    <span className="truncate">{root}</span>
+                  </div>
+                  <Button variant="outline" onClick={() => setPickerOpen(true)}>
+                    {props.t('browse')}
+                  </Button>
+                </div>
+              </SettingsRow>
             </SettingsSection>
             {error && <div className="text-sm text-destructive">{error}</div>}
           </div>
@@ -140,7 +150,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       <DirectoryDialog
         open={pickerOpen}
         backendAddress={draft.backendAddress}
-        initialPath={root}
+        initialPath=""
         t={props.t}
         onOpenChange={setPickerOpen}
         onChoose={value => {
@@ -152,11 +162,43 @@ export function SettingsDialog(props: SettingsDialogProps) {
   );
 }
 
-function SettingsSection({ title, children }: { title: string; children: React.ReactNode }) {
+function SettingsSection({ icon, title, children }: { icon: React.ReactNode; title: string; children: React.ReactNode }) {
   return (
-    <section className="space-y-4">
-      <h3 className="m-0 text-xs font-semibold uppercase text-muted-foreground">{title}</h3>
-      {children}
+    <section className="settings-section">
+      <h3>
+        {icon}
+        {title}
+      </h3>
+      <div className="settings-section-body">{children}</div>
     </section>
+  );
+}
+
+function SettingsRow({
+  label,
+  value,
+  hint,
+  stacked = false,
+  baseline = false,
+  children,
+}: {
+  label: string;
+  value?: string;
+  hint?: string;
+  stacked?: boolean;
+  baseline?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className={stacked ? 'settings-row settings-row-stacked' : baseline ? 'settings-row settings-row-baseline' : 'settings-row'}>
+      <div className="min-w-0">
+        <div className="flex items-center gap-2 text-sm font-medium">
+          <span>{label}</span>
+          {value && <span className="text-xs font-normal text-muted-foreground">{value}</span>}
+        </div>
+        {hint && <p className="m-0 mt-1 text-xs text-muted-foreground">{hint}</p>}
+      </div>
+      <div className={stacked ? 'w-full' : 'shrink-0'}>{children}</div>
+    </div>
   );
 }

@@ -63,6 +63,8 @@ struct WorkspaceDirectory {
     path: String,
     pinned: bool,
     last_opened_ms: i64,
+    #[serde(default)]
+    sort_order: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +75,10 @@ struct WorkspaceState {
     project_sort: SortMode,
     general_sort: SortMode,
     other_sort: SortMode,
+    #[serde(default)]
+    directory_sort: HashMap<String, SortMode>,
+    #[serde(default)]
+    session_order: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -92,6 +98,8 @@ impl Default for WorkspaceState {
             project_sort: SortMode::Priority,
             general_sort: SortMode::Recent,
             other_sort: SortMode::Recent,
+            directory_sort: std::collections::HashMap::new(),
+            session_order: std::collections::HashMap::new(),
         }
     }
 }
@@ -115,6 +123,22 @@ struct HistoryItem {
     start_time: String,
     end_time: Option<String>,
     file_mtime: String,
+    message_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionDetails {
+    managed_session_id: String,
+    native_session_id: Option<String>,
+    agent: AgentKind,
+    provider_id: Option<String>,
+    provider_name: Option<String>,
+    profile_id: Option<String>,
+    model: Option<String>,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    cache_read_tokens: i64,
+    cache_creation_tokens: i64,
     message_count: i64,
 }
 
@@ -158,6 +182,28 @@ struct WorkspacePatch {
     project_sort: Option<SortMode>,
     general_sort: Option<SortMode>,
     other_sort: Option<SortMode>,
+    directory_sort: Option<DirectorySortPatch>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DirectorySortPatch {
+    path: String,
+    mode: SortMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ReorderKind {
+    Projects,
+    Directories,
+    Sessions,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReorderRequest {
+    kind: ReorderKind,
+    scope: String,
+    ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -286,6 +332,7 @@ fn router_with_db(manager: SessionManager, db: Db) -> Router {
         .route("/api/health", get(health))
         .route("/api/directories", get(list_directories).post(create_directory))
         .route("/api/sessions", get(list_sessions).post(create_session))
+        .route("/api/sessions/:id/details", get(session_details))
         .route("/api/sessions/:id/restart", post(restart_session))
         .route("/api/sessions/:id", delete(close_session))
         .route("/api/sessions/:id/terminal", get(terminal_websocket))
@@ -295,6 +342,7 @@ fn router_with_db(manager: SessionManager, db: Db) -> Router {
         .route("/api/history", get(history))
         .route("/api/history/refresh", post(refresh_history))
         .route("/api/settings", get(settings).patch(update_settings))
+        .route("/api/reorder", post(reorder_workspace_items))
         .with_state(state)
         .layer(middleware::from_fn(validate_local_request))
 }
@@ -514,7 +562,6 @@ fn workspace_response(db: &Db, workspace: &mut WorkspaceState, search: Option<&s
     let mut general: HashMap<String, HistoryDirectory> = HashMap::new();
     let mut other: HashMap<String, HistoryDirectory> = HashMap::new();
     let general_root = canonicalize_for_comparison(FsPath::new(&workspace.general_root));
-    let mut seen_other = HashMap::<String, i64>::new();
 
     for (app_type, record) in records {
         if record.project_path.trim().is_empty() {
@@ -550,7 +597,6 @@ fn workspace_response(db: &Db, workspace: &mut WorkspaceState, search: Option<&s
                 .push(item);
         } else {
             let key = cwd.display().to_string();
-            seen_other.entry(key.clone()).or_insert(0);
             other
                 .entry(key.clone())
                 .or_insert_with(|| HistoryDirectory {
@@ -564,20 +610,35 @@ fn workspace_response(db: &Db, workspace: &mut WorkspaceState, search: Option<&s
     }
 
     let now = chrono::Utc::now().timestamp_millis();
-    for path in seen_other.keys() {
-        if let Some(directory) = workspace.other_directories.iter_mut().find(|directory| directory.path == *path) {
-            directory.last_opened_ms = directory.last_opened_ms.max(now);
-        } else {
+    let visible_directories = general.keys().chain(other.keys()).cloned().collect::<Vec<_>>();
+    for path in visible_directories {
+        if workspace.other_directories.iter().all(|directory| directory.path != path) {
             workspace.other_directories.push(WorkspaceDirectory {
-                path: path.clone(),
+                path,
                 pinned: false,
                 last_opened_ms: now,
+                sort_order: workspace.other_directories.len() as i64,
             });
         }
     }
-    sort_project_groups(&mut projects, workspace.project_sort);
-    let general = sort_directories(general, workspace.general_sort, &workspace.other_directories);
-    let other = sort_directories(other, workspace.other_sort, &workspace.other_directories);
+
+    projects.sort_by_key(|group| group.project.sort_order);
+    for group in &mut projects {
+        let scope = format!("project:{}", group.project.id);
+        sort_history(&mut group.history, workspace.project_sort, workspace.session_order.get(&scope));
+    }
+    let mut general = sort_directories(general, &workspace.other_directories);
+    for group in &mut general {
+        let mode = workspace.directory_sort.get(&group.path).copied().unwrap_or(workspace.general_sort);
+        let scope = format!("directory:{}", group.path);
+        sort_history(&mut group.items, mode, workspace.session_order.get(&scope));
+    }
+    let mut other = sort_directories(other, &workspace.other_directories);
+    for group in &mut other {
+        let mode = workspace.directory_sort.get(&group.path).copied().unwrap_or(workspace.other_sort);
+        let scope = format!("directory:{}", group.path);
+        sort_history(&mut group.items, mode, workspace.session_order.get(&scope));
+    }
     Ok(WorkspaceResponse {
         general_root: workspace.general_root.clone(),
         projects,
@@ -586,29 +647,35 @@ fn workspace_response(db: &Db, workspace: &mut WorkspaceState, search: Option<&s
     })
 }
 
-fn sort_project_groups(groups: &mut [ProjectGroup], mode: SortMode) {
+fn sort_history(items: &mut [HistoryItem], mode: SortMode, manual_order: Option<&Vec<String>>) {
     match mode {
-        SortMode::Manual => groups.sort_by_key(|group| group.project.sort_order),
-        SortMode::Priority => groups.sort_by_key(|group| (!group.project.pinned, group.project.sort_order)),
-        SortMode::Recent => groups.sort_by_key(|group| std::cmp::Reverse(group.history.iter().map(|item| item.file_mtime.clone()).max().unwrap_or_default())),
+        SortMode::Priority => items.sort_by_key(|item| (std::cmp::Reverse(item.message_count), std::cmp::Reverse(item.file_mtime.clone()))),
+        SortMode::Recent => items.sort_by_key(|item| std::cmp::Reverse(item.file_mtime.clone())),
+        SortMode::Manual => {
+            let positions = manual_order
+                .map(|order| order.iter().enumerate().map(|(index, id)| (id.as_str(), index)).collect::<HashMap<_, _>>())
+                .unwrap_or_default();
+            items.sort_by_key(|item| {
+                let agent = match item.agent {
+                    AgentKind::Claude => "claude",
+                    AgentKind::Codex => "codex",
+                };
+                positions.get(format!("{agent}:{}", item.id).as_str()).copied().unwrap_or(usize::MAX)
+            });
+        }
     }
 }
 
-fn sort_directories(groups: HashMap<String, HistoryDirectory>, mode: SortMode, metadata: &[WorkspaceDirectory]) -> Vec<HistoryDirectory> {
+fn sort_directories(groups: HashMap<String, HistoryDirectory>, metadata: &[WorkspaceDirectory]) -> Vec<HistoryDirectory> {
     let mut values = groups.into_values().collect::<Vec<_>>();
     values.sort_by(|left, right| {
         let left_meta = metadata.iter().find(|entry| entry.path == left.path);
         let right_meta = metadata.iter().find(|entry| entry.path == right.path);
-        match mode {
-            SortMode::Manual => left.path.cmp(&right.path),
-            SortMode::Priority => right_meta.map(|entry| entry.pinned).cmp(&left_meta.map(|entry| entry.pinned)),
-            SortMode::Recent => right
-                .items
-                .iter()
-                .map(|item| item.file_mtime.clone())
-                .max()
-                .cmp(&left.items.iter().map(|item| item.file_mtime.clone()).max()),
-        }
+        left_meta
+            .map(|entry| entry.sort_order)
+            .unwrap_or(i64::MAX)
+            .cmp(&right_meta.map(|entry| entry.sort_order).unwrap_or(i64::MAX))
+            .then_with(|| left.path.cmp(&right.path))
     });
     values
 }
@@ -749,6 +816,55 @@ async fn update_settings(State(state): State<Arc<AppState>>, Json(request): Json
     if let Some(sort) = request.other_sort {
         workspace.other_sort = sort;
     }
+    if let Some(directory_sort) = request.directory_sort {
+        if directory_sort.path.len() > 4096 {
+            return Err(ApiError::bad_request(anyhow::anyhow!("Directory path is too long")));
+        }
+        workspace.directory_sort.insert(directory_sort.path, directory_sort.mode);
+    }
+    save_workspace(&db, &workspace).map_err(ApiError::bad_request)?;
+    Ok(Json(workspace.clone()))
+}
+
+async fn reorder_workspace_items(State(state): State<Arc<AppState>>, Json(request): Json<ReorderRequest>) -> Result<Json<WorkspaceState>, ApiError> {
+    if request.ids.len() > 2000 || request.scope.len() > 4096 {
+        return Err(ApiError::bad_request(anyhow::anyhow!("Reorder request is too large")));
+    }
+    let mut seen = std::collections::HashSet::new();
+    if request.ids.iter().any(|id| id.len() > 4096 || !seen.insert(id)) {
+        return Err(ApiError::bad_request(anyhow::anyhow!("Reorder request contains invalid identifiers")));
+    }
+
+    let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
+    let mut workspace = state.workspaces.lock().map_err(|_| ApiError::internal("Workspace lock poisoned"))?;
+    let positions = request.ids.iter().enumerate().map(|(index, id)| (id.as_str(), index as i64)).collect::<HashMap<_, _>>();
+    match request.kind {
+        ReorderKind::Projects => {
+            for project in &mut workspace.projects {
+                if let Some(position) = positions.get(project.id.as_str()) {
+                    project.sort_order = *position;
+                }
+            }
+            workspace.projects.sort_by_key(|project| project.sort_order);
+            for (index, project) in workspace.projects.iter_mut().enumerate() {
+                project.sort_order = index as i64;
+            }
+        }
+        ReorderKind::Directories => {
+            for directory in &mut workspace.other_directories {
+                if let Some(position) = positions.get(directory.path.as_str()) {
+                    directory.sort_order = *position;
+                }
+            }
+            workspace.other_directories.sort_by_key(|directory| directory.sort_order);
+            for (index, directory) in workspace.other_directories.iter_mut().enumerate() {
+                directory.sort_order = index as i64;
+            }
+        }
+        ReorderKind::Sessions => {
+            workspace.session_order.insert(request.scope, request.ids);
+        }
+    }
     save_workspace(&db, &workspace).map_err(ApiError::bad_request)?;
     Ok(Json(workspace.clone()))
 }
@@ -848,6 +964,78 @@ async fn create_session(State(state): State<Arc<AppState>>, Json(request): Json<
     }
     let session = state.manager.create(create).map_err(ApiError::bad_request)?;
     Ok((StatusCode::CREATED, Json(session)))
+}
+
+async fn session_details(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Result<Json<SessionDetails>, ApiError> {
+    let session = state
+        .manager
+        .get(&id)
+        .map(|handle| handle.info())
+        .ok_or_else(|| ApiError::not_found(anyhow::anyhow!("Managed session does not exist")))?;
+    let app_type = match session.agent {
+        AgentKind::Claude => "claude",
+        AgentKind::Codex => "codex",
+    };
+    let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
+    let record = session
+        .native_session_id
+        .as_deref()
+        .map(|native_id| db.query_session(app_type, native_id))
+        .transpose()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .flatten();
+    let usage = session
+        .native_session_id
+        .as_deref()
+        .map(|native_id| db.query_session_usage_details(app_type, native_id))
+        .transpose()
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .unwrap_or_default();
+
+    let active_provider_key = if session.agent == AgentKind::Claude {
+        "active_provider"
+    } else {
+        "active_codex_provider"
+    };
+    let provider_id = record
+        .as_ref()
+        .and_then(|item| item.profile_id.clone())
+        .filter(|value| !value.is_empty())
+        .or_else(|| db.get_setting(active_provider_key).filter(|value| !value.is_empty()));
+    let provider_name = provider_id.as_deref().and_then(|provider_id| {
+        db.get_providers(app_type)
+            .ok()
+            .and_then(|providers| providers.into_iter().find(|provider| provider.id == provider_id))
+            .map(|provider| provider.name)
+    });
+    let profile_id = if session.agent == AgentKind::Claude {
+        db.get_setting("active_profile").filter(|value| !value.is_empty())
+    } else {
+        None
+    };
+    let model = if usage.model.is_empty() {
+        let key = if session.agent == AgentKind::Codex { "active_codex_model" } else { "" };
+        (!key.is_empty()).then(|| db.get_setting(key)).flatten().filter(|value| !value.is_empty())
+    } else {
+        Some(usage.model)
+    };
+    let history_prompt = record.as_ref().map_or(0, |item| item.prompt_tokens);
+    let history_completion = record.as_ref().map_or(0, |item| item.completion_tokens);
+
+    Ok(Json(SessionDetails {
+        managed_session_id: id,
+        native_session_id: session.native_session_id,
+        agent: session.agent,
+        provider_id,
+        provider_name,
+        profile_id,
+        model,
+        prompt_tokens: usage.prompt_tokens.max(history_prompt),
+        completion_tokens: usage.completion_tokens.max(history_completion),
+        cache_read_tokens: usage.cache_read_tokens,
+        cache_creation_tokens: usage.cache_creation_tokens,
+        message_count: record.as_ref().map_or(0, |item| item.message_count),
+    }))
 }
 
 async fn restart_session(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
@@ -1034,7 +1222,7 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{directory_listing, is_local_authority, is_local_origin, router, workspace_response, Project, SortMode, WorkspaceState};
+    use super::{directory_listing, is_local_authority, is_local_origin, router, workspace_response, Project, SortMode, WorkspaceDirectory, WorkspaceState};
     use crate::db::{sessions::SessionRecord, Db};
     use crate::session_runtime::SessionManager;
     use axum::{
@@ -1042,6 +1230,24 @@ mod tests {
         http::{header, Request, StatusCode},
     };
     use tower::ServiceExt;
+
+    fn history_record(id: &str, path: &std::path::Path, file_mtime: &str, message_count: i64) -> SessionRecord {
+        SessionRecord {
+            id: id.into(),
+            project_path: path.display().to_string(),
+            profile_id: None,
+            mode: "local".into(),
+            start_time: file_mtime.into(),
+            end_time: None,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            message_count,
+            title: Some(id.into()),
+            size_bytes: 1,
+            file_mtime: file_mtime.into(),
+            search_text: String::new(),
+        }
+    }
 
     #[test]
     fn accepts_only_loopback_browser_authorities() {
@@ -1076,6 +1282,118 @@ mod tests {
             [".hidden", "Alpha", "zeta"]
         );
         assert_eq!(listing.path, root.path().canonicalize().unwrap().display().to_string());
+    }
+
+    #[test]
+    fn loads_workspace_state_saved_before_scoped_sorting() {
+        let state: WorkspaceState = serde_json::from_value(serde_json::json!({
+            "general_root": "/tmp/workbench",
+            "projects": [],
+            "other_directories": [{ "path": "/tmp/other", "pinned": false, "last_opened_ms": 1 }],
+            "project_sort": "priority",
+            "general_sort": "recent",
+            "other_sort": "manual"
+        }))
+        .unwrap();
+
+        assert_eq!(state.other_directories[0].sort_order, 0);
+        assert!(state.directory_sort.is_empty());
+        assert!(state.session_order.is_empty());
+    }
+
+    #[test]
+    fn keeps_container_order_separate_from_scoped_session_order() {
+        let root = tempfile::tempdir().unwrap();
+        let general_root = root.path().join("general");
+        let general_a = general_root.join("a");
+        let general_b = general_root.join("b");
+        let project_a = root.path().join("project-a");
+        let project_b = root.path().join("project-b");
+        for path in [&general_a, &general_b, &project_a, &project_b] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        for (id, path, mtime, messages) in [
+            ("project-a-old", project_a.as_path(), "2026-08-15 10:00:00", 1),
+            ("project-a-new", project_a.as_path(), "2026-08-15 12:00:00", 9),
+            ("project-b", project_b.as_path(), "2026-08-15 11:00:00", 3),
+            ("general-a-old", general_a.as_path(), "2026-08-15 09:00:00", 1),
+            ("general-a-new", general_a.as_path(), "2026-08-15 13:00:00", 2),
+            ("general-b-old", general_b.as_path(), "2026-08-15 08:00:00", 1),
+            ("general-b-new", general_b.as_path(), "2026-08-15 14:00:00", 2),
+        ] {
+            db.insert_session(&history_record(id, path, mtime, messages), "claude").unwrap();
+        }
+
+        let mut workspace = WorkspaceState {
+            general_root: general_root.display().to_string(),
+            projects: vec![
+                Project {
+                    id: "project-a".into(),
+                    name: "Project A".into(),
+                    path: project_a.display().to_string(),
+                    pinned: true,
+                    sort_order: 1,
+                },
+                Project {
+                    id: "project-b".into(),
+                    name: "Project B".into(),
+                    path: project_b.display().to_string(),
+                    pinned: false,
+                    sort_order: 0,
+                },
+            ],
+            other_directories: vec![
+                WorkspaceDirectory {
+                    path: general_a.display().to_string(),
+                    pinned: false,
+                    last_opened_ms: 1,
+                    sort_order: 1,
+                },
+                WorkspaceDirectory {
+                    path: general_b.display().to_string(),
+                    pinned: false,
+                    last_opened_ms: 2,
+                    sort_order: 0,
+                },
+            ],
+            project_sort: SortMode::Manual,
+            general_sort: SortMode::Recent,
+            other_sort: SortMode::Recent,
+            directory_sort: std::collections::HashMap::from([(general_a.display().to_string(), SortMode::Manual)]),
+            session_order: std::collections::HashMap::from([
+                ("project:project-a".into(), vec!["claude:project-a-old".into(), "claude:project-a-new".into()]),
+                (
+                    format!("directory:{}", general_a.display()),
+                    vec!["claude:general-a-old".into(), "claude:general-a-new".into()],
+                ),
+            ]),
+        };
+
+        let response = workspace_response(&db, &mut workspace, None).unwrap();
+
+        assert_eq!(
+            response.projects.iter().map(|group| group.project.id.as_str()).collect::<Vec<_>>(),
+            ["project-b", "project-a"]
+        );
+        let project_a_history = &response.projects.iter().find(|group| group.project.id == "project-a").unwrap().history;
+        assert_eq!(
+            project_a_history.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            ["project-a-old", "project-a-new"]
+        );
+        assert_eq!(
+            response.general.iter().map(|group| group.path.as_str()).collect::<Vec<_>>(),
+            [general_b.to_str().unwrap(), general_a.to_str().unwrap()]
+        );
+        assert_eq!(
+            response.general[0].items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            ["general-b-new", "general-b-old"]
+        );
+        assert_eq!(
+            response.general[1].items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            ["general-a-old", "general-a-new"]
+        );
     }
 
     #[cfg(unix)]
@@ -1124,6 +1442,8 @@ mod tests {
             project_sort: SortMode::Priority,
             general_sort: SortMode::Recent,
             other_sort: SortMode::Recent,
+            directory_sort: std::collections::HashMap::new(),
+            session_order: std::collections::HashMap::new(),
         };
 
         let response = workspace_response(&db, &mut workspace, None).unwrap();
@@ -1140,6 +1460,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn session_details_returns_not_found_for_unknown_managed_session() {
+        let response = router(SessionManager::new())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sessions/missing/details")
+                    .header(header::HOST, "127.0.0.1:17321")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

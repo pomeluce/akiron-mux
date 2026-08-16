@@ -5,10 +5,10 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 fixture_root=$(mktemp -d)
 trap 'rm -rf "$fixture_root"' EXIT
 
-mkdir -p "$fixture_root/bin" "$fixture_root/artifacts/appimage" "$fixture_root/artifacts/deb"
-touch "$fixture_root/artifacts/appimage/AkironMux.AppImage"
-touch "$fixture_root/artifacts/deb/akiron-mux.deb"
-touch "$fixture_root/artifacts/akmux.tar.gz"
+mkdir -p "$fixture_root/bin" "$fixture_root/artifacts/linux" "$fixture_root/artifacts/windows"
+touch "$fixture_root/artifacts/linux/AkironMux-1.12.0-linux-x86_64-cli.tar.gz"
+touch "$fixture_root/artifacts/linux/AkironMux-1.12.0-linux-x86_64-desktop.AppImage"
+touch "$fixture_root/artifacts/windows/AkironMux-1.12.0-windows-x86_64-desktop-setup.exe"
 printf 'Release notes\n' >"$fixture_root/CHANGELOG.md"
 
 cat >"$fixture_root/bin/gh" <<'EOF'
@@ -37,24 +37,33 @@ export PATH="$fixture_root/bin:$PATH"
 export GH_CALL_LOG="$fixture_root/gh-calls.log"
 
 FAKE_RELEASE_EXISTS=false bash "$repo_root/scripts/publish-release.sh" \
-  v1.11.0 \
+  v1.12.0 \
   "$fixture_root/CHANGELOG.md" \
   "$fixture_root/artifacts"
 
 grep -q '^release create ' "$GH_CALL_LOG"
-grep -q 'AkironMux.AppImage' "$GH_CALL_LOG"
-grep -q 'akiron-mux.deb' "$GH_CALL_LOG"
-grep -q 'akmux.tar.gz' "$GH_CALL_LOG"
+grep -q 'AkironMux-1.12.0-linux-x86_64-cli.tar.gz' "$GH_CALL_LOG"
+grep -q 'AkironMux-1.12.0-linux-x86_64-desktop.AppImage' "$GH_CALL_LOG"
+grep -q 'AkironMux-1.12.0-windows-x86_64-desktop-setup.exe' "$GH_CALL_LOG"
 
 : >"$GH_CALL_LOG"
 FAKE_RELEASE_EXISTS=true bash "$repo_root/scripts/publish-release.sh" \
-  v1.11.0 \
+  v1.12.0 \
   "$fixture_root/CHANGELOG.md" \
   "$fixture_root/artifacts"
 
 grep -q '^release upload .* --clobber' "$GH_CALL_LOG"
 if grep -q '^release create ' "$GH_CALL_LOG"; then
   echo 'existing releases must not be recreated' >&2
+  exit 1
+fi
+
+touch "$fixture_root/artifacts/AkironMux.AppImage"
+if FAKE_RELEASE_EXISTS=false bash "$repo_root/scripts/publish-release.sh" \
+  v1.12.0 \
+  "$fixture_root/CHANGELOG.md" \
+  "$fixture_root/artifacts"; then
+  echo 'unexpected asset names must be rejected' >&2
   exit 1
 fi
 

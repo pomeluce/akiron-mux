@@ -24,6 +24,32 @@ pub struct SessionRecord {
 }
 
 impl Db {
+    pub fn query_session(&self, app_type: &str, id: &str) -> Result<Option<SessionRecord>, rusqlite::Error> {
+        let mut stmt = self.conn().prepare(
+            "SELECT id, project_path, profile_id, mode, start_time, end_time,
+                    prompt_tokens, completion_tokens, message_count, title, size_bytes, file_mtime
+             FROM session_history WHERE app_type = ?1 AND id = ?2",
+        )?;
+        let mut rows = stmt.query_map(params![app_type, id], |row| {
+            Ok(SessionRecord {
+                id: row.get(0)?,
+                project_path: row.get(1)?,
+                profile_id: row.get(2)?,
+                mode: row.get(3)?,
+                start_time: row.get(4)?,
+                end_time: row.get(5)?,
+                prompt_tokens: row.get(6)?,
+                completion_tokens: row.get(7)?,
+                message_count: row.get(8)?,
+                title: row.get(9)?,
+                size_bytes: row.get::<_, i64>(10).unwrap_or(0),
+                file_mtime: row.get::<_, String>(11).unwrap_or_default(),
+                search_text: String::new(),
+            })
+        })?;
+        rows.next().transpose()
+    }
+
     pub fn insert_session(&self, s: &SessionRecord, app_type: &str) -> Result<(), rusqlite::Error> {
         self.conn().execute(
             "INSERT INTO session_history (id, app_type, project_path, profile_id, mode, start_time, end_time, prompt_tokens, completion_tokens, message_count, title, size_bytes, file_mtime)

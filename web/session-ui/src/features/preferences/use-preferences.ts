@@ -4,6 +4,7 @@ import { initialLocale } from '@/shared/lib/i18n';
 import type { ClientPreferences, Locale, ThemeMode } from '@/types';
 
 const ACRYLIC_TRANSPARENCY_KEY = 'akironmux-acrylic-transparency';
+const TERMINAL_FONT_SIZE_KEY = 'akironmux-terminal-font-size';
 
 function initialTheme(): ThemeMode {
   const value = localStorage.getItem('akironmux-theme');
@@ -17,8 +18,16 @@ function initialBackendAddress() {
 }
 
 function initialAcrylicTransparency() {
-  const saved = Number(localStorage.getItem(ACRYLIC_TRANSPARENCY_KEY)) || 20;
-  return Math.min(Math.max(saved, 20), 90);
+  const raw = localStorage.getItem(ACRYLIC_TRANSPARENCY_KEY);
+  const saved = raw === null ? 20 : Number(raw);
+  return Number.isFinite(saved) ? Math.min(Math.max(saved, 0), 100) : 20;
+}
+
+function initialTerminalFontSize() {
+  const raw = localStorage.getItem(TERMINAL_FONT_SIZE_KEY);
+  if (raw === null) return 12;
+  const saved = Number(raw);
+  return Number.isFinite(saved) ? Math.min(Math.max(saved, 10), 24) : 12;
 }
 
 export function usePreferences() {
@@ -27,6 +36,7 @@ export function usePreferences() {
     theme: initialTheme(),
     acrylic: localStorage.getItem('akironmux-acrylic') !== 'false',
     acrylicStrength: initialAcrylicTransparency(),
+    terminalFontSize: initialTerminalFontSize(),
     backendAddress: initialBackendAddress(),
   });
   const [systemDark, setSystemDark] = useState(() => matchMedia('(prefers-color-scheme: dark)').matches);
@@ -54,6 +64,7 @@ export function usePreferences() {
     localStorage.setItem('akironmux-theme', next.theme);
     localStorage.setItem('akironmux-acrylic', String(next.acrylic));
     localStorage.setItem(ACRYLIC_TRANSPARENCY_KEY, String(next.acrylicStrength));
+    localStorage.setItem(TERMINAL_FONT_SIZE_KEY, String(next.terminalFontSize));
     localStorage.removeItem('akironmux-acrylic-strength');
     localStorage.setItem('akironmux-backend-address', next.backendAddress);
   };

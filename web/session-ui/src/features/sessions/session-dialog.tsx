@@ -110,7 +110,14 @@ export function SessionDialog(props: SessionDialogProps) {
                 {isolate && (
                   <div className="mt-3">
                     <span className="field-label">{props.t('subdirectory')}</span>
-                    <input className="text-field" value={subdirectory} onChange={event => setSubdirectory(event.target.value)} placeholder="session-workspace" />
+                    <input
+                      className="text-field"
+                      name="akmux-session-subdirectory"
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={subdirectory}
+                      onChange={event => setSubdirectory(event.target.value)}
+                    />
                   </div>
                 )}
               </div>
@@ -130,7 +137,7 @@ export function SessionDialog(props: SessionDialogProps) {
       <DirectoryDialog
         open={pickerOpen}
         backendAddress={props.backendAddress}
-        initialPath={directory}
+        initialPath=""
         t={props.t}
         onOpenChange={setPickerOpen}
         onChoose={path => {

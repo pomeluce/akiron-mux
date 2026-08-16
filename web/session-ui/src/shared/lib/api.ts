@@ -1,4 +1,4 @@
-import type { Agent, DirectoryListing, Project, SessionInfo, SettingsResponse, SortMode, WorkspaceResponse } from '@/types';
+import type { Agent, DirectoryListing, Project, SessionDetails, SessionInfo, SettingsResponse, SortMode, WorkspaceResponse } from '@/types';
 
 function normalizedBase(address: string) {
   return address.trim().replace(/\/$/, '');
@@ -36,6 +36,7 @@ export const sessionApi = {
   updateSettings: (address: string, patch: Partial<Pick<SettingsResponse, 'general_root' | 'project_sort' | 'general_sort' | 'other_sort'>>) =>
     request<SettingsResponse>(address, '/api/settings', { method: 'PATCH', body: JSON.stringify(patch) }),
   sessions: (address: string) => request<SessionInfo[]>(address, '/api/sessions'),
+  sessionDetails: (address: string, id: string) => request<SessionDetails>(address, `/api/sessions/${encodeURIComponent(id)}/details`),
   createSession: (address: string, agent: Agent, cwd: string, resumeId?: string) =>
     request<SessionInfo>(address, '/api/sessions', {
       method: 'POST',
@@ -44,7 +45,7 @@ export const sessionApi = {
   restartSession: (address: string, id: string) => request<void>(address, `/api/sessions/${encodeURIComponent(id)}/restart`, { method: 'POST' }),
   closeSession: (address: string, id: string) => request<void>(address, `/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   directories: (address: string, path: string, showHidden: boolean) =>
-    request<DirectoryListing>(address, `/api/directories?path=${encodeURIComponent(path)}&show_hidden=${showHidden}`),
+    request<DirectoryListing>(address, `/api/directories${path ? `?path=${encodeURIComponent(path)}&show_hidden=${showHidden}` : `?show_hidden=${showHidden}`}`),
   createDirectory: (address: string, parent: string, name: string) => request(address, '/api/directories', { method: 'POST', body: JSON.stringify({ parent, name }) }),
   createProject: (address: string, path: string, name: string) => request<Project>(address, '/api/projects', { method: 'POST', body: JSON.stringify({ path, name }) }),
   updateProject: (address: string, id: string, patch: Partial<Pick<Project, 'name' | 'path' | 'pinned'>>) =>
@@ -54,4 +55,8 @@ export const sessionApi = {
     const key = section === 'projects' ? 'project_sort' : `${section}_sort`;
     return request<SettingsResponse>(address, '/api/settings', { method: 'PATCH', body: JSON.stringify({ [key]: mode }) });
   },
+  updateDirectorySort: (address: string, path: string, mode: SortMode) =>
+    request<SettingsResponse>(address, '/api/settings', { method: 'PATCH', body: JSON.stringify({ directory_sort: { path, mode } }) }),
+  reorder: (address: string, kind: 'projects' | 'directories' | 'sessions', scope: string, ids: string[]) =>
+    request<SettingsResponse>(address, '/api/reorder', { method: 'POST', body: JSON.stringify({ kind, scope, ids }) }),
 };

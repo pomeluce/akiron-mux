@@ -17,6 +17,7 @@ env:
   CARGO_TERM_COLOR: always
   BIN_NAME: akmux
   BACKEND_BIN_NAME: akmux-sessiond
+  PRODUCT_NAME: AkironMux
   PNPM_VERSION: 11
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
@@ -52,11 +53,13 @@ jobs:
 
       - name: Package tar.gz
         run: |
+          VERSION="${RELEASE_TAG#v}"
           mkdir -p dist
           cp target/release/${{ env.BIN_NAME }} dist/
           cp target/release/${{ env.BACKEND_BIN_NAME }} dist/
           cp README.md LICENSE dist/
-          tar -C dist -czf ${{ env.BIN_NAME }}_${{ env.RELEASE_TAG }}_linux-x86_64.tar.gz .
+          mkdir -p release-assets
+          tar -C dist -czf "release-assets/${PRODUCT_NAME}-${VERSION}-linux-x86_64-cli.tar.gz" .
 
       - name: Package deb
         run: cargo deb --no-build
@@ -64,14 +67,20 @@ jobs:
       - name: Package rpm
         run: cargo generate-rpm
 
+      - name: Normalize Linux CLI package names
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          cp target/debian/akiron-mux_*.deb \
+            "release-assets/${PRODUCT_NAME}-${VERSION}-linux-x86_64-cli.deb"
+          cp target/generate-rpm/akiron-mux-*.rpm \
+            "release-assets/${PRODUCT_NAME}-${VERSION}-linux-x86_64-cli.rpm"
+
       - name: Upload Linux CLI packages
         uses: actions/upload-artifact@v4
         with:
-          name: linux-cli
-          path: |
-            ${{ env.BIN_NAME }}_${{ env.RELEASE_TAG }}_linux-x86_64.tar.gz
-            target/debian/akiron-mux_*.deb
-            target/generate-rpm/akiron-mux-*.rpm
+          name: AkironMux-linux-x86_64-cli
+          path: release-assets/*
+          if-no-files-found: error
 
   macos:
     runs-on: macos-latest
@@ -98,17 +107,20 @@ jobs:
 
       - name: Package tar.gz
         run: |
+          VERSION="${RELEASE_TAG#v}"
           mkdir -p dist
           cp target/release/${{ env.BIN_NAME }} dist/
           cp target/release/${{ env.BACKEND_BIN_NAME }} dist/
           cp README.md LICENSE dist/
-          tar -C dist -czf ${{ env.BIN_NAME }}_${{ env.RELEASE_TAG }}_darwin-arm64.tar.gz .
+          mkdir -p release-assets
+          tar -C dist -czf "release-assets/${PRODUCT_NAME}-${VERSION}-macos-arm64-cli.tar.gz" .
 
       - name: Upload macOS CLI package
         uses: actions/upload-artifact@v4
         with:
-          name: macos-cli
-          path: ${{ env.BIN_NAME }}_${{ env.RELEASE_TAG }}_darwin-arm64.tar.gz
+          name: AkironMux-macos-arm64-cli
+          path: release-assets/*
+          if-no-files-found: error
 
       - name: Update Homebrew formula
         env:
@@ -116,8 +128,9 @@ jobs:
         run: |
           VERSION="${{ env.RELEASE_TAG }}"
           VERSION="${VERSION#v}"
-          TARBALL="${{ env.BIN_NAME }}_${{ env.RELEASE_TAG }}_darwin-arm64.tar.gz"
-          SHA256=$(shasum -a 256 "$TARBALL" | cut -d ' ' -f 1)
+          TARBALL="${PRODUCT_NAME}-${VERSION}-macos-arm64-cli.tar.gz"
+          TARBALL_PATH="release-assets/${TARBALL}"
+          SHA256=$(shasum -a 256 "$TARBALL_PATH" | cut -d ' ' -f 1)
 
           git clone "https://${HOMEBREW_TAP_TOKEN}@github.com/pomeluce/homebrew-ccswitch.git" homebrew-tap
           cd homebrew-tap
@@ -181,19 +194,22 @@ jobs:
 
       - name: Package zip
         run: |
+          $Version = $env:RELEASE_TAG -replace '^v', ''
           New-Item -ItemType Directory -Path dist -Force
+          New-Item -ItemType Directory -Path release-assets -Force
           Copy-Item "target/release/${{ env.BIN_NAME }}.exe" -Destination dist/
           Copy-Item "target/release/${{ env.BACKEND_BIN_NAME }}.exe" -Destination dist/
           Copy-Item README.md -Destination dist/
           Copy-Item LICENSE -Destination dist/
-          Compress-Archive -Path dist/* -DestinationPath "${{ env.BIN_NAME }}_${{ env.RELEASE_TAG }}_windows-x86_64.zip"
+          Compress-Archive -Path dist/* -DestinationPath "release-assets/$env:PRODUCT_NAME-$Version-windows-x86_64-cli.zip"
         shell: pwsh
 
       - name: Upload Windows CLI package
         uses: actions/upload-artifact@v4
         with:
-          name: windows-cli
-          path: ${{ env.BIN_NAME }}_${{ env.RELEASE_TAG }}_windows-x86_64.zip
+          name: AkironMux-windows-x86_64-cli
+          path: release-assets/*
+          if-no-files-found: error
 
   gui-linux:
     runs-on: ubuntu-24.04
@@ -226,13 +242,21 @@ jobs:
           projectPath: web/session-ui
           args: --bundles deb,appimage
 
+      - name: Normalize Linux desktop package names
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          mkdir -p release-assets
+          cp web/session-ui/src-tauri/target/release/bundle/deb/*.deb \
+            "release-assets/${PRODUCT_NAME}-${VERSION}-linux-x86_64-desktop.deb"
+          cp web/session-ui/src-tauri/target/release/bundle/appimage/*.AppImage \
+            "release-assets/${PRODUCT_NAME}-${VERSION}-linux-x86_64-desktop.AppImage"
+
       - name: Upload Linux GUI packages
         uses: actions/upload-artifact@v4
         with:
-          name: linux-gui
-          path: |
-            web/session-ui/src-tauri/target/release/bundle/deb/*.deb
-            web/session-ui/src-tauri/target/release/bundle/appimage/*.AppImage
+          name: AkironMux-linux-x86_64-desktop
+          path: release-assets/*
+          if-no-files-found: error
 
   gui-macos:
     runs-on: macos-latest
@@ -260,11 +284,19 @@ jobs:
           projectPath: web/session-ui
           args: --bundles dmg
 
+      - name: Normalize macOS desktop package name
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          mkdir -p release-assets
+          cp web/session-ui/src-tauri/target/release/bundle/dmg/*.dmg \
+            "release-assets/${PRODUCT_NAME}-${VERSION}-macos-arm64-desktop.dmg"
+
       - name: Upload macOS GUI package
         uses: actions/upload-artifact@v4
         with:
-          name: macos-gui
-          path: web/session-ui/src-tauri/target/release/bundle/dmg/*.dmg
+          name: AkironMux-macos-arm64-desktop
+          path: release-assets/*
+          if-no-files-found: error
 
   gui-windows:
     runs-on: windows-latest
@@ -292,11 +324,19 @@ jobs:
           projectPath: web/session-ui
           args: --bundles nsis
 
+      - name: Normalize Windows desktop package name
+        run: |
+          $Version = $env:RELEASE_TAG -replace '^v', ''
+          New-Item -ItemType Directory -Path release-assets -Force
+          Copy-Item "web/session-ui/src-tauri/target/release/bundle/nsis/*-setup.exe" -Destination "release-assets/$env:PRODUCT_NAME-$Version-windows-x86_64-desktop-setup.exe"
+        shell: pwsh
+
       - name: Upload Windows GUI installer
         uses: actions/upload-artifact@v4
         with:
-          name: windows-gui
-          path: web/session-ui/src-tauri/target/release/bundle/nsis/*-setup.exe
+          name: AkironMux-windows-x86_64-desktop
+          path: release-assets/*
+          if-no-files-found: error
 
   publish:
     needs: [linux, macos, windows, gui-linux, gui-macos, gui-windows]

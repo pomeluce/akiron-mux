@@ -42,8 +42,7 @@
   --ring: #5d625f;
   --tooltip: #292b2a;
   --tooltip-foreground: #ffffff;
-  --app-acrylic: rgba(234, 238, 236, 0.72);
-  --app-acrylic-solid: #eef0ef;
+  --app-acrylic-solid: #e9ecea;
   --terminal: #0b0f12;
   --terminal-border: rgba(255, 255, 255, 0.07);
   --scrollbar-thumb: rgba(55, 60, 57, 0.26);
@@ -73,8 +72,7 @@
   --ring: #9ca29e;
   --tooltip: #e1e3e2;
   --tooltip-foreground: #202221;
-  --app-acrylic: rgba(27, 29, 28, 0.82);
-  --app-acrylic-solid: #141615;
+  --app-acrylic-solid: #090b0a;
   --scrollbar-thumb: rgba(218, 224, 220, 0.24);
   --scrollbar-thumb-hover: rgba(218, 224, 220, 0.4);
 }

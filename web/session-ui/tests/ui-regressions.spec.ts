@@ -228,12 +228,34 @@ test.beforeEach(async ({ page }) => {
   await expect(page.locator('[data-session-tab]')).toHaveCount(3);
 });
 
-test('settings expose full acrylic range and terminal font size', async ({ page }) => {
+test('settings expose the full material transparency range and terminal font size', async ({ page }) => {
   await page.getByRole('button', { name: 'Settings' }).click();
   await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
-  const acrylic = page.getByRole('slider', { name: 'Acrylic transparency' });
-  await expect(acrylic).toHaveAttribute('min', '0');
-  await expect(acrylic).toHaveAttribute('max', '100');
+  await expect(page.getByText('Background material', { exact: true })).toBeVisible();
+  const material = page.getByRole('slider', { name: 'Material transparency' });
+  await expect(material).toHaveAttribute('min', '0');
+  await expect(material).toHaveAttribute('max', '100');
+  const materialEndpoints = await page.locator('.app-background').evaluate(element => {
+    const rgba = (color: string) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 1;
+      canvas.height = 1;
+      const context = canvas.getContext('2d')!;
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = color;
+      context.fillRect(0, 0, 1, 1);
+      return [...context.getImageData(0, 0, 1, 1).data];
+    };
+    document.documentElement.dataset.desktopShell = 'true';
+    document.documentElement.dataset.acrylic = 'true';
+    document.documentElement.dataset.theme = 'dark';
+    document.documentElement.style.setProperty('--acrylic-transparency', '0%');
+    const opaque = rgba(getComputedStyle(element).backgroundColor);
+    document.documentElement.style.setProperty('--acrylic-transparency', '100%');
+    const transparent = rgba(getComputedStyle(element).backgroundColor);
+    return { opaque, transparent };
+  });
+  expect(materialEndpoints).toEqual({ opaque: [9, 11, 10, 255], transparent: [0, 0, 0, 0] });
   const terminalFontSize = page.getByRole('slider', { name: 'Session font size' });
   await expect(terminalFontSize).toHaveAttribute('min', '10');
   await expect(terminalFontSize).toHaveValue('12');

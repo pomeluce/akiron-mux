@@ -1366,6 +1366,7 @@ async fn session_details(State(state): State<Arc<AppState>>, Path(id): Path<Stri
         AgentKind::Codex => "codex",
     };
     let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
+    refresh_native_history(&db).map_err(|error| ApiError::internal(error.to_string()))?;
     let record = session
         .native_session_id
         .as_deref()

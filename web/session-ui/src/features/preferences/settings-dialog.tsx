@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, Folder, Languages, MonitorCog, Palette, Plus, Server, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, Folder, Languages, MonitorCog, Palette, Plus, Power, Server, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { InlineErrorState } from '@/shared/components/inline-error-state';
 import { isServiceUnavailable } from '@/shared/lib/api';
@@ -176,6 +176,23 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 </div>
               </SettingsRow>
             </SettingsSection>
+            {desktopShell && (
+              <SettingsSection icon={<Power />} title={props.t('application')}>
+                <SettingsRow label={props.t('closeBehavior')} baseline>
+                  <div className="segmented-control segmented-control-language">
+                    {(['tray', 'quit'] as const).map(behavior => (
+                      <button
+                        key={behavior}
+                        data-active={draft.closeBehavior === behavior}
+                        onClick={() => setDraft(value => ({ ...value, closeBehavior: behavior }))}
+                      >
+                        {props.t(behavior === 'tray' ? 'closeToTray' : 'quitOnClose')}
+                      </button>
+                    ))}
+                  </div>
+                </SettingsRow>
+              </SettingsSection>
+            )}
             <SettingsSection icon={<MonitorCog />} title={props.t('workspaceSettings')}>
               {desktopShell ? (
                 <>

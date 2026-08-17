@@ -10,7 +10,7 @@ export function appHasFocus() {
 export async function notifySession(session: SessionInfo, kind: AttentionKind, locale: Locale) {
   if (appHasFocus()) return;
 
-  const title = kind === 'input' ? (locale === 'zh-CN' ? '会话等待操作' : 'Session needs attention') : locale === 'zh-CN' ? '会话已结束' : 'Session finished';
+  const title = kind === 'input' ? (locale === 'zh-CN' ? '会话等待操作' : 'Session needs attention') : locale === 'zh-CN' ? '回答已完成' : 'Response completed';
   const body = `${session.agent === 'claude' ? 'Claude Code' : 'Codex'} · ${session.title}`;
 
   if (desktopShell) {

@@ -26,6 +26,9 @@ assert.match(desktopLibrary, /sync_native_backdrop/, 'the desktop shell must exp
 assert.match(desktopLibrary, /generate_handler!\[\s*sync_native_backdrop(?:,|\s*\])/, 'native backdrop synchronization must be registered as a Tauri command');
 assert.match(desktopLibrary, /backend::list_backend_profiles/, 'desktop backend profile commands must be registered with Tauri');
 assert.match(desktopLibrary, /backend::pair_backend_profile/, 'device pairing must be handled by the native desktop layer');
+assert.match(cargoManifest, /tauri\s*=\s*\{[^}]*features\s*=\s*\["tray-icon"\]/, 'desktop builds must enable the Tauri tray API');
+assert.match(desktopLibrary, /tray::setup/, 'desktop builds must create the system tray');
+assert.match(desktopLibrary, /tray::sync_tray_state/, 'the WebView must be able to synchronize tray preferences and sessions');
 assert.doesNotMatch(backendHook, /\btoken\b/i, 'long-lived device tokens must not cross the WebView backend hook');
 assert.doesNotMatch(settingsDialog, /\btoken\b/i, 'long-lived device tokens must not enter WebView settings state');
 assert.ok(capability.permissions.includes('core:window:allow-close'));

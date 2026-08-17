@@ -2,10 +2,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { desktopShell } from '@/features/desktop/desktop-shell';
 import { initialLocale } from '@/shared/lib/i18n';
-import type { ClientPreferences, Locale, ThemeMode } from '@/types';
+import type { ClientPreferences, CloseBehavior, Locale, ThemeMode } from '@/types';
 
 const ACRYLIC_TRANSPARENCY_KEY = 'akironmux-acrylic-transparency';
+const MATERIAL_SCALE_KEY = 'akironmux-material-scale';
 const TERMINAL_FONT_SIZE_KEY = 'akironmux-terminal-font-size';
+const CLOSE_BEHAVIOR_KEY = 'akironmux-close-behavior';
 
 function initialTheme(): ThemeMode {
   const value = localStorage.getItem('akironmux-theme');
@@ -20,8 +22,24 @@ function initialBackendAddress() {
 
 function initialAcrylicTransparency() {
   const raw = localStorage.getItem(ACRYLIC_TRANSPARENCY_KEY);
-  const saved = raw === null ? 20 : Number(raw);
-  return Number.isFinite(saved) ? Math.min(Math.max(saved, 0), 100) : 20;
+  if (raw === null) return 30;
+  const saved = Number(raw);
+  if (!Number.isFinite(saved)) return 30;
+  const clamped = Math.min(Math.max(saved, 0), 100);
+  if (localStorage.getItem(MATERIAL_SCALE_KEY) === '2') return clamped;
+  const migrated = Math.round(clamped * 0.3);
+  localStorage.setItem(ACRYLIC_TRANSPARENCY_KEY, String(migrated));
+  localStorage.setItem(MATERIAL_SCALE_KEY, '2');
+  return migrated;
+}
+
+function initialCloseBehavior(): CloseBehavior {
+  return localStorage.getItem(CLOSE_BEHAVIOR_KEY) === 'quit' ? 'quit' : 'tray';
+}
+
+function materialTintOpacity(transparency: number) {
+  if (transparency <= 30) return 100 - (transparency / 30) * 97;
+  return 3 * (1 - (transparency - 30) / 70);
 }
 
 function initialTerminalFontSize() {
@@ -39,6 +57,7 @@ export function usePreferences() {
     acrylicStrength: initialAcrylicTransparency(),
     terminalFontSize: initialTerminalFontSize(),
     backendAddress: initialBackendAddress(),
+    closeBehavior: initialCloseBehavior(),
   });
   const [systemDark, setSystemDark] = useState(() => matchMedia('(prefers-color-scheme: dark)').matches);
 
@@ -57,6 +76,7 @@ export function usePreferences() {
     document.documentElement.dataset.acrylic = String(preferences.acrylic);
     document.documentElement.dataset.desktopShell = String(desktopShell);
     document.documentElement.style.setProperty('--acrylic-transparency', `${preferences.acrylicStrength}%`);
+    document.documentElement.style.setProperty('--material-tint-opacity', `${materialTintOpacity(preferences.acrylicStrength)}%`);
     if (desktopShell) {
       void invoke('sync_native_backdrop', { dark: resolvedTheme === 'dark', materialTransparency: preferences.acrylicStrength }).catch(() => undefined);
     }
@@ -68,7 +88,9 @@ export function usePreferences() {
     localStorage.setItem('akironmux-theme', next.theme);
     localStorage.setItem('akironmux-acrylic', String(next.acrylic));
     localStorage.setItem(ACRYLIC_TRANSPARENCY_KEY, String(next.acrylicStrength));
+    localStorage.setItem(MATERIAL_SCALE_KEY, '2');
     localStorage.setItem(TERMINAL_FONT_SIZE_KEY, String(next.terminalFontSize));
+    localStorage.setItem(CLOSE_BEHAVIOR_KEY, next.closeBehavior);
     localStorage.removeItem('akironmux-acrylic-strength');
     localStorage.setItem('akironmux-backend-address', next.backendAddress);
   };

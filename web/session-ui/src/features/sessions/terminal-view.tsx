@@ -6,7 +6,7 @@ import { currentDesktopBackend } from '@/features/backends/desktop-backend';
 import type { MessageKey } from '@/shared/lib/i18n';
 import { Button } from '@/shared/ui/button';
 import { cn } from '@/shared/lib/utils';
-import type { SessionInfo } from '@/types';
+import type { AttentionKind, SessionInfo } from '@/types';
 
 interface TerminalViewProps {
   backendAddress: string;
@@ -15,10 +15,10 @@ interface TerminalViewProps {
   fontSize: number;
   t: (key: MessageKey) => string;
   onStatus: (session: SessionInfo) => void;
-  onAttention: (session: SessionInfo) => void;
+  onAttention: (session: SessionInfo, kind: AttentionKind) => void;
 }
 
-const ATTENTION_PATTERN = /(?:allow|approve|approval|permission|confirm|proceed|continue|yes\s*\/\s*no|\(y\/n\)|授权|批准|允许|确认|继续)/i;
+const PERMISSION_PROMPT_PATTERN = /(?:allow|approve|approval|permission|confirm|proceed|yes\s*\/\s*no|\(y\/n\)|授权|批准|允许|确认|是否继续|继续执行)/i;
 
 interface LeaseState {
   version: number;
@@ -92,21 +92,30 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
     let reconnectTimer: number | null = null;
     let disposed = false;
     let outputTail = '';
-    let lastAttentionAt = 0;
+    let lastSignal: AttentionKind | null = null;
     let lastResizeAt = 0;
+    let outputSinceLastResize = false;
     let reconnectAttempts = 0;
     const recoveryKey = `akmux.lease-recovery:${backendAddress}:${session.id}`;
 
-    const signalAttention = () => {
-      const now = Date.now();
-      if (now - lastAttentionAt < 2_000) return;
-      lastAttentionAt = now;
-      outputTail = '';
-      attentionRef.current(session);
+    const terminalTail = () => {
+      const buffer = terminal.buffer.active;
+      const start = Math.max(0, buffer.baseY + buffer.cursorY - 12);
+      const end = Math.min(buffer.length, buffer.baseY + buffer.cursorY + 1);
+      let value = '';
+      for (let index = start; index < end; index += 1) value += `${buffer.getLine(index)?.translateToString(true) || ''}\n`;
+      return value.slice(-1_600);
+    };
+
+    const signalAttention = (kind: AttentionKind) => {
+      if (lastSignal === kind) return;
+      lastSignal = kind;
+      attentionRef.current(session, kind);
     };
 
     const sendResize = (rows = terminal.rows, cols = terminal.cols) => {
       lastResizeAt = performance.now();
+      outputSinceLastResize = false;
       if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', rows, cols }));
     };
 
@@ -152,7 +161,14 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
           terminal.write(bytes);
           const text = new TextDecoder().decode(bytes).replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '');
           outputTail = `${outputTail}${text}`.slice(-1_200);
-          if (ATTENTION_PATTERN.test(outputTail)) signalAttention();
+          if (text.replace(/\x07/g, '').trim()) outputSinceLastResize = true;
+          if (bytes.includes(7)) {
+            const bellOnly = text.replace(/\x07/g, '').trim().length === 0;
+            if (!bellOnly || outputSinceLastResize || performance.now() - lastResizeAt >= 750) {
+              const tail = `${outputTail}\n${terminalTail()}`;
+              signalAttention(PERMISSION_PROMPT_PATTERN.test(tail) ? 'input' : 'completed');
+            }
+          }
           return;
         }
         const message = JSON.parse(event.data) as {
@@ -179,6 +195,8 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
     };
 
     const dataDisposable = terminal.onData(data => {
+      lastSignal = null;
+      outputTail = '';
       if (socket?.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data));
     });
     terminal.attachCustomKeyEventHandler(event => {
@@ -186,10 +204,6 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
       if (!copySelection) return true;
       if (event.type === 'keydown') void navigator.clipboard.writeText(terminal.getSelection()).catch(() => undefined);
       return false;
-    });
-    const bellDisposable = terminal.onBell(() => {
-      if (performance.now() - lastResizeAt < 750) return;
-      signalAttention();
     });
     const resizeDisposable = terminal.onResize(size => {
       if (syncingViewportRef.current) return;
@@ -207,7 +221,6 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
       observer.disconnect();
       dataDisposable.dispose();
       resizeDisposable.dispose();
-      bellDisposable.dispose();
       terminalRef.current = null;
       fitRef.current = null;
       terminal.dispose();

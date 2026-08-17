@@ -2,10 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { sessionApi } from '@/shared/lib/api';
 import type { Agent, AttentionKind, HistoryItem, SessionInfo } from '@/types';
 
-function isCompletedNormally(session: SessionInfo) {
-  return session.status === 'exited' && (session.exit_code === null || session.exit_code === 0) && !session.error;
-}
-
 export function useSessions(backendAddress: string, backendKey = backendAddress || 'embedded', enabled = true) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -15,7 +11,8 @@ export function useSessions(backendAddress: string, backendKey = backendAddress 
   const historyMap = useRef(new Map<string, string>());
   const generation = useRef(0);
   const currentBackendKey = useRef(backendKey);
-  const removalTimers = useRef<number[]>([]);
+  const removalTimers = useRef(new Map<string, number>());
+  const dismissedSessions = useRef(new Set<string>());
   const skipPersistenceForBackend = useRef<string | null>(backendKey);
 
   if (currentBackendKey.current !== backendKey) {
@@ -30,12 +27,13 @@ export function useSessions(backendAddress: string, backendKey = backendAddress 
     setNativeAttention({});
     historyMap.current.clear();
     removalTimers.current.forEach(window.clearTimeout);
-    removalTimers.current = [];
+    removalTimers.current.clear();
+    dismissedSessions.current.clear();
     setActiveId(localStorage.getItem(`akmux.active-session:${backendKey}`));
     setStateBackendKey(backendKey);
     return () => {
       removalTimers.current.forEach(window.clearTimeout);
-      removalTimers.current = [];
+      removalTimers.current.clear();
     };
   }, [backendKey]);
 
@@ -51,16 +49,16 @@ export function useSessions(backendAddress: string, backendKey = backendAddress 
   const load = useCallback(async () => {
     if (!enabled) return;
     const requestGeneration = generation.current;
-    const incoming = (await sessionApi.sessions(backendAddress)).filter(session => !isCompletedNormally(session));
+    const listed = await sessionApi.sessions(backendAddress);
     if (requestGeneration !== generation.current) return;
-    setSessions(current => {
-      // Keep the mounted terminal surface during a transient reconnect. An empty
-      // successful response is not enough evidence that running PTYs disappeared.
-      if (!incoming.length && current.length) return current;
-      return incoming;
-    });
+    for (const id of dismissedSessions.current) {
+      if (!listed.some(session => session.id === id)) dismissedSessions.current.delete(id);
+      else void sessionApi.closeSession(backendAddress, id).catch(() => undefined);
+    }
+    const incoming = listed.filter(session => session.status !== 'exited' && !dismissedSessions.current.has(session.id));
+    setSessions(incoming);
     setActiveId(current => {
-      if (!incoming.length) return current;
+      if (!incoming.length) return null;
       return current && incoming.some(session => session.id === current) ? current : incoming[0].id;
     });
   }, [backendAddress, backendKey, enabled]);
@@ -128,6 +126,9 @@ export function useSessions(backendAddress: string, backendKey = backendAddress 
   };
 
   const remove = (id: string) => {
+    const timer = removalTimers.current.get(id);
+    if (timer !== undefined) window.clearTimeout(timer);
+    removalTimers.current.delete(id);
     setSessions(current => {
       const index = current.findIndex(session => session.id === id);
       const next = current.filter(session => session.id !== id);
@@ -152,11 +153,9 @@ export function useSessions(backendAddress: string, backendKey = backendAddress 
 
   const update = (session: SessionInfo) => {
     if (session.status === 'exited') {
-      setAttention(current => ({ ...current, [session.id]: 'exited' }));
-      if (session.native_session_id) setNativeAttention(current => ({ ...current, [`${session.agent}:${session.native_session_id}`]: 'exited' }));
-    }
-    if (isCompletedNormally(session)) {
-      removalTimers.current.push(window.setTimeout(() => remove(session.id), 650));
+      if (!removalTimers.current.has(session.id)) {
+        removalTimers.current.set(session.id, window.setTimeout(() => remove(session.id), 650));
+      }
       return;
     }
     setSessions(current => current.map(item => (item.id === session.id ? session : item)));
@@ -164,9 +163,14 @@ export function useSessions(backendAddress: string, backendKey = backendAddress 
 
   const close = async (id: string) => {
     const requestGeneration = generation.current;
-    await sessionApi.closeSession(backendAddress, id);
-    if (requestGeneration !== generation.current) return;
+    dismissedSessions.current.add(id);
     remove(id);
+    try {
+      await sessionApi.closeSession(backendAddress, id);
+    } catch {
+      // Keep the local surface dismissible while a disconnected backend recovers.
+    }
+    if (requestGeneration !== generation.current) return;
   };
 
   const visibleSessions = stateBackendKey === backendKey ? sessions : [];

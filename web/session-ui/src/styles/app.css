@@ -160,11 +160,11 @@ body {
 }
 
 :root[data-desktop-shell='true'][data-acrylic='true'] .app-background {
-  background: color-mix(in srgb, var(--app-acrylic-solid) calc(100% - var(--acrylic-transparency, 20%)), transparent);
+  background: color-mix(in srgb, var(--app-acrylic-solid) var(--material-tint-opacity, 3%), transparent);
 }
 
 .acrylic-shell {
-  background: color-mix(in srgb, var(--app-acrylic-solid) calc(100% - var(--acrylic-transparency, 20%)), transparent);
+  background: color-mix(in srgb, var(--app-acrylic-solid) var(--material-tint-opacity, 3%), transparent);
   backdrop-filter: blur(28px) saturate(1.28);
   -webkit-backdrop-filter: blur(28px) saturate(1.28);
 }
@@ -362,9 +362,13 @@ body {
 }
 
 .session-signal {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 14px;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  padding: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  filter: drop-shadow(0 0 4px color-mix(in srgb, currentColor 42%, transparent));
 }
 
 .session-signal-input {
@@ -372,8 +376,20 @@ body {
   animation: session-signal-pulse 1.6s ease-in-out infinite;
 }
 
-.session-signal-exited {
-  color: var(--destructive);
+.session-signal-completed {
+  color: #2f9e64;
+}
+
+[data-session-tab][data-attention='input'],
+.history-row[data-attention='input'] {
+  color: var(--foreground);
+  background: color-mix(in srgb, #d58b18 16%, var(--accent));
+}
+
+[data-session-tab][data-attention='completed'],
+.history-row[data-attention='completed'] {
+  color: var(--foreground);
+  background: color-mix(in srgb, #2f9e64 14%, var(--accent));
 }
 
 @keyframes session-signal-pulse {

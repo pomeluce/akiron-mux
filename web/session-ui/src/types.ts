@@ -1,10 +1,11 @@
 export type Agent = 'claude' | 'codex';
 export type SessionStatus = 'starting' | 'running' | 'exited' | 'error';
-export type AttentionKind = 'input' | 'exited';
+export type AttentionKind = 'input' | 'completed';
 export type SortMode = 'priority' | 'recent' | 'manual';
 export type ThemeMode = 'light' | 'dark' | 'system';
 export type Locale = 'en' | 'zh-CN';
 export type BackendKind = 'local' | 'remote';
+export type CloseBehavior = 'tray' | 'quit';
 
 export interface BackendProfile {
   id: string;
@@ -113,6 +114,7 @@ export interface ClientPreferences {
   acrylicStrength: number;
   terminalFontSize: number;
   backendAddress: string;
+  closeBehavior: CloseBehavior;
 }
 
 export const emptyWorkspace: WorkspaceResponse = {

@@ -206,19 +206,37 @@ impl SettingsTab {
     fn toggle_remote_backend(&mut self) {
         let next = !self.remote_backend_enabled;
         if next {
-            let configured = self.mgr.get_setting("remote.public_url").is_some();
+            let configured = self.mgr.get_setting("remote.public_url").is_some_and(|value| !value.trim().is_empty());
             let has_device = self.mgr.db().has_active_backend_device().unwrap_or(false);
-            if !configured || !has_device {
-                tracing::warn!("Configure Remote and create a device with the CLI before enabling it");
+            if !configured {
+                self.remote_notice = lang::pick("Configure the Remote public URL before enabling the listener", "请先配置远程公网地址，再开启监听").to_string();
                 return;
+            }
+            if !has_device {
+                self.remote_notice = lang::pick("Create or pair a Remote device before enabling the listener", "请先创建或配对远程设备，再开启监听").to_string();
+                return;
+            }
+            if !self.session_service_enabled {
+                if let Err(error) = crate::session_service::control::set_enabled(&self.mgr, true) {
+                    self.remote_notice = format!("{}: {error}", lang::pick("Unable to start the session backend", "无法启动会话后端"));
+                    return;
+                }
+                self.session_service_enabled = true;
             }
         }
         match self.mgr.set_setting("remote.enabled", &next.to_string()) {
             Ok(()) => {
                 self.remote_backend_enabled = next;
+                self.remote_notice = lang::pick(
+                    if next { "Remote listener is starting" } else { "Remote listener disabled" },
+                    if next { "远程监听正在启动" } else { "远程监听已关闭" },
+                )
+                .to_string();
                 self.refresh_remote_state();
             }
-            Err(error) => tracing::warn!("Failed to update Remote backend: {error:#}"),
+            Err(error) => {
+                self.remote_notice = format!("{}: {error}", lang::pick("Unable to update the Remote listener", "无法更新远程监听"));
+            }
         }
     }
 
@@ -580,30 +598,30 @@ impl TabContent for SettingsTab {
             KeyCode::Char('k') | KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
             }
-            KeyCode::Char('l') | KeyCode::Right => match self.selected {
+            KeyCode::Char('l' | 'L') | KeyCode::Right => match self.selected {
                 0 => self.cycle_theme(true),
                 1 => self.cycle_lang(true),
                 2 => self.cycle_mode(true),
                 3 => self.toggle_session_service(),
                 4 => self.toggle_remote_backend(),
-                5 => self.refresh_remote_state(),
+                5 => self.toggle_remote_backend(),
                 6 => self.create_pairing(),
                 7 => self.cycle_device(true),
                 _ => {}
             },
-            KeyCode::Char('h') | KeyCode::Left => match self.selected {
+            KeyCode::Char('h' | 'H') | KeyCode::Left => match self.selected {
                 0 => self.cycle_theme(false),
                 1 => self.cycle_lang(false),
                 2 => self.cycle_mode(false),
                 3 => self.toggle_session_service(),
                 4 => self.toggle_remote_backend(),
-                5 => self.refresh_remote_state(),
+                5 => self.toggle_remote_backend(),
                 6 => self.create_pairing(),
                 7 => self.cycle_device(false),
                 _ => {}
             },
             KeyCode::Enter => match self.selected {
-                5 => self.refresh_remote_state(),
+                4 | 5 => self.toggle_remote_backend(),
                 6 => self.create_pairing(),
                 _ => return false,
             },

@@ -149,6 +149,10 @@ async function mockBackend(page: Page) {
         const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
         socket?.dispatchEvent(new MessageEvent('message', { data: new TextEncoder().encode(text).buffer }));
       },
+      __akmuxEmitBell: (sessionId: string) => {
+        const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
+        socket?.dispatchEvent(new MessageEvent('message', { data: new TextEncoder().encode('\x07').buffer }));
+      },
       __akmuxEmitStatus: (session: unknown) => {
         const sessionId = (session as { id: string }).id;
         const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
@@ -235,6 +239,7 @@ test('settings expose the full material transparency range and terminal font siz
   const material = page.getByRole('slider', { name: 'Material transparency' });
   await expect(material).toHaveAttribute('min', '0');
   await expect(material).toHaveAttribute('max', '100');
+  await expect(material).toHaveValue('30');
   const materialEndpoints = await page.locator('.app-background').evaluate(element => {
     const rgba = (color: string) => {
       const canvas = document.createElement('canvas');
@@ -249,9 +254,9 @@ test('settings expose the full material transparency range and terminal font siz
     document.documentElement.dataset.desktopShell = 'true';
     document.documentElement.dataset.acrylic = 'true';
     document.documentElement.dataset.theme = 'dark';
-    document.documentElement.style.setProperty('--acrylic-transparency', '0%');
+    document.documentElement.style.setProperty('--material-tint-opacity', '100%');
     const opaque = rgba(getComputedStyle(element).backgroundColor);
-    document.documentElement.style.setProperty('--acrylic-transparency', '100%');
+    document.documentElement.style.setProperty('--material-tint-opacity', '0%');
     const transparent = rgba(getComputedStyle(element).backgroundColor);
     return { opaque, transparent };
   });
@@ -430,27 +435,40 @@ test('sidebar resizing does not create Codex attention signals', async ({ page }
   await expect(page.locator('[data-session-tab="session-codex"] .session-signal')).toHaveCount(0);
 });
 
-test('background interaction and completion events create system notifications', async ({ page }) => {
+test('only permission and completion bells create deduplicated system notifications', async ({ page }) => {
+  await page.waitForTimeout(800);
   await page.evaluate(() => {
     Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
-    (window as unknown as { __akmuxEmitOutput: (sessionId: string, text: string) => void }).__akmuxEmitOutput('session-codex', 'Permission required to continue');
-    (window as unknown as { __akmuxEmitStatus: (session: unknown) => void }).__akmuxEmitStatus({
-      ...{
-        id: 'session-claude',
-        agent: 'claude',
-        title: 'Claude session',
-        cwd: '/home/test/workbench/claude',
-        created_at_ms: 2,
-        native_session_id: 'claude-native',
-      },
-      status: 'exited',
-      exit_code: 0,
-      error: null,
-    });
+    const output = (window as unknown as { __akmuxEmitOutput: (sessionId: string, text: string) => void }).__akmuxEmitOutput;
+    const bell = (window as unknown as { __akmuxEmitBell: (sessionId: string) => void }).__akmuxEmitBell;
+    output('session-codex', 'ordinary streaming output');
+    output('session-codex', 'Permission required to continue');
+    bell('session-codex');
+    bell('session-codex');
+    output('session-claude', 'Response completed successfully');
+    bell('session-claude');
   });
   await expect
     .poll(() => page.evaluate(() => (window as unknown as { __akmuxNotifications: Array<{ title: string }> }).__akmuxNotifications.map(item => item.title)))
-    .toEqual(expect.arrayContaining(['Session needs attention', 'Session finished']));
+    .toEqual(['Session needs attention', 'Response completed']);
+});
+
+test('an exited session is removed even when Ctrl+C returns a nonzero exit code', async ({ page }) => {
+  await page.evaluate(() => {
+    (window as unknown as { __akmuxEmitStatus: (session: unknown) => void }).__akmuxEmitStatus({
+      id: 'session-codex',
+      agent: 'codex',
+      title: 'Codex session',
+      cwd: '/home/test/workbench/codex',
+      status: 'exited',
+      created_at_ms: 1,
+      exit_code: 130,
+      error: null,
+      native_session_id: 'codex-native',
+    });
+  });
+  await expect(page.locator('[data-session-tab="session-codex"]')).toHaveCount(0, { timeout: 2_000 });
+  await expect(page.locator('[data-session-tab="session-claude"]')).toHaveAttribute('data-active', 'true');
 });
 
 test('closing the active session focuses the adjacent session and terminal fits its host', async ({ page }) => {

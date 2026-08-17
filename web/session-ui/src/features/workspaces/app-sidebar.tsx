@@ -1,5 +1,5 @@
 import * as Collapsible from '@radix-ui/react-collapsible';
-import { Bell, Check, ChevronRight, CircleStop, Ellipsis, FolderPlus, Image, Pencil, Pin, Plus, RefreshCw, Search, Settings, Trash2 } from 'lucide-react';
+import { Bell, Check, ChevronRight, CircleCheck, Ellipsis, FolderPlus, Image, Pencil, Pin, Plus, RefreshCw, Search, Settings, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { AgentIcon } from '@/shared/components/agent-icon';
 import { WorkspaceIcon, type WorkspaceIconName } from '@/shared/components/workspace-icon';
@@ -189,9 +189,9 @@ function HistoryRow({ item, active, attention, reorder, onPointerReorder, onResu
       data-reorder-kind={reorder?.kind}
       data-reorder-scope={reorder?.scope}
       data-reorder-id={reorder?.id}
+      data-attention={attention || undefined}
       onPointerDown={reorder ? event => onPointerReorder(event, reorder) : undefined}
       onClick={() => onResume(item)}
-      title={item.cwd}
     >
       <AgentIcon agent={item.agent} className="size-6" />
       <span className="min-w-0 flex-1">
@@ -200,7 +200,7 @@ function HistoryRow({ item, active, attention, reorder, onPointerReorder, onResu
           {item.agent === 'codex' ? 'Codex' : 'Claude Code'} · {basename(item.cwd)}
         </small>
       </span>
-      {attention === 'input' ? <Bell className="session-signal session-signal-input" /> : attention === 'exited' ? <CircleStop className="session-signal session-signal-exited" /> : active && <span className="size-1.5 rounded-full bg-emerald-500" />}
+      {attention === 'input' ? <Bell className="session-signal session-signal-input" /> : attention === 'completed' ? <CircleCheck className="session-signal session-signal-completed" /> : active && <span className="size-1.5 rounded-full bg-emerald-500" />}
     </button>
   );
 }

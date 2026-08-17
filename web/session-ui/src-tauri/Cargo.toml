@@ -1,6 +1,6 @@
 [package]
 name = "akiron-mux"
-version = "1.14.0"
+version = "1.14.1"
 description = "Unified Claude Code and Codex session workspace"
 authors = ["AkironMux contributors"]
 edition = "2021"
@@ -15,7 +15,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.5", features = [] }
 
 [dependencies]
-tauri = { version = "2.10", features = [] }
+tauri = { version = "2.10", features = ["tray-icon"] }
 tauri-plugin-notification = "2.3.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

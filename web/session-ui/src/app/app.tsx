@@ -1,6 +1,7 @@
 import { Check, PanelLeft, Server } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { desktopShell } from '@/features/desktop/desktop-shell';
+import { useDesktopTray } from '@/features/desktop/use-desktop-tray';
 import { useBackends } from '@/features/backends/use-backends';
 import { WindowControls, toggleDesktopMaximize } from '@/features/desktop/window-controls';
 import { SettingsDialog } from '@/features/preferences/settings-dialog';
@@ -23,7 +24,7 @@ import type { WorkspaceIconName } from '@/shared/components/workspace-icon';
 import { Button } from '@/shared/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/shared/ui/dropdown-menu';
 import { Tooltip, TooltipProvider } from '@/shared/ui/tooltip';
-import type { BackendProfile, ClientPreferences, Project, SortMode } from '@/types';
+import type { AttentionKind, BackendProfile, ClientPreferences, Project, SortMode } from '@/types';
 
 type SessionDialogState = { open: boolean; mode: 'general' | 'project'; path: string };
 type ConfirmState = { kind: 'session' } | { kind: 'project'; project: Project } | { kind: 'backend'; profile: BackendProfile; instanceId: string } | null;
@@ -48,6 +49,7 @@ export function App() {
   const t = useMemo(() => (key: Parameters<typeof translate>[1]) => translate(preferences.locale, key), [preferences.locale]);
   const workspaces = useWorkspaces(backendAddress, backendKey, backendFeaturesReady);
   const sessionState = useSessions(backendAddress, backendKey, backendFeaturesReady);
+  useDesktopTray(preferences, sessionState.sessions, sessionState.setActiveId);
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 760);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = Number(localStorage.getItem('akironmux-sidebar-width')) || SIDEBAR_DEFAULT_WIDTH;
@@ -121,14 +123,12 @@ export function App() {
   };
 
   const handleSessionStatus = (session: (typeof sessionState.sessions)[number]) => {
-    const previous = sessionState.sessions.find(item => item.id === session.id);
     sessionState.update(session);
-    if (session.status === 'exited' && previous?.status !== 'exited') void notifySession(session, 'exited', preferences.locale);
   };
 
-  const handleSessionAttention = (session: (typeof sessionState.sessions)[number]) => {
-    if (session.id !== sessionState.activeId) sessionState.markAttention(session.id, 'input');
-    void notifySession(session, 'input', preferences.locale);
+  const handleSessionAttention = (session: (typeof sessionState.sessions)[number], kind: AttentionKind) => {
+    if (session.id !== sessionState.activeId) sessionState.markAttention(session.id, kind);
+    void notifySession(session, kind, preferences.locale);
   };
 
   const selectBackend = async (profile: BackendProfile) => {
@@ -157,7 +157,7 @@ export function App() {
     <TooltipProvider>
       <div className="app-background flex h-full flex-col">
         <header
-          className="acrylic-shell z-20 flex h-9 shrink-0 items-center pl-2"
+          className="acrylic-shell relative z-20 flex h-9 shrink-0 items-center pl-2"
           data-tauri-drag-region={desktopShell ? '' : undefined}
           onDoubleClick={event => {
             if (desktopShell && !(event.target as HTMLElement).closest('button')) {
@@ -167,10 +167,14 @@ export function App() {
         >
           <Tooltip label={t('toggleSidebar')}>
             <Button variant="ghost" size="icon" onClick={() => setSidebarOpen(value => !value)}>
-              <PanelLeft />
+              <PanelLeft className="size-4" />
             </Button>
           </Tooltip>
-          <strong className="ml-1.5 min-w-0 truncate text-xs font-semibold" data-app-title data-tauri-drag-region={desktopShell ? '' : undefined}>
+          <strong
+            className="pointer-events-none absolute left-1/2 -translate-x-1/2 truncate text-xs font-semibold"
+            data-app-title
+            data-tauri-drag-region={desktopShell ? '' : undefined}
+          >
             AkironMux
           </strong>
           {desktopShell && backendReady && (
@@ -179,11 +183,11 @@ export function App() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="ml-2 max-w-44 gap-1.5 text-xs"
+                  className="ml-1 max-w-44 gap-1.5 text-xs"
                   title={!workspaceSupported ? t('workspaceCapabilityUnavailable') : undefined}
                 >
-                  <Server className="size-3.5" />
-                  <span className="truncate">{backends.active.name}</span>
+                  <Server className="size-4" />
+                  <span className="truncate">{backends.active.kind === 'local' ? t('localBackend') : backends.active.name}</span>
                   <span className={`size-1.5 rounded-full ${workspaces.connected ? 'bg-emerald-500' : 'bg-destructive'}`} />
                 </Button>
               </DropdownMenuTrigger>
@@ -191,7 +195,7 @@ export function App() {
                 {backends.state.profiles.map(profile => (
                   <DropdownMenuItem key={profile.id} disabled={imeComposing} title={imeComposing ? t('finishComposition') : undefined} onSelect={() => void selectBackend(profile)}>
                     <Check className={profile.id === backends.active.id ? '' : 'opacity-0'} />
-                    <span className="min-w-0 flex-1 truncate">{profile.name}</span>
+                    <span className="min-w-0 flex-1 truncate">{profile.kind === 'local' ? t('localBackend') : profile.name}</span>
                     <span className="text-[10px] text-muted-foreground">{profile.kind === 'local' ? t('localBackend') : t('remoteBackend')}</span>
                   </DropdownMenuItem>
                 ))}

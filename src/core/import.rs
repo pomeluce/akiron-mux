@@ -11,7 +11,7 @@ const MAX_USAGE_TOKENS: i64 = 1_000_000_000_000;
 const CLAUDE_IMPORT_REVISION_KEY: &str = "claude_import_revision";
 const CLAUDE_IMPORT_REVISION: &str = "1";
 const CODEX_IMPORT_REVISION_KEY: &str = "codex_import_revision";
-const CODEX_IMPORT_REVISION: &str = "3";
+const CODEX_IMPORT_REVISION: &str = "4";
 
 use serde::Deserialize;
 
@@ -453,7 +453,8 @@ fn parse_codex_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, any
     let mut start_time = String::new();
     let mut end_time = String::new();
     let mut title: Option<String> = None;
-    let mut message_count = 0i64;
+    let mut event_message_count = 0i64;
+    let mut response_message_count = 0i64;
 
     for raw in content.lines() {
         let line: CodexLine = match serde_json::from_str(raw) {
@@ -498,10 +499,28 @@ fn parse_codex_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, any
             "event_msg" => {
                 let event_type = line.payload.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
                 if matches!(event_type, "user_message" | "agent_message") {
-                    message_count += 1;
+                    event_message_count += 1;
                 }
                 if title.is_none() && event_type == "user_message" {
                     title = line.payload.get("message").and_then(serde_json::Value::as_str).map(truncate_title);
+                }
+            }
+            "response_item" if line.payload.get("type").and_then(serde_json::Value::as_str) == Some("message") => {
+                let role = line.payload.get("role").and_then(serde_json::Value::as_str).unwrap_or("");
+                if matches!(role, "user" | "assistant") {
+                    response_message_count += 1;
+                }
+                if title.is_none() && role == "user" {
+                    title = line
+                        .payload
+                        .get("content")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|items| {
+                            items
+                                .iter()
+                                .find_map(|item| item.get("text").and_then(serde_json::Value::as_str).filter(|text| !text.trim().is_empty()))
+                        })
+                        .map(truncate_title);
                 }
             }
             _ => {}
@@ -531,7 +550,7 @@ fn parse_codex_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, any
         end_time: if end_time.is_empty() { None } else { Some(end_time) },
         prompt_tokens: 0,
         completion_tokens: 0,
-        message_count,
+        message_count: event_message_count.max(response_message_count),
         search_text: format!("{} {}", title, cwd).to_lowercase(),
         title: Some(title),
         size_bytes: metadata.len() as i64,
@@ -1122,6 +1141,28 @@ mod tests {
         apply_codex_session_index(&db, &index).unwrap();
         let stored = db.query_sessions("codex", None, None, 10).unwrap();
         assert_eq!(stored[0].title.as_deref(), Some("Renamed session"));
+    }
+
+    #[test]
+    fn counts_codex_response_items_when_event_messages_are_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-response-items.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"timestamp":"2026-08-17T12:00:00Z","type":"session_meta","payload":{"id":"response-session","cwd":"/tmp/project","model_provider":"akmux"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-17T12:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Explain the failure"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-17T12:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The build order is wrong."}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let session = parse_codex_session_file(&path).unwrap().unwrap();
+        assert_eq!(session.title.as_deref(), Some("Explain the failure"));
+        assert_eq!(session.message_count, 2);
     }
 
     #[test]

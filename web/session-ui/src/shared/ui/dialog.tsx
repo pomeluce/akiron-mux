@@ -6,7 +6,7 @@ import { cn } from '@/shared/lib/utils';
 export const Dialog = DialogPrimitive.Root;
 export const DialogTrigger = DialogPrimitive.Trigger;
 
-export function DialogContent({ className, children, onOpenAutoFocus, ...props }: React.ComponentProps<typeof DialogPrimitive.Content>) {
+export function DialogContent({ className, children, onOpenAutoFocus, onPointerDownOutside, ...props }: React.ComponentProps<typeof DialogPrimitive.Content>) {
   return (
     <DialogPrimitive.Portal>
       <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-black/35 backdrop-blur-sm data-[state=open]:animate-in" />
@@ -18,6 +18,10 @@ export function DialogContent({ className, children, onOpenAutoFocus, ...props }
         onOpenAutoFocus={event => {
           onOpenAutoFocus?.(event);
           if (!event.defaultPrevented) event.preventDefault();
+        }}
+        onPointerDownOutside={event => {
+          onPointerDownOutside?.(event);
+          event.preventDefault();
         }}
         {...props}
       >

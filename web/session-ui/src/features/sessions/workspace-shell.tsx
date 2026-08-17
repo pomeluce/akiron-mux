@@ -1,4 +1,4 @@
-import { Bell, CircleAlert, CircleStop, PanelRight, Plus, RefreshCw, SquareTerminal, X } from 'lucide-react';
+import { Bell, CircleAlert, CircleCheck, Info, Plus, RefreshCw, SquareTerminal, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { AgentIcon } from '@/shared/components/agent-icon';
 import { sessionApi } from '@/shared/lib/api';
@@ -24,7 +24,7 @@ interface WorkspaceShellProps {
   t: (key: MessageKey) => string;
   onSelect: (id: string) => void;
   onStatus: (session: SessionInfo) => void;
-  onAttention: (session: SessionInfo) => void;
+  onAttention: (session: SessionInfo, kind: AttentionKind) => void;
   onNew: () => void;
   onDetails: () => void;
   onRestart: () => void;
@@ -38,7 +38,10 @@ export function WorkspaceShell(props: WorkspaceShellProps) {
   useEffect(() => {
     if (!props.detailsOpen || !active) return;
     setDetails(null);
-    void sessionApi.sessionDetails(props.backendAddress, active.id).then(setDetails).catch(() => setDetails(null));
+    const load = () => void sessionApi.sessionDetails(props.backendAddress, active.id).then(setDetails).catch(() => setDetails(null));
+    load();
+    const timer = window.setInterval(load, 5_000);
+    return () => window.clearInterval(timer);
   }, [active?.id, props.backendAddress, props.detailsOpen]);
 
   return (
@@ -51,6 +54,7 @@ export function WorkspaceShell(props: WorkspaceShellProps) {
                 key={session.id}
                 data-session-tab={session.id}
                 data-active={session.id === props.activeId}
+                data-attention={props.attention[session.id] || undefined}
                 className={cn(
                   'flex h-8 min-w-32 max-w-56 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs text-muted-foreground hover:bg-accent',
                   session.id === props.activeId && 'bg-surface-raised text-foreground',
@@ -61,8 +65,8 @@ export function WorkspaceShell(props: WorkspaceShellProps) {
                 <span className="min-w-0 flex-1 truncate text-left">{session.title}</span>
                 {props.attention[session.id] === 'input' ? (
                   <Bell className="session-signal session-signal-input" />
-                ) : props.attention[session.id] === 'exited' ? (
-                  <CircleStop className="session-signal session-signal-exited" />
+                ) : props.attention[session.id] === 'completed' ? (
+                  <CircleCheck className="session-signal session-signal-completed" />
                 ) : (
                   <span
                     className={cn(
@@ -86,7 +90,7 @@ export function WorkspaceShell(props: WorkspaceShellProps) {
                 <Tooltip label={t('details')}>
                   <DropdownMenuTrigger asChild>
                     <Button variant="ghost" size="icon" aria-label={t('details')}>
-                      <PanelRight />
+                      <Info />
                     </Button>
                   </DropdownMenuTrigger>
                 </Tooltip>

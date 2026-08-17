@@ -229,15 +229,15 @@ akmux service uninstall            # 卸载后台服务
 #   macOS   → launchd agent
 #   Windows → 计划任务 (Schtasks)
 
-# 远程会话后端（明文监听器只绑定 loopback、LAN 或 Tailnet 地址）
+# 远程会话后端（17322 是明文 HTTP 监听器，只绑定 loopback、LAN 或 Tailnet 地址）
 akmux backend remote configure --bind 127.0.0.1:17322 --public-url https://akmux.example.com
-akmux backend device create --name "My desktop" --show-token
+akmux backend device create --name "Bootstrap" --show-token
 akmux backend remote enable
 akmux backend remote status
 akmux backend diagnostics
 akmux backend audit --limit 50
 
-# 60 秒移动端配对；手机提交后再确认 pending ID
+# 60 秒桌面端/移动端配对；客户端提交后再确认 pending ID
 akmux backend pair create
 akmux backend pair pending
 akmux backend pair confirm <pairing-id>
@@ -280,13 +280,15 @@ akmux man                          # 输出 roff 格式 man page
 
 ### 远程后端部署
 
-Remote API 默认使用 `127.0.0.1:17322`，自身不终止 TLS。设备 Token 等同于宿主机当前用户权限下的终端控制凭证，应分别为每台设备创建并及时撤销；Token 明文只显示一次，数据库仅保存 HMAC 摘要，`~/.config/akmux/remote-auth.pepper` 必须与数据库一同备份。
+Remote API 默认监听 `127.0.0.1:17322`，该端口只提供明文 HTTP，自身不终止 TLS。同机反向代理可以直接使用 `http://127.0.0.1:17322` 作为上游，但不能把公网 HTTPS/TCP 流量直接转发到 17322，也不能把 `https://127.0.0.1:17322` 配置成上游。客户端填写的地址和 `--public-url` 都应是反向代理对外提供的 HTTPS 根地址，例如 `https://akmux.example.com`，不包含 `/api` 路径。
+
+设备 Token 等同于宿主机当前用户权限下的终端控制凭证，应分别为每台设备创建并及时撤销；Token 明文只显示一次，数据库仅保存 HMAC 摘要，`~/.config/akmux/remote-auth.pepper` 必须与数据库一同备份。GUI 的“配对链接”输入框不接收设备 Token，只接收 `akmux backend pair create` 生成的短时 `akmux://pair?...` 链接；长期 Token 由原生客户端在配对过程中领取并写入系统凭证存储。
 
 推荐让 Caddy 在同一主机终止 TLS：
 
 ```caddyfile
 akmux.example.com {
-  reverse_proxy 127.0.0.1:17322
+  reverse_proxy http://127.0.0.1:17322
 }
 ```
 
@@ -296,7 +298,47 @@ akmux.example.com {
 tailscale serve --bg https / http://127.0.0.1:17322
 ```
 
-随后将 `--public-url` 配置为实际的 HTTPS 地址。AkironMux 不会自动修改 DNS、防火墙、Caddy 或 Tailnet；不要把 17322 的明文 HTTP 监听器直接暴露到公网。Remote 默认拒绝 wildcard 和公网 IP 直绑，只允许 loopback、私网、link-local 和 Tailnet/共享地址。确实需要容器或多网卡环境中的 wildcard 监听时，必须显式传入 `--allow-wildcard-bind`，并先通过主机防火墙、Tailnet ACL 或同机 TLS 反向代理限制 17322；该开关不会允许绑定具体公网 IP。
+随后将 `--public-url` 配置为实际的 HTTPS 地址。AkironMux 不会自动修改 DNS、防火墙、Caddy 或 Tailnet；不要把 17322 的明文 HTTP 监听器直接暴露到公网。仅配置 DNS、TCP 端口映射或四层转发不能替代 TLS 反向代理。Remote 默认拒绝 wildcard 和公网 IP 直绑，只允许 loopback、私网、link-local 和 Tailnet/共享地址。确实需要容器或多网卡环境中的 wildcard 监听时，必须显式传入 `--allow-wildcard-bind`，并先通过主机防火墙、Tailnet ACL 或同机 TLS 反向代理限制 17322；该开关不会允许绑定具体公网 IP。
+
+首次启用并把桌面 GUI 配对到远程后端时，按以下顺序操作：
+
+1. 在服务器配置 Remote，并创建一个临时引导设备。当前版本要求至少存在一个活动设备才能启用监听；`device create` 输出的 Token 不要粘贴到 GUI。
+
+   ```bash
+   akmux backend remote configure \
+     --bind 127.0.0.1:17322 \
+     --public-url https://akmux.example.com
+   akmux backend device create --name "Bootstrap" --show-token
+   akmux backend remote enable
+   ```
+
+2. 确认会话后端服务正在运行，并分别检查明文上游和公网 HTTPS。两次请求都应返回 `200` 与 `{"status":"ok"}`。
+
+   ```bash
+   curl -i -H 'Host: akmux.example.com' http://127.0.0.1:17322/healthz
+   curl -i https://akmux.example.com/healthz
+   akmux backend diagnostics
+   ```
+
+3. 生成新的 60 秒配对链接，把完整的 `akmux://pair?...` 链接粘贴到 GUI 的“配对链接”，后端地址填写同一个 `https://akmux.example.com`。新建 Remote Profile 尚无凭证时应直接点击“保存”；“测试连接”只适用于已经配对并保存凭证的 Profile。
+
+   ```bash
+   akmux backend pair create
+   ```
+
+4. GUI 发起配对请求后，在服务器确认对应的 pending ID。
+
+   ```bash
+   akmux backend pair pending
+   akmux backend pair confirm <pairing-id>
+   ```
+
+5. GUI 配对成功后，可以撤销不再使用的临时引导设备，但不要撤销刚刚配对生成的客户端设备。
+
+   ```bash
+   akmux backend device list
+   akmux backend device revoke <bootstrap-token-id>
+   ```
 
 ### defaults.toml
 

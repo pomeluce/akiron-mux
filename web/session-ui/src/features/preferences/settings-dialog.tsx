@@ -179,7 +179,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
             {desktopShell && (
               <SettingsSection icon={<Power />} title={props.t('application')}>
                 <SettingsRow label={props.t('closeBehavior')} baseline>
-                  <div className="segmented-control segmented-control-language">
+                  <div className="segmented-control segmented-control-close">
                     {(['tray', 'quit'] as const).map(behavior => (
                       <button
                         key={behavior}
@@ -211,7 +211,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
                           setPendingIdentity(null);
                         }}
                       >
-                        <Server className="size-3.5" /> {profile.name}
+                        <Server className="size-3.5" /> {profile.kind === 'local' ? props.t('localBackend') : profile.name}
                       </Button>
                     ))}
                     <Button size="sm" variant="outline" onClick={newBackend}>
@@ -249,7 +249,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
               <SettingsRow label={props.t('backendName')} stacked>
                 <input
                   className="text-field"
-                  value={backendDraft.name}
+                  value={backendDraft.kind === 'local' ? props.t('localBackend') : backendDraft.name}
                   disabled={backendDraft.id === 'local'}
                   onChange={event => setBackendDraft(value => ({ ...value, name: event.target.value }))}
                 />

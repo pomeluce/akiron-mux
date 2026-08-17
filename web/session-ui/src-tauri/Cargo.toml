@@ -1,6 +1,6 @@
 [package]
 name = "akiron-mux"
-version = "1.14.1"
+version = "1.14.2"
 description = "Unified Claude Code and Codex session workspace"
 authors = ["AkironMux contributors"]
 edition = "2021"

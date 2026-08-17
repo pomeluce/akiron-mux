@@ -170,13 +170,6 @@ export function App() {
               <PanelLeft className="size-4" />
             </Button>
           </Tooltip>
-          <strong
-            className="pointer-events-none absolute left-1/2 -translate-x-1/2 truncate text-xs font-semibold"
-            data-app-title
-            data-tauri-drag-region={desktopShell ? '' : undefined}
-          >
-            AkironMux
-          </strong>
           {desktopShell && backendReady && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -191,12 +184,18 @@ export function App() {
                   <span className={`size-1.5 rounded-full ${workspaces.connected ? 'bg-emerald-500' : 'bg-destructive'}`} />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="min-w-52">
+              <DropdownMenuContent align="start" className="min-w-52 text-xs">
                 {backends.state.profiles.map(profile => (
-                  <DropdownMenuItem key={profile.id} disabled={imeComposing} title={imeComposing ? t('finishComposition') : undefined} onSelect={() => void selectBackend(profile)}>
+                  <DropdownMenuItem
+                    key={profile.id}
+                    className="text-xs"
+                    disabled={imeComposing}
+                    title={imeComposing ? t('finishComposition') : undefined}
+                    onSelect={() => void selectBackend(profile)}
+                  >
                     <Check className={profile.id === backends.active.id ? '' : 'opacity-0'} />
                     <span className="min-w-0 flex-1 truncate">{profile.kind === 'local' ? t('localBackend') : profile.name}</span>
-                    <span className="text-[10px] text-muted-foreground">{profile.kind === 'local' ? t('localBackend') : t('remoteBackend')}</span>
+                    <span className="text-xs text-muted-foreground">{profile.kind === 'local' ? t('localBackend') : t('remoteBackend')}</span>
                   </DropdownMenuItem>
                 ))}
               </DropdownMenuContent>

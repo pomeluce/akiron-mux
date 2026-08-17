@@ -153,6 +153,14 @@ async function mockBackend(page: Page) {
         const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
         socket?.dispatchEvent(new MessageEvent('message', { data: new TextEncoder().encode('\x07').buffer }));
       },
+      __akmuxEmitAttention: (sessionId: string, kind: 'input' | 'completed') => {
+        const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
+        socket?.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'attention', kind }) }));
+      },
+      __akmuxEmitCodexApproval: (sessionId: string) => {
+        const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
+        socket?.dispatchEvent(new MessageEvent('message', { data: new TextEncoder().encode('\x1b]9;approval requested\x07').buffer }));
+      },
       __akmuxEmitStatus: (session: unknown) => {
         const sessionId = (session as { id: string }).id;
         const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
@@ -435,22 +443,54 @@ test('sidebar resizing does not create Codex attention signals', async ({ page }
   await expect(page.locator('[data-session-tab="session-codex"] .session-signal')).toHaveCount(0);
 });
 
-test('only permission and completion bells create deduplicated system notifications', async ({ page }) => {
+test('structured permission and completion events create deduplicated system notifications', async ({ page }) => {
   await page.waitForTimeout(800);
   await page.evaluate(() => {
     Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
-    const output = (window as unknown as { __akmuxEmitOutput: (sessionId: string, text: string) => void }).__akmuxEmitOutput;
-    const bell = (window as unknown as { __akmuxEmitBell: (sessionId: string) => void }).__akmuxEmitBell;
-    output('session-codex', 'ordinary streaming output');
-    output('session-codex', 'Permission required to continue');
-    bell('session-codex');
-    bell('session-codex');
-    output('session-claude', 'Response completed successfully');
-    bell('session-claude');
+    const approval = (window as unknown as { __akmuxEmitCodexApproval: (sessionId: string) => void }).__akmuxEmitCodexApproval;
+    const attention = (window as unknown as { __akmuxEmitAttention: (sessionId: string, kind: 'input' | 'completed') => void }).__akmuxEmitAttention;
+    approval('session-codex');
+    approval('session-codex');
+    attention('session-claude', 'completed');
+    attention('session-claude', 'completed');
   });
   await expect
     .poll(() => page.evaluate(() => (window as unknown as { __akmuxNotifications: Array<{ title: string }> }).__akmuxNotifications.map(item => item.title)))
     .toEqual(['Session needs attention', 'Response completed']);
+});
+
+test('inactive sessions retain permission and completion signals in the application', async ({ page }) => {
+  await page.waitForTimeout(800);
+  await page.locator('[data-session-tab="session-claude"]').click();
+  await page.evaluate(() => {
+    const attention = (window as unknown as { __akmuxEmitAttention: (sessionId: string, kind: 'input' | 'completed') => void }).__akmuxEmitAttention;
+    attention('session-codex', 'completed');
+  });
+  await expect(page.locator('[data-session-tab="session-codex"]')).toHaveAttribute('data-attention', 'completed');
+  await expect(page.locator('[data-session-tab="session-codex"] .session-signal-completed')).toBeVisible();
+
+  await page.locator('[data-session-tab="session-codex"]').click();
+  await expect(page.locator('[data-session-tab="session-codex"]')).not.toHaveAttribute('data-attention', /.+/);
+  await page.locator('[data-session-tab="session-claude"]').click();
+  await page.evaluate(() => {
+    const bell = (window as unknown as { __akmuxEmitBell: (sessionId: string) => void }).__akmuxEmitBell;
+    bell('session-codex');
+  });
+  await page.waitForTimeout(100);
+  await expect(page.locator('[data-session-tab="session-codex"]')).not.toHaveAttribute('data-attention', /.+/);
+  await page.evaluate(() => {
+    const approval = (window as unknown as { __akmuxEmitCodexApproval: (sessionId: string) => void }).__akmuxEmitCodexApproval;
+    approval('session-codex');
+  });
+  await expect(page.locator('[data-session-tab="session-codex"]')).toHaveAttribute('data-attention', 'input');
+
+  await page.locator('[data-session-tab="session-codex"]').click();
+  await page.evaluate(() => {
+    const attention = (window as unknown as { __akmuxEmitAttention: (sessionId: string, kind: 'input' | 'completed') => void }).__akmuxEmitAttention;
+    attention('session-claude', 'completed');
+  });
+  await expect(page.locator('[data-session-tab="session-claude"]')).toHaveAttribute('data-attention', 'completed');
+  await expect(page.locator('[data-session-tab="session-claude"] .session-signal-completed')).toBeVisible();
 });
 
 test('an exited session is removed even when Ctrl+C returns a nonzero exit code', async ({ page }) => {

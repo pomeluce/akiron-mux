@@ -30,6 +30,7 @@ pub struct LaunchRequest {
     pub agent: AgentKind,
     pub cwd: PathBuf,
     pub mode: LaunchMode,
+    pub managed_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +52,23 @@ pub fn launch_spec(request: &LaunchRequest) -> anyhow::Result<LaunchSpec> {
     }
 }
 
+pub(super) fn session_event_program() -> PathBuf {
+    std::env::current_exe().unwrap_or_else(|_| PathBuf::from(if cfg!(windows) { "akmux-sessiond.exe" } else { "akmux-sessiond" }))
+}
+
+pub(super) fn session_event_command(managed_session_id: &str, event: &str) -> String {
+    let program = session_event_program().to_string_lossy().into_owned();
+    if cfg!(windows) {
+        format!("\"{}\" session-event {} {}", program.replace('"', "\"\""), managed_session_id, event)
+    } else {
+        format!("{} session-event {} {}", shell_quote(&program), managed_session_id, event)
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{launch_spec, AgentKind, LaunchMode, LaunchRequest};
@@ -64,6 +82,7 @@ mod tests {
             mode: LaunchMode::Resume {
                 native_session_id: "claude-session".into(),
             },
+            managed_session_id: None,
         })
         .unwrap();
 
@@ -77,12 +96,14 @@ mod tests {
             agent: AgentKind::Claude,
             cwd: PathBuf::from("/tmp/project"),
             mode: LaunchMode::ResumePicker,
+            managed_session_id: None,
         })
         .unwrap();
         let codex = launch_spec(&LaunchRequest {
             agent: AgentKind::Codex,
             cwd: PathBuf::from("/tmp/project"),
             mode: LaunchMode::ResumePicker,
+            managed_session_id: None,
         })
         .unwrap();
 
@@ -98,6 +119,7 @@ mod tests {
             mode: LaunchMode::Resume {
                 native_session_id: "codex-session".into(),
             },
+            managed_session_id: None,
         })
         .unwrap();
 

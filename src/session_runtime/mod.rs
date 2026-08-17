@@ -105,6 +105,14 @@ impl CreateSession {
 pub enum SessionStreamEvent {
     Output(Vec<u8>),
     Status(SessionInfo),
+    Attention(AttentionKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttentionKind {
+    Input,
+    Completed,
 }
 
 #[derive(Clone)]
@@ -196,6 +204,7 @@ impl SessionManager {
             commands,
             events,
             output: Mutex::new(VecDeque::with_capacity(OUTPUT_BUFFER_LIMIT)),
+            last_attention: Mutex::new(None),
             worker: Mutex::new(None),
         });
         write_lock(&self.inner.sessions).insert(id.clone(), Arc::clone(&entry));
@@ -267,6 +276,17 @@ impl SessionManager {
         let _ = entry.events.send(SessionStreamEvent::Status(info.clone()));
     }
 
+    pub fn attention(&self, id: &str, kind: AttentionKind) -> anyhow::Result<()> {
+        let session = self.get(id).ok_or_else(|| anyhow::anyhow!("Managed session does not exist"))?;
+        let mut last = lock(&session.entry.last_attention);
+        if last.is_some_and(|(previous, at)| previous == kind && at.elapsed() < Duration::from_secs(2)) {
+            return Ok(());
+        }
+        *last = Some((kind, Instant::now()));
+        let _ = session.entry.events.send(SessionStreamEvent::Attention(kind));
+        Ok(())
+    }
+
     pub fn shutdown(&self) {
         let entries = write_lock(&self.inner.sessions).drain().map(|(_, entry)| entry).collect::<Vec<_>>();
         for entry in &entries {
@@ -291,6 +311,7 @@ struct SessionEntry {
     commands: mpsc::Sender<WorkerCommand>,
     events: broadcast::Sender<SessionStreamEvent>,
     output: Mutex<VecDeque<u8>>,
+    last_attention: Mutex<Option<(AttentionKind, Instant)>>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -333,17 +354,18 @@ enum ProcessOutcome {
 }
 
 trait LaunchResolver: Send + Sync {
-    fn resolve(&self, request: &CreateSession) -> anyhow::Result<LaunchSpec>;
+    fn resolve(&self, request: &CreateSession, managed_session_id: &str) -> anyhow::Result<LaunchSpec>;
 }
 
 struct AgentLaunchResolver;
 
 impl LaunchResolver for AgentLaunchResolver {
-    fn resolve(&self, request: &CreateSession) -> anyhow::Result<LaunchSpec> {
+    fn resolve(&self, request: &CreateSession, managed_session_id: &str) -> anyhow::Result<LaunchSpec> {
         launch_spec(&LaunchRequest {
             agent: request.agent,
             cwd: request.cwd.clone(),
             mode: request.launch_mode.clone(),
+            managed_session_id: Some(managed_session_id.to_string()),
         })
     }
 }
@@ -352,7 +374,8 @@ fn session_worker(entry: Arc<SessionEntry>, request: CreateSession, command_rx: 
     let mut size = TerminalSize::new(request.rows, request.cols);
     loop {
         set_status(&entry, SessionStatus::Starting, None, None);
-        let outcome = match resolver.resolve(&request) {
+        let managed_session_id = read_lock(&entry.info).id.to_string();
+        let outcome = match resolver.resolve(&request, &managed_session_id) {
             Ok(spec) => run_process(&entry, &spec, &command_rx, &mut size),
             Err(error) => {
                 set_status(&entry, SessionStatus::Error, None, Some(error.to_string()));
@@ -548,7 +571,7 @@ mod tests {
     }
 
     impl LaunchResolver for FixedResolver {
-        fn resolve(&self, _request: &CreateSession) -> anyhow::Result<LaunchSpec> {
+        fn resolve(&self, _request: &CreateSession, _managed_session_id: &str) -> anyhow::Result<LaunchSpec> {
             Ok(self.spec.clone())
         }
     }

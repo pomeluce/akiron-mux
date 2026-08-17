@@ -18,8 +18,6 @@ interface TerminalViewProps {
   onAttention: (session: SessionInfo, kind: AttentionKind) => void;
 }
 
-const PERMISSION_PROMPT_PATTERN = /(?:allow|approve|approval|permission|confirm|proceed|yes\s*\/\s*no|\(y\/n\)|授权|批准|允许|确认|是否继续|继续执行)/i;
-
 interface LeaseState {
   version: number;
   controller_device_name?: string;
@@ -91,32 +89,22 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
     let disposed = false;
-    let outputTail = '';
-    let lastSignal: AttentionKind | null = null;
     let lastResizeAt = 0;
-    let outputSinceLastResize = false;
+    let terminalControlTail = '';
+    let lastAttention: { kind: AttentionKind; at: number } | null = null;
     let reconnectAttempts = 0;
     const recoveryKey = `akmux.lease-recovery:${backendAddress}:${session.id}`;
 
-    const terminalTail = () => {
-      const buffer = terminal.buffer.active;
-      const start = Math.max(0, buffer.baseY + buffer.cursorY - 12);
-      const end = Math.min(buffer.length, buffer.baseY + buffer.cursorY + 1);
-      let value = '';
-      for (let index = start; index < end; index += 1) value += `${buffer.getLine(index)?.translateToString(true) || ''}\n`;
-      return value.slice(-1_600);
-    };
-
-    const signalAttention = (kind: AttentionKind) => {
-      if (lastSignal === kind) return;
-      lastSignal = kind;
-      attentionRef.current(session, kind);
-    };
-
     const sendResize = (rows = terminal.rows, cols = terminal.cols) => {
       lastResizeAt = performance.now();
-      outputSinceLastResize = false;
       if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', rows, cols }));
+    };
+
+    const emitAttention = (kind: AttentionKind) => {
+      const now = performance.now();
+      if (lastAttention?.kind === kind && now - lastAttention.at < 2_000) return;
+      lastAttention = { kind, at: now };
+      attentionRef.current(session, kind);
     };
 
     const scheduleReconnect = () => {
@@ -159,15 +147,10 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
         if (event.data instanceof ArrayBuffer) {
           const bytes = new Uint8Array(event.data);
           terminal.write(bytes);
-          const text = new TextDecoder().decode(bytes).replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '');
-          outputTail = `${outputTail}${text}`.slice(-1_200);
-          if (text.replace(/\x07/g, '').trim()) outputSinceLastResize = true;
-          if (bytes.includes(7)) {
-            const bellOnly = text.replace(/\x07/g, '').trim().length === 0;
-            if (!bellOnly || outputSinceLastResize || performance.now() - lastResizeAt >= 750) {
-              const tail = `${outputTail}\n${terminalTail()}`;
-              signalAttention(PERMISSION_PROMPT_PATTERN.test(tail) ? 'input' : 'completed');
-            }
+          const terminalControls = `${terminalControlTail}${new TextDecoder().decode(bytes)}`;
+          terminalControlTail = terminalControls.slice(-3);
+          if (session.agent === 'codex' && terminalControls.includes('\x1b]9;') && performance.now() - lastResizeAt >= 100) {
+            emitAttention('input');
           }
           return;
         }
@@ -177,8 +160,10 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
           credential?: string;
           lease?: LeaseState;
           can_write?: boolean;
+          kind?: AttentionKind;
         };
         if (message.type === 'status' && message.session) statusRef.current(message.session);
+        if (message.type === 'attention' && message.kind) emitAttention(message.kind);
         if (message.type === 'lease' && message.lease) {
           setLease(message.lease);
           setCanWrite(Boolean(message.can_write));
@@ -195,8 +180,6 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
     };
 
     const dataDisposable = terminal.onData(data => {
-      lastSignal = null;
-      outputTail = '';
       if (socket?.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data));
     });
     terminal.attachCustomKeyEventHandler(event => {

@@ -26,7 +26,7 @@ use crate::{
     agent::{AgentKind, LaunchMode},
     core::{config, import},
     db::{sessions::SessionRecord, Db},
-    session_runtime::{CreateSession, SessionHandle, SessionInfo, SessionManager, SessionStreamEvent},
+    session_runtime::{AttentionKind, CreateSession, SessionHandle, SessionInfo, SessionManager, SessionStreamEvent},
 };
 
 pub mod admin;
@@ -285,6 +285,11 @@ struct TerminalQuery {
     ticket: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct SessionAttentionRequest {
+    kind: AttentionKind,
+}
+
 #[derive(Debug, Deserialize)]
 struct PairRequest {
     code: String,
@@ -451,6 +456,7 @@ fn api_routes() -> Router<Arc<AppState>> {
 
 fn local_router(state: Arc<AppState>) -> Router {
     api_routes()
+        .route("/api/internal/sessions/:id/attention", post(session_attention))
         .route("/api/pairing", get(list_pending_pairings).post(create_pairing))
         .route("/api/pairing/:id/confirm", post(confirm_pairing))
         .route("/api/pairing/:id", delete(cancel_pairing))
@@ -1433,6 +1439,11 @@ async fn restart_session(State(state): State<Arc<AppState>>, Path(id): Path<Stri
     Ok(StatusCode::ACCEPTED)
 }
 
+async fn session_attention(State(state): State<Arc<AppState>>, Path(id): Path<String>, Json(request): Json<SessionAttentionRequest>) -> Result<StatusCode, ApiError> {
+    state.manager.attention(&id, request.kind).map_err(ApiError::not_found)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn close_session(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
     state.manager.close(&id).map_err(ApiError::not_found)?;
     Ok(StatusCode::NO_CONTENT)
@@ -1590,6 +1601,12 @@ async fn terminal_socket(
                             break;
                         }
                     }
+                    Ok(SessionStreamEvent::Attention(kind)) => {
+                        let message = serde_json::json!({ "type": "attention", "kind": kind }).to_string();
+                        if sender.send(Message::Text(message)).await.is_err() {
+                            break;
+                        }
+                    }
                     Err(broadcast_error) => {
                         if matches!(broadcast_error, tokio::sync::broadcast::error::RecvError::Closed) {
                             break;
@@ -1722,6 +1739,37 @@ fn default_cols() -> u16 {
 
 fn service_state_path() -> PathBuf {
     crate::core::config::data_dir().join("session-service.json")
+}
+
+pub async fn emit_session_event(managed_session_id: &str, event: &str, payload: Option<&str>) -> anyhow::Result<()> {
+    let kind = match event {
+        "input" => AttentionKind::Input,
+        "completed" => AttentionKind::Completed,
+        "codex-completed" => {
+            let payload: serde_json::Value = serde_json::from_str(payload.unwrap_or_default())?;
+            if payload.get("type").and_then(serde_json::Value::as_str) != Some("agent-turn-complete") {
+                return Ok(());
+            }
+            AttentionKind::Completed
+        }
+        _ => anyhow::bail!("Unsupported session event"),
+    };
+    let state: serde_json::Value = serde_json::from_slice(&std::fs::read(service_state_path())?)?;
+    let base_url = state
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("Session service URL is unavailable"))?;
+    let url = format!("{base_url}/api/internal/sessions/{managed_session_id}/attention");
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(300))
+        .timeout(std::time::Duration::from_secs(1))
+        .build()?
+        .post(url)
+        .json(&SessionAttentionRequest { kind })
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
 }
 
 fn write_service_state(address: SocketAddr) -> anyhow::Result<()> {

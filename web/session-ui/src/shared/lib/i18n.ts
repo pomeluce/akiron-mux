@@ -188,7 +188,7 @@ const zh: Record<keyof typeof en, string> = {
   language: '语言',
   application: '应用',
   closeBehavior: '关闭窗口时',
-  closeToTray: '退出到系统托盘',
+  closeToTray: '最小化到托盘',
   quitOnClose: '直接退出程序',
   workspaceSettings: '工作区',
   backendAddress: '后端地址',

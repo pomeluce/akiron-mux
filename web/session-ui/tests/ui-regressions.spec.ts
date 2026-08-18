@@ -80,7 +80,14 @@ const workspace = {
 async function mockBackend(page: Page) {
   await page.addInitScript(() => {
     const sockets = new Map<string, MockWebSocket>();
-    Object.assign(window, { __akmuxSocketEvents: [], __akmuxReorders: [], __akmuxNotifications: [], __akmuxEmitBellOnResize: false });
+    Object.assign(window, { __akmuxSocketEvents: [], __akmuxReorders: [], __akmuxNotifications: [], __akmuxOpenedUrls: [], __akmuxEmitBellOnResize: false });
+    Object.defineProperty(window, 'open', {
+      configurable: true,
+      value: (url?: string | URL) => {
+        if (url) (window as unknown as { __akmuxOpenedUrls: string[] }).__akmuxOpenedUrls.push(String(url));
+        return null;
+      },
+    });
 
     class MockNotification {
       static permission: NotificationPermission = 'granted';
@@ -370,6 +377,21 @@ test('terminal output can be selected and copied', async ({ page }) => {
   await page.mouse.up();
   await page.keyboard.press('Control+c');
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('history line');
+});
+
+test('terminal hyperlinks leave the application through the external URL handler', async ({ page }) => {
+  await page.evaluate(() => {
+    const output = (window as unknown as { __akmuxEmitOutput: (sessionId: string, text: string) => void }).__akmuxEmitOutput;
+    output('session-codex', '\r\n\x1b]8;;https://example.com/docs\x07Open external docs\x1b]8;;\x07\r\n');
+  });
+  const linkRow = page.locator('.terminal-host[aria-hidden="false"] .xterm-rows > div').filter({ hasText: 'Open external docs' });
+  await expect(linkRow).toBeVisible();
+  const box = await linkRow.boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.click(box!.x + 60, box!.y + box!.height / 2, { modifiers: ['Control'] });
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __akmuxOpenedUrls: string[] }).__akmuxOpenedUrls))
+    .toEqual(['https://example.com/docs']);
 });
 
 test('manual ordering exposes drag affordances and persists workspace order', async ({ page }) => {

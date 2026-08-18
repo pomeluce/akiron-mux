@@ -1,8 +1,11 @@
 import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Terminal } from '@xterm/xterm';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { useEffect, useRef, useState } from 'react';
 import { sessionApi, websocketUrl } from '@/shared/lib/api';
 import { currentDesktopBackend } from '@/features/backends/desktop-backend';
+import { desktopShell } from '@/features/desktop/desktop-shell';
 import type { MessageKey } from '@/shared/lib/i18n';
 import { Button } from '@/shared/ui/button';
 import { cn } from '@/shared/lib/utils';
@@ -21,6 +24,21 @@ interface TerminalViewProps {
 interface LeaseState {
   version: number;
   controller_device_name?: string;
+}
+
+function openExternalUrl(value: string) {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+  if (desktopShell) {
+    void openUrl(url.toString()).catch(() => undefined);
+    return;
+  }
+  window.open(url.toString(), '_blank', 'noopener,noreferrer');
 }
 
 export function TerminalView({ backendAddress, session, active, fontSize, t, onStatus, onAttention }: TerminalViewProps) {
@@ -79,11 +97,16 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
         cursor: '#d7e3ff',
         selectionBackground: '#345a9c88',
       },
+      linkHandler: {
+        activate: (_event, url) => openExternalUrl(url),
+        allowNonHttpProtocols: false,
+      },
     });
     const fit = new FitAddon();
     terminalRef.current = terminal;
     fitRef.current = fit;
     terminal.loadAddon(fit);
+    terminal.loadAddon(new WebLinksAddon((_event, url) => openExternalUrl(url)));
     terminal.open(host);
     requestAnimationFrame(() => fit.fit());
     let socket: WebSocket | null = null;

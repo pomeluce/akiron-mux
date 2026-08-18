@@ -34,7 +34,7 @@
             cargo = rust;
             rustc = rust;
           };
-          version = "1.14.2";
+          version = "1.14.3";
           tuiPackage = rustPlatform.buildRustPackage {
             pname = "akiron-mux";
             inherit version;
@@ -46,7 +46,7 @@
               src = ./web/session-ui;
               pnpm = pkgs.pnpm_11;
               fetcherVersion = 4;
-              hash = "sha256-UX6SgmR0fJj8op0B53JP+mY15xffgo8lU+sHhQJYp1g=";
+              hash = "sha256-+i24p9ck8FZBkuENOFSCMkuMMpmRbPmo5hmzJrAhs3g=";
             };
             cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [
@@ -82,7 +82,7 @@
               src = ./web/session-ui;
               pnpm = pkgs.pnpm_11;
               fetcherVersion = 4;
-              hash = "sha256-UX6SgmR0fJj8op0B53JP+mY15xffgo8lU+sHhQJYp1g=";
+              hash = "sha256-+i24p9ck8FZBkuENOFSCMkuMMpmRbPmo5hmzJrAhs3g=";
             };
             nativeBuildInputs = [
               pkgs.nodejs

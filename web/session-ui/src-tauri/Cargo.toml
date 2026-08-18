@@ -1,6 +1,6 @@
 [package]
 name = "akiron-mux"
-version = "1.14.2"
+version = "1.14.3"
 description = "Unified Claude Code and Codex session workspace"
 authors = ["AkironMux contributors"]
 edition = "2021"
@@ -22,10 +22,14 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 url = "2"
 zeroize = "1"
+tauri-plugin-opener = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 window-vibrancy = "0.6"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2"
 
 [features]
 default = ["custom-protocol"]

@@ -5,8 +5,10 @@ const config = JSON.parse(fs.readFileSync(new URL('../src-tauri/tauri.conf.json'
 const capability = JSON.parse(fs.readFileSync(new URL('../src-tauri/capabilities/main-window.json', import.meta.url), 'utf8'));
 const cargoManifest = fs.readFileSync(new URL('../src-tauri/Cargo.toml', import.meta.url), 'utf8');
 const desktopLibrary = fs.readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+const packageManifest = fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8');
 const backendHook = fs.readFileSync(new URL('../src/features/backends/use-backends.ts', import.meta.url), 'utf8');
 const settingsDialog = fs.readFileSync(new URL('../src/features/preferences/settings-dialog.tsx', import.meta.url), 'utf8');
+const terminalView = fs.readFileSync(new URL('../src/features/sessions/terminal-view.tsx', import.meta.url), 'utf8');
 const releaseWorkflow = fs.readFileSync(new URL('../../../.github/workflows/release.yml', import.meta.url), 'utf8');
 const window = config.app.windows.find(candidate => candidate.label === 'main');
 const nsis = config.bundle.windows.nsis;
@@ -29,12 +31,25 @@ assert.match(desktopLibrary, /backend::pair_backend_profile/, 'device pairing mu
 assert.match(cargoManifest, /tauri\s*=\s*\{[^}]*features\s*=\s*\["tray-icon"\]/, 'desktop builds must enable the Tauri tray API');
 assert.match(desktopLibrary, /tray::setup/, 'desktop builds must create the system tray');
 assert.match(desktopLibrary, /tray::sync_tray_state/, 'the WebView must be able to synchronize tray preferences and sessions');
+assert.match(cargoManifest, /tauri-plugin-single-instance\s*=/, 'desktop builds must prevent duplicate application and tray instances');
+assert.match(desktopLibrary, /tauri_plugin_single_instance::init/, 'a second application launch must restore the existing main window');
+assert.ok(
+  desktopLibrary.indexOf('tauri_plugin_single_instance::init') < desktopLibrary.indexOf('tray::setup'),
+  'single-instance protection must initialize before the tray is created',
+);
+assert.match(packageManifest, /"@tauri-apps\/plugin-opener"\s*:/, 'terminal links must use the native external URL opener');
+assert.match(cargoManifest, /tauri-plugin-opener\s*=/, 'desktop builds must include the native external URL opener');
+assert.match(desktopLibrary, /tauri_plugin_opener::init\(\)/, 'the native external URL opener must be registered with Tauri');
+assert.match(terminalView, /WebLinksAddon/, 'plain HTTP links in terminal output must be detected');
+assert.match(terminalView, /import \{ openUrl \} from '@tauri-apps\/plugin-opener'/, 'terminal links must use the native external URL opener');
+assert.match(terminalView, /linkHandler[\s\S]*openExternalUrl/, 'OSC 8 terminal links must use the external URL handler');
 assert.doesNotMatch(backendHook, /\btoken\b/i, 'long-lived device tokens must not cross the WebView backend hook');
 assert.doesNotMatch(settingsDialog, /\btoken\b/i, 'long-lived device tokens must not enter WebView settings state');
 assert.ok(capability.permissions.includes('core:window:allow-close'));
 assert.ok(capability.permissions.includes('core:window:allow-minimize'));
 assert.ok(capability.permissions.includes('core:window:allow-toggle-maximize'));
 assert.ok(capability.permissions.includes('notification:default'), 'desktop notifications must be permitted');
+assert.ok(capability.permissions.includes('opener:allow-default-urls'), 'only default external URL schemes may leave the WebView');
 assert.match(cargoManifest, /tauri-plugin-notification\s*=/, 'notification plugin must be a desktop dependency');
 assert.match(desktopLibrary, /tauri_plugin_notification::init\(\)/, 'notification plugin must be registered with Tauri');
 assert.ok(

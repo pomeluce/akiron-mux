@@ -22,8 +22,15 @@ fn sync_native_backdrop(window: tauri::WebviewWindow, dark: bool, material_trans
 pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
-    let builder = builder.manage(tray::TrayState::default()).setup(tray::setup).on_window_event(tray::handle_window_event);
+    let builder = builder
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_main_window(app);
+        }))
+        .manage(tray::TrayState::default())
+        .setup(tray::setup)
+        .on_window_event(tray::handle_window_event);
     builder
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             sync_native_backdrop,

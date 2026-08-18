@@ -485,6 +485,18 @@ test('the active session is restored without briefly overwriting its backend key
   await expect(page.locator('[data-session-tab="session-codex-secondary"]')).toHaveAttribute('data-active', 'true');
 });
 
+test('Ctrl+Tab and Ctrl+Shift+Tab cycle session tabs in both directions', async ({ page }) => {
+  await page.locator('[data-session-tab="session-codex"]').click();
+  await page.keyboard.press('Control+Tab');
+  await expect(page.locator('[data-session-tab="session-claude"]')).toHaveAttribute('data-active', 'true');
+  await page.keyboard.press('Control+Tab');
+  await expect(page.locator('[data-session-tab="session-codex-secondary"]')).toHaveAttribute('data-active', 'true');
+  await page.keyboard.press('Control+Tab');
+  await expect(page.locator('[data-session-tab="session-codex"]')).toHaveAttribute('data-active', 'true');
+  await page.keyboard.press('Control+Shift+Tab');
+  await expect(page.locator('[data-session-tab="session-codex-secondary"]')).toHaveAttribute('data-active', 'true');
+});
+
 test('desktop controls do not expose browser focus outlines', async ({ page }) => {
   const search = page.locator('#search-button');
   await search.focus();

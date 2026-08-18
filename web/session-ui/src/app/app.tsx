@@ -83,6 +83,20 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const switchSessionTab = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab' || !event.ctrlKey || event.altKey || event.metaKey || sessionState.sessions.length < 2) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const currentIndex = sessionState.sessions.findIndex(session => session.id === sessionState.activeId);
+      const direction = event.shiftKey ? -1 : 1;
+      const nextIndex = currentIndex < 0 ? (direction < 0 ? sessionState.sessions.length - 1 : 0) : (currentIndex + direction + sessionState.sessions.length) % sessionState.sessions.length;
+      sessionState.setActiveId(sessionState.sessions[nextIndex].id);
+    };
+    window.addEventListener('keydown', switchSessionTab, true);
+    return () => window.removeEventListener('keydown', switchSessionTab, true);
+  }, [sessionState.activeId, sessionState.sessions, sessionState.setActiveId]);
+
+  useEffect(() => {
     if (!desktopShell || backends.loading || backends.active.kind !== 'remote' || backends.active.requiresAuth) return;
     const refresh = () => void backends.refreshActive(backends.active.id).catch(() => undefined);
     refresh();

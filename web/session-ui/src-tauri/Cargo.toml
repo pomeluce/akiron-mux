@@ -1,6 +1,6 @@
 [package]
 name = "akiron-mux"
-version = "1.14.4"
+version = "1.14.5"
 description = "Unified Claude Code and Codex session workspace"
 authors = ["AkironMux contributors"]
 edition = "2021"
@@ -26,7 +26,7 @@ tauri-plugin-opener = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 window-vibrancy = "0.6"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"

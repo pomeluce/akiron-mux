@@ -31,6 +31,12 @@ assert.match(
   /WindowEvent::Focused\(true\)[\s\S]*restore_native_backdrop/,
   'Windows must restore the native backdrop after system settings invalidate it while the app is unfocused',
 );
+assert.match(desktopLibrary, /SetWindowSubclass/, 'Windows must observe native setting broadcasts while the app is unfocused');
+assert.match(
+  desktopLibrary,
+  /WM_SETTINGCHANGE[\s\S]*WM_THEMECHANGED[\s\S]*WM_DWMCOLORIZATIONCOLORCHANGED/,
+  'Windows setting, theme, and DWM color broadcasts must restore the native backdrop immediately',
+);
 assert.match(desktopLibrary, /generate_handler!\[\s*sync_native_backdrop(?:,|\s*\])/, 'native backdrop synchronization must be registered as a Tauri command');
 assert.match(desktopLibrary, /backend::list_backend_profiles/, 'desktop backend profile commands must be registered with Tauri');
 assert.match(desktopLibrary, /backend::pair_backend_profile/, 'device pairing must be handled by the native desktop layer');

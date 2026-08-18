@@ -26,6 +26,8 @@ interface LeaseState {
   controller_device_name?: string;
 }
 
+const ATTENTION_MAX_DELIVERY_AGE_MS = 30_000;
+
 function openExternalUrl(value: string) {
   let url: URL;
   try {
@@ -114,6 +116,8 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
     let disposed = false;
     let lastResizeAt = 0;
     let terminalControlTail = '';
+    let terminalAttentionReady = false;
+    let serverClockOffsetMs: number | null = null;
     let lastAttention: { kind: AttentionKind; at: number } | null = null;
     let reconnectAttempts = 0;
     const recoveryKey = `akmux.lease-recovery:${backendAddress}:${session.id}`;
@@ -152,6 +156,9 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
       }
       if (disposed) return;
       const recoveryCredential = sessionStorage.getItem(recoveryKey);
+      terminalAttentionReady = false;
+      terminalControlTail = '';
+      serverClockOffsetMs = null;
       socket = new WebSocket(url);
       socketRef.current = socket;
       socket.binaryType = 'arraybuffer';
@@ -172,7 +179,7 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
           terminal.write(bytes);
           const terminalControls = `${terminalControlTail}${new TextDecoder().decode(bytes)}`;
           terminalControlTail = terminalControls.slice(-3);
-          if (session.agent === 'codex' && terminalControls.includes('\x1b]9;') && performance.now() - lastResizeAt >= 100) {
+          if (terminalAttentionReady && session.agent === 'codex' && terminalControls.includes('\x1b]9;') && performance.now() - lastResizeAt >= 100) {
             emitAttention('input');
           }
           return;
@@ -184,9 +191,27 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
           lease?: LeaseState;
           can_write?: boolean;
           kind?: AttentionKind;
+          occurred_at_ms?: number;
+          server_time_ms?: number;
         };
-        if (message.type === 'status' && message.session) statusRef.current(message.session);
-        if (message.type === 'attention' && message.kind) emitAttention(message.kind);
+        if (message.type === 'status' && message.session) {
+          if (typeof message.server_time_ms === 'number' && Number.isFinite(message.server_time_ms)) {
+            serverClockOffsetMs = Date.now() - message.server_time_ms;
+          }
+          terminalAttentionReady = true;
+          statusRef.current(message.session);
+        }
+        const attentionAge =
+          message.occurred_at_ms === undefined || serverClockOffsetMs === null
+            ? 0
+            : Date.now() - (message.occurred_at_ms + serverClockOffsetMs);
+        if (
+          message.type === 'attention' &&
+          message.kind &&
+          attentionAge <= ATTENTION_MAX_DELIVERY_AGE_MS
+        ) {
+          emitAttention(message.kind);
+        }
         if (message.type === 'lease' && message.lease) {
           setLease(message.lease);
           setCanWrite(Boolean(message.can_write));

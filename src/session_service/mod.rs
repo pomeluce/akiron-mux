@@ -3,6 +3,7 @@ use std::{
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -1601,8 +1602,13 @@ async fn terminal_socket(
                             break;
                         }
                     }
-                    Ok(SessionStreamEvent::Attention(kind)) => {
-                        let message = serde_json::json!({ "type": "attention", "kind": kind }).to_string();
+                    Ok(SessionStreamEvent::Attention { kind, occurred_at_ms }) => {
+                        let message = serde_json::json!({
+                            "type": "attention",
+                            "kind": kind,
+                            "occurred_at_ms": occurred_at_ms,
+                        })
+                        .to_string();
                         if sender.send(Message::Text(message)).await.is_err() {
                             break;
                         }
@@ -1657,7 +1663,8 @@ async fn terminal_socket(
 }
 
 async fn send_status(sender: &mut futures_util::stream::SplitSink<WebSocket, Message>, info: &SessionInfo) -> Result<(), axum::Error> {
-    let message = serde_json::json!({ "type": "status", "session": info }).to_string();
+    let server_time_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let message = serde_json::json!({ "type": "status", "session": info, "server_time_ms": server_time_ms }).to_string();
     sender.send(Message::Text(message)).await
 }
 

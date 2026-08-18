@@ -21,10 +21,16 @@ assert.equal(nsis.installerIcon, 'icons/icon.ico', 'NSIS installer must use the 
 assert.equal(window.transparent, true, 'native backdrop materials require a transparent Tauri window');
 assert.equal(window.decorations, false, 'desktop builds must use the custom title bar');
 assert.match(cargoManifest, /\[target\.'cfg\(target_os = "windows"\)'\.dependencies\][\s\S]*window-vibrancy\s*=/, 'Windows backdrop materials must use the native vibrancy API');
-assert.match(desktopLibrary, /window_vibrancy::apply_mica\([^,]+, Some\(dark\)\)/, 'Windows 11 Mica must follow the resolved application theme');
+assert.match(desktopLibrary, /window_vibrancy::apply_mica\([^,]+, Some\(settings\.dark\)\)/, 'Windows 11 Mica must follow the resolved application theme');
 assert.match(desktopLibrary, /apply_mica[\s\S]*is_err\(\)[\s\S]*window_vibrancy::apply_acrylic/, 'Windows 10 must fall back to a theme-aware Acrylic tint when Mica is unavailable');
 assert.match(desktopLibrary, /material_transparency[\s\S]*tint_alpha/, 'Windows 10 Acrylic tint must follow material transparency');
 assert.match(desktopLibrary, /sync_native_backdrop/, 'the desktop shell must expose native backdrop theme synchronization');
+assert.match(desktopLibrary, /NativeBackdropState/, 'the desktop shell must retain the resolved native backdrop state');
+assert.match(
+  desktopLibrary,
+  /WindowEvent::Focused\(true\)[\s\S]*restore_native_backdrop/,
+  'Windows must restore the native backdrop after system settings invalidate it while the app is unfocused',
+);
 assert.match(desktopLibrary, /generate_handler!\[\s*sync_native_backdrop(?:,|\s*\])/, 'native backdrop synchronization must be registered as a Tauri command');
 assert.match(desktopLibrary, /backend::list_backend_profiles/, 'desktop backend profile commands must be registered with Tauri');
 assert.match(desktopLibrary, /backend::pair_backend_profile/, 'device pairing must be handled by the native desktop layer');

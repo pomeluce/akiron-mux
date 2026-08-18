@@ -105,7 +105,7 @@ impl CreateSession {
 pub enum SessionStreamEvent {
     Output(Vec<u8>),
     Status(SessionInfo),
-    Attention(AttentionKind),
+    Attention { kind: AttentionKind, occurred_at_ms: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -283,7 +283,8 @@ impl SessionManager {
             return Ok(());
         }
         *last = Some((kind, Instant::now()));
-        let _ = session.entry.events.send(SessionStreamEvent::Attention(kind));
+        let occurred_at_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        let _ = session.entry.events.send(SessionStreamEvent::Attention { kind, occurred_at_ms });
         Ok(())
     }
 

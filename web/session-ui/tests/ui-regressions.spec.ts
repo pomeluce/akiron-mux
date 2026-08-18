@@ -80,7 +80,15 @@ const workspace = {
 async function mockBackend(page: Page) {
   await page.addInitScript(() => {
     const sockets = new Map<string, MockWebSocket>();
-    Object.assign(window, { __akmuxSocketEvents: [], __akmuxReorders: [], __akmuxNotifications: [], __akmuxOpenedUrls: [], __akmuxEmitBellOnResize: false });
+    Object.assign(window, {
+      __akmuxSocketEvents: [],
+      __akmuxReorders: [],
+      __akmuxNotifications: [],
+      __akmuxOpenedUrls: [],
+      __akmuxEmitBellOnResize: false,
+      __akmuxReplayApprovalOnConnect: false,
+      __akmuxServerClockOffsetMs: 0,
+    });
     Object.defineProperty(window, 'open', {
       configurable: true,
       value: (url?: string | URL) => {
@@ -119,9 +127,33 @@ async function mockBackend(page: Page) {
           this.readyState = MockWebSocket.OPEN;
           this.dispatchEvent(new Event('open'));
           const prefix = this.url.includes('session-claude') ? 'claude' : this.url.includes('secondary') ? 'codex-secondary' : 'codex';
-          const output = Array.from({ length: 200 }, (_, index) => `${prefix} history line ${index + 1}\r\n`).join('');
-          (window as unknown as { __akmuxSocketEvents: Array<{ url: string; kind: string }> }).__akmuxSocketEvents.push({ url: this.url, kind: 'output' });
-          this.dispatchEvent(new MessageEvent('message', { data: new TextEncoder().encode(output).buffer }));
+          const replayApproval = (window as unknown as { __akmuxReplayApprovalOnConnect: boolean }).__akmuxReplayApprovalOnConnect && prefix === 'codex';
+          const deliverBootstrap = () => {
+            const output = `${replayApproval ? '\x1b]9;approval requested\x07' : ''}${Array.from({ length: 200 }, (_, index) => `${prefix} history line ${index + 1}\r\n`).join('')}`;
+            (window as unknown as { __akmuxSocketEvents: Array<{ url: string; kind: string }> }).__akmuxSocketEvents.push({ url: this.url, kind: 'output' });
+            this.dispatchEvent(new MessageEvent('message', { data: new TextEncoder().encode(output).buffer }));
+            const sessionId = prefix === 'claude' ? 'session-claude' : prefix === 'codex-secondary' ? 'session-codex-secondary' : 'session-codex';
+            this.dispatchEvent(
+              new MessageEvent('message', {
+                data: JSON.stringify({
+                  type: 'status',
+                  server_time_ms: Date.now() + (window as unknown as { __akmuxServerClockOffsetMs: number }).__akmuxServerClockOffsetMs,
+                  session: {
+                    id: sessionId,
+                    agent: prefix === 'claude' ? 'claude' : 'codex',
+                    title: `${prefix} session`,
+                    cwd: `/home/test/${prefix}`,
+                    status: 'running',
+                    created_at_ms: 1,
+                    exit_code: null,
+                    error: null,
+                    native_session_id: `${prefix}-native`,
+                  },
+                }),
+              }),
+            );
+          };
+          window.setTimeout(deliverBootstrap, replayApproval ? 150 : 0);
         }, 0);
       }
 
@@ -160,9 +192,19 @@ async function mockBackend(page: Page) {
         const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
         socket?.dispatchEvent(new MessageEvent('message', { data: new TextEncoder().encode('\x07').buffer }));
       },
-      __akmuxEmitAttention: (sessionId: string, kind: 'input' | 'completed') => {
+      __akmuxEmitAttention: (sessionId: string, kind: 'input' | 'completed', occurredAtMs?: number) => {
         const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
-        socket?.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'attention', kind }) }));
+        socket?.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'attention', kind, occurred_at_ms: occurredAtMs }) }));
+      },
+      __akmuxReconnectWithApprovalScrollback: (sessionId: string) => {
+        (window as unknown as { __akmuxReplayApprovalOnConnect: boolean }).__akmuxReplayApprovalOnConnect = true;
+        const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
+        socket?.close();
+      },
+      __akmuxReconnectWithClockOffset: (sessionId: string, offsetMs: number) => {
+        (window as unknown as { __akmuxServerClockOffsetMs: number }).__akmuxServerClockOffsetMs = offsetMs;
+        const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
+        socket?.close();
       },
       __akmuxEmitCodexApproval: (sessionId: string) => {
         const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
@@ -463,6 +505,45 @@ test('sidebar resizing does not create Codex attention signals', async ({ page }
   await page.mouse.move(box!.x + 48, box!.y + 100, { steps: 5 });
   await page.mouse.up();
   await expect(page.locator('[data-session-tab="session-codex"] .session-signal')).toHaveCount(0);
+});
+
+test('reconnecting does not treat Codex approval sequences in scrollback as new attention', async ({ page }) => {
+  await page.locator('[data-session-tab="session-claude"]').click();
+  await page.evaluate(() => {
+    const reconnect = (window as unknown as { __akmuxReconnectWithApprovalScrollback: (sessionId: string) => void }).__akmuxReconnectWithApprovalScrollback;
+    reconnect('session-codex');
+  });
+  await page.waitForTimeout(1_500);
+  await expect(page.locator('[data-session-tab="session-codex"]')).not.toHaveAttribute('data-attention', /.+/);
+});
+
+test('stale structured attention delayed by suspension is ignored', async ({ page }) => {
+  await page.locator('[data-session-tab="session-claude"]').click();
+  await page.evaluate(() => {
+    const attention = (
+      window as unknown as { __akmuxEmitAttention: (sessionId: string, kind: 'input' | 'completed', occurredAtMs?: number) => void }
+    ).__akmuxEmitAttention;
+    attention('session-codex', 'completed', Date.now() - 120_000);
+  });
+  await expect(page.locator('[data-session-tab="session-codex"]')).not.toHaveAttribute('data-attention', /.+/);
+});
+
+test('fresh remote attention survives backend clock skew', async ({ page }) => {
+  await page.locator('[data-session-tab="session-claude"]').click();
+  await page.evaluate(() => {
+    const reconnect = (
+      window as unknown as { __akmuxReconnectWithClockOffset: (sessionId: string, offsetMs: number) => void }
+    ).__akmuxReconnectWithClockOffset;
+    reconnect('session-codex', -300_000);
+  });
+  await page.waitForTimeout(1_500);
+  await page.evaluate(() => {
+    const attention = (
+      window as unknown as { __akmuxEmitAttention: (sessionId: string, kind: 'input' | 'completed', occurredAtMs?: number) => void }
+    ).__akmuxEmitAttention;
+    attention('session-codex', 'completed', Date.now() - 300_000);
+  });
+  await expect(page.locator('[data-session-tab="session-codex"]')).toHaveAttribute('data-attention', 'completed');
 });
 
 test('structured permission and completion events create deduplicated system notifications', async ({ page }) => {

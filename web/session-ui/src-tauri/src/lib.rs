@@ -6,12 +6,16 @@ use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
     UI::{
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
-        WindowsAndMessaging::{WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_SETTINGCHANGE, WM_THEMECHANGED},
+        WindowsAndMessaging::{KillTimer, SetTimer, WM_DWMCOLORIZATIONCOLORCHANGED, WM_NCDESTROY, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TIMER},
     },
 };
 
 #[cfg(target_os = "windows")]
 const NATIVE_BACKDROP_SUBCLASS_ID: usize = 0x414b_4d58;
+#[cfg(target_os = "windows")]
+const NATIVE_BACKDROP_TIMER_ID: usize = 0x414b_4d59;
+#[cfg(target_os = "windows")]
+const NATIVE_BACKDROP_DEBOUNCE_MS: u32 = 100;
 
 #[derive(Clone, Copy)]
 struct NativeBackdropSettings {
@@ -62,13 +66,19 @@ fn invalidates_native_backdrop(message: u32) -> bool {
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn native_backdrop_window_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM, _subclass_id: usize, hook_data: usize) -> LRESULT {
     if invalidates_native_backdrop(message) && hook_data != 0 {
+        // DWM recalculates the backdrop during default handling, so restore only after the
+        // complete burst of native appearance messages has settled.
+        unsafe { SetTimer(hwnd, NATIVE_BACKDROP_TIMER_ID, NATIVE_BACKDROP_DEBOUNCE_MS, None) };
+    }
+    if message == WM_TIMER && wparam == NATIVE_BACKDROP_TIMER_ID && hook_data != 0 {
+        unsafe { KillTimer(hwnd, NATIVE_BACKDROP_TIMER_ID) };
         let hook = unsafe { &*(hook_data as *const NativeBackdropHook) };
-        let app = hook.app.clone();
-        let dispatcher = app.clone();
-        let _ = dispatcher.run_on_main_thread(move || restore_native_backdrop(&app));
+        restore_native_backdrop(&hook.app);
+        return 0;
     }
     if message == WM_NCDESTROY && hook_data != 0 {
         unsafe {
+            KillTimer(hwnd, NATIVE_BACKDROP_TIMER_ID);
             RemoveWindowSubclass(hwnd, Some(native_backdrop_window_proc), NATIVE_BACKDROP_SUBCLASS_ID);
             drop(Box::from_raw(hook_data as *mut NativeBackdropHook));
         }

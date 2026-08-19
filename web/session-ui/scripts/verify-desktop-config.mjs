@@ -21,6 +21,17 @@ assert.equal(nsis.installerIcon, 'icons/icon.ico', 'NSIS installer must use the 
 assert.equal(window.transparent, true, 'native backdrop materials require a transparent Tauri window');
 assert.equal(window.decorations, false, 'desktop builds must use the custom title bar');
 assert.match(cargoManifest, /\[target\.'cfg\(target_os = "windows"\)'\.dependencies\][\s\S]*window-vibrancy\s*=/, 'Windows backdrop materials must use the native vibrancy API');
+assert.match(desktopLibrary, /#\[cfg\(target_os = "windows"\)\]\s*use windows_sys::Win32/, 'Windows appearance messages must not compile on macOS or Linux');
+assert.match(
+  desktopLibrary,
+  /#\[cfg\(all\(desktop, not\(target_os = "windows"\)\)\)\]\s*fn setup_native_backdrop_listener[\s\S]*?\{\s*Ok\(\(\)\)\s*\}/,
+  'macOS and Linux must use the no-op native backdrop listener',
+);
+assert.match(
+  desktopLibrary,
+  /#\[cfg\(not\(target_os = "windows"\)\)\]\s*let _ = \(window, settings\);/,
+  'macOS and Linux must not apply Windows native backdrop effects',
+);
 assert.match(desktopLibrary, /window_vibrancy::apply_mica\([^,]+, Some\(settings\.dark\)\)/, 'Windows 11 Mica must follow the resolved application theme');
 assert.match(desktopLibrary, /apply_mica[\s\S]*is_err\(\)[\s\S]*window_vibrancy::apply_acrylic/, 'Windows 10 must fall back to a theme-aware Acrylic tint when Mica is unavailable');
 assert.match(desktopLibrary, /material_transparency[\s\S]*tint_alpha/, 'Windows 10 Acrylic tint must follow material transparency');
@@ -35,7 +46,13 @@ assert.match(desktopLibrary, /SetWindowSubclass/, 'Windows must observe native s
 assert.match(
   desktopLibrary,
   /WM_SETTINGCHANGE[\s\S]*WM_THEMECHANGED[\s\S]*WM_DWMCOLORIZATIONCOLORCHANGED/,
-  'Windows setting, theme, and DWM color broadcasts must restore the native backdrop immediately',
+  'Windows setting, theme, and DWM color broadcasts must schedule a native backdrop restore',
+);
+assert.match(desktopLibrary, /SetTimer/, 'Windows backdrop restoration must wait until native setting broadcasts settle');
+assert.match(
+  desktopLibrary,
+  /WM_TIMER[\s\S]*KillTimer[\s\S]*restore_native_backdrop/,
+  'Windows must restore the native backdrop after the debounce timer fires',
 );
 assert.match(desktopLibrary, /generate_handler!\[\s*sync_native_backdrop(?:,|\s*\])/, 'native backdrop synchronization must be registered as a Tauri command');
 assert.match(desktopLibrary, /backend::list_backend_profiles/, 'desktop backend profile commands must be registered with Tauri');

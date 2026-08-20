@@ -56,9 +56,12 @@ Nix namespace   programs.akmux
 
 ## 2. Product Model
 
+Canonical product terms are defined in [CONTEXT.md](CONTEXT.md). This section
+specifies the behavior and data contracts that apply to those concepts.
+
 ### 2.1 Agent
 
-An executable AI coding tool:
+The supported Agent kinds are:
 
 ```rust
 enum AgentKind {
@@ -67,12 +70,13 @@ enum AgentKind {
 }
 ```
 
-An Agent is not an API provider. Existing AkironMux providers continue to describe
-API endpoints, credentials, profiles, and model catalogs.
+Selecting an Agent does not select or replace an API Provider. Existing AkironMux
+providers continue to describe API endpoints, credentials, Model Profiles, and
+model catalogs.
 
 ### 2.2 Managed session
 
-A process and PTY owned by `akmux-sessiond`:
+The Managed Session data contract is:
 
 ```rust
 struct SessionInfo {
@@ -87,14 +91,15 @@ struct SessionInfo {
 }
 ```
 
-The browser never owns process or PTY handles. Closing or refreshing the browser
-does not stop sessions.
+Clients never own process or PTY handles. Closing or refreshing a client does not
+stop Managed Sessions.
 
 ### 2.3 Native history session
 
 The existing `session_history` rows index Claude and Codex native history files.
-Opening one in the WebUI creates a Managed session using the compatible native
-resume command. Native history is not the source of truth for live process state.
+Opening one in the WebUI creates a Managed Session using the compatible native
+resume command. Native History Sessions are not the source of truth for live
+process state.
 The session service exposes these records to the WebUI and classifies them
 dynamically. Codex internal child threads identified by `parent_thread_id` are
 hidden from native history and contribute their message and usage totals to the
@@ -102,7 +107,8 @@ parent thread. Explicit `/fork` sessions remain independent history records.
 
 ### 2.4 Workspace organization
 
-The WebUI has three directory scopes:
+The WebUI organizes directories into the Project, General, and Other scopes
+defined in [CONTEXT.md](CONTEXT.md):
 
 - **Projects** are user-created, persisted directory entries. A project owns
   history in its root and descendants. Project paths cannot overlap the General
@@ -124,12 +130,7 @@ UI uses the project or directory name as a temporary label. Claude `custom-title
 events are authoritative. Codex `thread_name` changes are synchronized as a
 best-effort signal because Codex does not expose title provenance.
 
-### 2.6 Unified sessions
-
-Unified means one list, workspace, API, and UI for both agents. It does not mean
-Claude and Codex share native conversation context.
-
-### 2.7 Backend connection
+### 2.6 Backend connection
 
 An installed GUI persists a list of backend connection profiles:
 

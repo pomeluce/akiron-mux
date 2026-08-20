@@ -64,6 +64,16 @@ export function App() {
   const [iconPath, setIconPath] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState>(null);
   const [imeComposing, setImeComposing] = useState(false);
+  const [terminalFocusRequest, setTerminalFocusRequest] = useState<{ backendKey: string; sessionId: string | null; sequence: number }>({
+    backendKey,
+    sessionId: null,
+    sequence: 0,
+  });
+
+  const selectSessionForInput = (sessionId: string) => {
+    sessionState.setActiveId(sessionId);
+    setTerminalFocusRequest(current => ({ backendKey, sessionId, sequence: current.sequence + 1 }));
+  };
 
   useEffect(() => {
     const clamp = () => setSidebarWidth(value => clampSidebarWidth(value));
@@ -90,7 +100,7 @@ export function App() {
       const currentIndex = sessionState.sessions.findIndex(session => session.id === sessionState.activeId);
       const direction = event.shiftKey ? -1 : 1;
       const nextIndex = currentIndex < 0 ? (direction < 0 ? sessionState.sessions.length - 1 : 0) : (currentIndex + direction + sessionState.sessions.length) % sessionState.sessions.length;
-      sessionState.setActiveId(sessionState.sessions[nextIndex].id);
+      selectSessionForInput(sessionState.sessions[nextIndex].id);
     };
     window.addEventListener('keydown', switchSessionTab, true);
     return () => window.removeEventListener('keydown', switchSessionTab, true);
@@ -272,6 +282,7 @@ export function App() {
             sessions={sessionState.sessions}
             active={sessionState.active}
             activeId={sessionState.activeId}
+            terminalFocusRequest={terminalFocusRequest.backendKey === backendKey ? terminalFocusRequest : { sessionId: null, sequence: terminalFocusRequest.sequence }}
             attention={sessionState.attention}
             terminalFontSize={preferences.terminalFontSize}
             detailsOpen={detailsOpen}
@@ -279,7 +290,7 @@ export function App() {
             workspaceEnabled={workspaceSupported}
             locale={preferences.locale}
             t={t}
-            onSelect={sessionState.setActiveId}
+            onSelect={selectSessionForInput}
             onStatus={handleSessionStatus}
             onAttention={handleSessionAttention}
             onNew={openGeneralSession}

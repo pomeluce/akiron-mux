@@ -15,6 +15,7 @@ interface WorkspaceShellProps {
   sessions: SessionInfo[];
   active?: SessionInfo;
   activeId: string | null;
+  terminalFocusRequest: { sessionId: string | null; sequence: number };
   attention: Record<string, AttentionKind>;
   terminalFontSize: number;
   detailsOpen: boolean;
@@ -158,6 +159,7 @@ export function WorkspaceShell(props: WorkspaceShellProps) {
                   backendAddress={props.backendAddress}
                   session={session}
                   active={session.id === props.activeId}
+                  focusRequest={props.terminalFocusRequest.sessionId === session.id ? props.terminalFocusRequest.sequence : 0}
                   fontSize={props.terminalFontSize}
                   t={props.t}
                   onStatus={props.onStatus}

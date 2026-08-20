@@ -889,6 +889,10 @@ each security boundary can be tested and rolled back.
    when it differs from the Windows system theme.
 3. Dark mode remains deep and neutral at high transparency instead of becoming
    pale or washed out.
+4. In dark mode, taskbar previews and redraws triggered by Windows window events
+   do not expose a light fallback background.
+5. Selecting a Managed Session with its tab or with `Ctrl+Tab` or
+   `Ctrl+Shift+Tab` focuses the selected terminal for immediate input.
 
 ### 13.3 Remote backend security
 

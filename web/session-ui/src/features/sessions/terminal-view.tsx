@@ -15,6 +15,7 @@ interface TerminalViewProps {
   backendAddress: string;
   session: SessionInfo;
   active: boolean;
+  focusRequest: number;
   fontSize: number;
   t: (key: MessageKey) => string;
   onStatus: (session: SessionInfo) => void;
@@ -43,7 +44,7 @@ function openExternalUrl(value: string) {
   window.open(url.toString(), '_blank', 'noopener,noreferrer');
 }
 
-export function TerminalView({ backendAddress, session, active, fontSize, t, onStatus, onAttention }: TerminalViewProps) {
+export function TerminalView({ backendAddress, session, active, focusRequest, fontSize, t, onStatus, onAttention }: TerminalViewProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const statusRef = useRef(onStatus);
   const attentionRef = useRef(onAttention);
@@ -83,6 +84,15 @@ export function TerminalView({ backendAddress, session, active, fontSize, t, onS
       });
     }
   }, [active, fontSize]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!active || !focusRequest || !terminal) return;
+    const frame = requestAnimationFrame(() => {
+      if (terminalRef.current === terminal) terminal.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [active, focusRequest]);
 
   useEffect(() => {
     const host = hostRef.current;

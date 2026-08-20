@@ -486,15 +486,26 @@ test('the active session is restored without briefly overwriting its backend key
 });
 
 test('Ctrl+Tab and Ctrl+Shift+Tab cycle session tabs in both directions', async ({ page }) => {
-  await page.locator('[data-session-tab="session-codex"]').click();
+  const activeTerminalInput = () => page.locator('.terminal-host[aria-hidden="false"] .xterm-helper-textarea');
+  await activeTerminalInput().focus();
+  await expect(activeTerminalInput()).toBeFocused();
   await page.keyboard.press('Control+Tab');
   await expect(page.locator('[data-session-tab="session-claude"]')).toHaveAttribute('data-active', 'true');
+  await expect(activeTerminalInput()).toBeFocused();
   await page.keyboard.press('Control+Tab');
   await expect(page.locator('[data-session-tab="session-codex-secondary"]')).toHaveAttribute('data-active', 'true');
+  await expect(activeTerminalInput()).toBeFocused();
   await page.keyboard.press('Control+Tab');
   await expect(page.locator('[data-session-tab="session-codex"]')).toHaveAttribute('data-active', 'true');
+  await expect(activeTerminalInput()).toBeFocused();
   await page.keyboard.press('Control+Shift+Tab');
   await expect(page.locator('[data-session-tab="session-codex-secondary"]')).toHaveAttribute('data-active', 'true');
+  await expect(activeTerminalInput()).toBeFocused();
+});
+
+test('clicking a session tab focuses its terminal', async ({ page }) => {
+  await page.locator('[data-session-tab="session-claude"]').click();
+  await expect(page.locator('.terminal-host[aria-hidden="false"] .xterm-helper-textarea')).toBeFocused();
 });
 
 test('desktop controls do not expose browser focus outlines', async ({ page }) => {

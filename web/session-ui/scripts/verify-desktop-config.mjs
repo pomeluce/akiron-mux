@@ -33,6 +33,11 @@ assert.match(
   'macOS and Linux must not apply Windows native backdrop effects',
 );
 assert.match(desktopLibrary, /window_vibrancy::apply_mica\([^,]+, Some\(settings\.dark\)\)/, 'Windows 11 Mica must follow the resolved application theme');
+assert.match(desktopLibrary, /window\.set_theme\(Some\(native_theme\(settings\)\)\)/, 'the resolved application theme must be persisted through the official Tauri window API');
+assert.ok(
+  desktopLibrary.indexOf('window.set_theme(Some(native_theme(settings)))') < desktopLibrary.indexOf('window_vibrancy::apply_mica'),
+  'the native window theme must be synchronized before applying backdrop materials',
+);
 assert.match(desktopLibrary, /apply_mica[\s\S]*is_err\(\)[\s\S]*window_vibrancy::apply_acrylic/, 'Windows 10 must fall back to a theme-aware Acrylic tint when Mica is unavailable');
 assert.match(desktopLibrary, /material_transparency[\s\S]*tint_alpha/, 'Windows 10 Acrylic tint must follow material transparency');
 assert.match(desktopLibrary, /sync_native_backdrop/, 'the desktop shell must expose native backdrop theme synchronization');

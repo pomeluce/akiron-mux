@@ -17,6 +17,7 @@ const NATIVE_BACKDROP_TIMER_ID: usize = 0x414b_4d59;
 #[cfg(target_os = "windows")]
 const NATIVE_BACKDROP_DEBOUNCE_MS: u32 = 100;
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Clone, Copy)]
 struct NativeBackdropSettings {
     dark: bool,
@@ -26,9 +27,19 @@ struct NativeBackdropSettings {
 #[derive(Default)]
 struct NativeBackdropState(Mutex<Option<NativeBackdropSettings>>);
 
+#[cfg(any(target_os = "windows", test))]
+fn native_theme(settings: NativeBackdropSettings) -> tauri::Theme {
+    if settings.dark {
+        tauri::Theme::Dark
+    } else {
+        tauri::Theme::Light
+    }
+}
+
 fn apply_native_backdrop(window: &tauri::WebviewWindow, settings: NativeBackdropSettings) {
     #[cfg(target_os = "windows")]
     {
+        let _ = window.set_theme(Some(native_theme(settings)));
         let transparency = settings.material_transparency.min(100) as u16;
         let tint_alpha = if transparency <= 30 {
             (255 - transparency * 246 / 30) as u8
@@ -151,6 +162,26 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run AkironMux desktop application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{native_theme, NativeBackdropSettings};
+
+    #[test]
+    fn native_theme_follows_the_resolved_application_theme() {
+        let dark = NativeBackdropSettings {
+            dark: true,
+            material_transparency: 30,
+        };
+        let light = NativeBackdropSettings {
+            dark: false,
+            material_transparency: 30,
+        };
+
+        assert_eq!(native_theme(dark), tauri::Theme::Dark);
+        assert_eq!(native_theme(light), tauri::Theme::Light);
+    }
 }
 mod backend;
 #[cfg(desktop)]

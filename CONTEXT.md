@@ -58,6 +58,33 @@ A persisted Agent conversation that AkironMux discovers in Claude Code or Codex
 history. It can be resumed as a Managed Session but is not live-process state.
 _Avoid_: Managed Session, history item
 
+**Native Session Key**:
+The pair of an Agent and its native session identifier that uniquely identifies a
+Native History Session and any Managed Session resuming it.
+_Avoid_: native session identifier alone
+
+**Primary Agent Turn**:
+A response cycle executed by the primary Agent thread of a Managed Session for a
+user submission. It may start Child Agent Runs before it finishes.
+_Avoid_: Managed Session, Agent process
+
+**Child Agent Run**:
+An internal subagent execution started by a Primary Agent Turn. Its result returns
+to that turn and does not independently represent completion of the Managed Session.
+_Avoid_: Native History Session, forked session
+
+**Completion Attention**:
+A client-visible signal that the primary Agent thread in a Managed Session has
+finished a response and has no active Child Agent Run. Child Agent Run completion
+and Agent process exit are not Completion Attention.
+_Avoid_: session completion, process exit, subagent completion
+
+**Interaction Attention**:
+A client-visible signal that a Managed Session requires user input or permission
+to continue, whether the request originates from its primary Agent or a Child
+Agent Run.
+_Avoid_: Completion Attention, subagent completion
+
 **Native History Ingestion**:
 The incremental process that discovers Agent-native session and usage files and
 updates AkironMux's rebuildable Native History index.

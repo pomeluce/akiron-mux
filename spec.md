@@ -110,6 +110,14 @@ dynamically. Codex internal child threads identified by `parent_thread_id` are
 hidden from native history and contribute their message and usage totals to the
 parent thread. Explicit `/fork` sessions remain independent history records.
 
+Opening Native History is idempotent by Native Session Key. A matching Managed
+Session in Starting, Running, or Error state is selected instead of starting a
+second Agent process; only an exited and removed session may be resumed again.
+The backend enforces this invariant across clients and concurrent requests. The
+client keeps the active matching instance when possible and otherwise selects
+the newest match. It does not automatically close duplicate instances left by an
+older client or backend.
+
 ### 2.4 Workspace organization
 
 The WebUI organizes directories into the Project, General, and Other scopes
@@ -197,6 +205,24 @@ Each backend profile remembers its last active session and navigation expansion
 state. Theme, language, terminal font size, material opacity, and sidebar width
 remain global client preferences. Server-owned workspace sorting remains on the
 selected backend.
+
+### 2.7 Session attention
+
+Session attention is independent of Managed Session process state. Interaction
+Attention is emitted whenever the primary Agent or one of its Child Agent Runs
+requires user input or permission. Completion Attention is emitted only after a
+Primary Agent Turn has finished and no Child Agent Run remains active. Child
+completion and Agent process exit do not produce Completion Attention.
+
+Agent adapters classify completion before broadcasting attention to clients, so
+in-application markers, taskbar attention, and system notifications share the
+same behavior. Codex completion uses the event `thread-id` and the canonical first
+`session_meta`: a non-empty `parent_thread_id` identifies an internal child and is
+suppressed, while an explicit `/fork` remains independent. Missing or unreadable
+metadata is retried briefly and then fails closed with a diagnostic entry. Claude
+registers `Stop`, never `SubagentStop`, and suppresses a `Stop` while its hook
+payload reports active agent-like background work; an ordinary background shell
+task alone does not suppress completion.
 
 ## 3. Process Architecture
 
@@ -931,6 +957,11 @@ each security boundary can be tested and rolled back.
 13. Working directories can be selected using the in-app directory browser.
 14. Project, General, and Other history groups classify dynamically.
 15. Existing TUI and CLI behavior remains unchanged.
+16. Clicking a Native History Session selects its existing non-exited Managed
+    Session without starting a duplicate Agent process, including concurrent and
+    multi-client resume requests.
+17. Child Agent Run completion never produces Completion Attention, while child
+    permission or input requests still produce Interaction Attention.
 
 ### 13.2 System material
 

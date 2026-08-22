@@ -225,7 +225,9 @@ export function App() {
             workspace={workspaces.workspace}
             settings={workspaces.settings}
             icons={workspaceIcons.icons}
-            activeNativeId={sessionState.active?.native_session_id}
+            activeNativeKey={
+              sessionState.active?.native_session_id ? `${sessionState.active.agent}:${sessionState.active.native_session_id}` : null
+            }
             attentionByNativeId={sessionState.nativeAttention}
             open={sidebarOpen}
             workspaceEnabled={workspaceSupported}

@@ -8,7 +8,14 @@ async fn main() {
         let Some(event) = arguments.next() else {
             return;
         };
-        let payload = arguments.next();
+        let payload = arguments.next().or_else(|| {
+            if !matches!(event.as_str(), "completed" | "claude-completed") {
+                return None;
+            }
+            let mut payload = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut payload).ok()?;
+            (!payload.trim().is_empty()).then_some(payload)
+        });
         let _ = ccswitch::session_service::emit_session_event(&managed_session_id, &event, payload.as_deref()).await;
         return;
     }

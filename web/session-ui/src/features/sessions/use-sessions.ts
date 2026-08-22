@@ -147,7 +147,7 @@ export function useSessions({
 }: UnifiedSessionsOptions) {
   const [snapshot, dispatch] = useReducer(reduceSnapshot, backendKey, initialSnapshot);
   const snapshotRef = useRef(snapshot);
-  const historyMap = useRef(new Map<string, string>());
+  const resumeRequests = useRef(new Map<string, Promise<SessionInfo>>());
   const generation = useRef(0);
   const currentBackendKey = useRef(backendKey);
   const removalTimers = useRef(new Map<string, number>());
@@ -166,7 +166,7 @@ export function useSessions({
 
   useEffect(() => {
     const context = actionContext();
-    historyMap.current.clear();
+    resumeRequests.current.clear();
     removalTimers.current.forEach(window.clearTimeout);
     removalTimers.current.clear();
     dismissedSessions.current.clear();
@@ -218,14 +218,31 @@ export function useSessions({
     const context = actionContext();
     const nativeKey = `${item.agent}:${item.id}`;
     dispatch({ type: 'clearNativeAttention', ...context, nativeKey });
-    const existing = historyMap.current.get(nativeKey);
-    if (existing && snapshotRef.current.sessions.some(session => session.id === existing)) {
-      select(existing);
+    const current = snapshotRef.current;
+    const active = current.sessions.find(session => session.id === current.activeId);
+    const activeMatches = active?.agent === item.agent && active.native_session_id === item.id;
+    const existing = activeMatches
+      ? active
+      : current.sessions.reduce<SessionInfo | null>((latest, session) => {
+          if (session.agent !== item.agent || session.native_session_id !== item.id || session.status === 'exited') return latest;
+          return !latest || session.created_at_ms > latest.created_at_ms ? session : latest;
+        }, null);
+    if (existing) {
+      select(existing.id);
       return;
     }
-    const session = await sessionApi.createSession(backendAddress, item.agent, item.cwd, item.id);
+    let request = resumeRequests.current.get(nativeKey);
+    if (!request) {
+      request = sessionApi.createSession(backendAddress, item.agent, item.cwd, item.id);
+      resumeRequests.current.set(nativeKey, request);
+    }
+    let session: SessionInfo;
+    try {
+      session = await request;
+    } finally {
+      if (resumeRequests.current.get(nativeKey) === request) resumeRequests.current.delete(nativeKey);
+    }
     if (context.generation !== generation.current || context.backendKey !== currentBackendKey.current) return;
-    historyMap.current.set(nativeKey, session.id);
     dispatch({ type: 'add', ...context, session });
   };
 

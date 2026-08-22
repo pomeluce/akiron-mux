@@ -180,7 +180,14 @@ impl SessionManager {
     }
 
     pub fn create(&self, request: CreateSession) -> anyhow::Result<SessionInfo> {
+        if let Some(existing) = reusable_session(&read_lock(&self.inner.sessions), &request) {
+            return Ok(existing);
+        }
         request.validate()?;
+        let mut sessions = write_lock(&self.inner.sessions);
+        if let Some(existing) = reusable_session(&sessions, &request) {
+            return Ok(existing);
+        }
         let id = SessionId::new();
         let native_session_id = match &request.launch_mode {
             LaunchMode::Resume { native_session_id } => Some(native_session_id.clone()),
@@ -207,7 +214,7 @@ impl SessionManager {
             last_attention: Mutex::new(None),
             worker: Mutex::new(None),
         });
-        write_lock(&self.inner.sessions).insert(id.clone(), Arc::clone(&entry));
+        sessions.insert(id.clone(), Arc::clone(&entry));
 
         let resolver = Arc::clone(&self.inner.resolver);
         let worker_entry = Arc::clone(&entry);
@@ -227,10 +234,11 @@ impl SessionManager {
         match worker {
             Ok(worker) => *lock(&entry.worker) = Some(worker),
             Err(error) => {
-                write_lock(&self.inner.sessions).remove(&id);
+                sessions.remove(&id);
                 return Err(error.into());
             }
         }
+        drop(sessions);
         Ok(info)
     }
 
@@ -300,6 +308,17 @@ impl SessionManager {
             }
         }
     }
+}
+
+fn reusable_session(sessions: &HashMap<SessionId, Arc<SessionEntry>>, request: &CreateSession) -> Option<SessionInfo> {
+    let LaunchMode::Resume { native_session_id } = &request.launch_mode else {
+        return None;
+    };
+    sessions
+        .values()
+        .map(|entry| read_lock(&entry.info).clone())
+        .filter(|session| session.agent == request.agent && session.native_session_id.as_deref() == Some(native_session_id.as_str()) && session.status != SessionStatus::Exited)
+        .max_by_key(|session| session.created_at_ms)
 }
 
 struct ManagerInner {
@@ -558,7 +577,7 @@ fn write_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{configure_terminal_environment, CreateSession, LaunchResolver, SessionManager, SessionStatus};
-    use crate::agent::{AgentKind, LaunchSpec};
+    use crate::agent::{AgentKind, LaunchMode, LaunchSpec};
     use portable_pty::CommandBuilder;
     use std::{
         path::PathBuf,
@@ -584,6 +603,40 @@ mod tests {
             .create(CreateSession::new(AgentKind::Codex, "test", PathBuf::from("/definitely/missing/ccswitch")))
             .unwrap_err();
         assert!(error.to_string().contains("does not exist"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reuses_a_managed_session_for_the_same_native_session_key() {
+        let cwd = std::env::current_dir().unwrap();
+        let manager = SessionManager::with_resolver(Arc::new(FixedResolver {
+            spec: LaunchSpec {
+                program: "sh".into(),
+                args: vec!["-c".into(), "sleep 30".into()],
+                cwd: cwd.clone(),
+                env: Vec::new(),
+            },
+        }));
+        let resumed = || {
+            let mut request = CreateSession::new(AgentKind::Codex, "fixture", cwd.clone());
+            request.launch_mode = LaunchMode::Resume {
+                native_session_id: "native-session".into(),
+            };
+            manager.create(request).unwrap()
+        };
+
+        let first = resumed();
+        let second = resumed();
+        let mut claude = CreateSession::new(AgentKind::Claude, "fixture", cwd);
+        claude.launch_mode = LaunchMode::Resume {
+            native_session_id: "native-session".into(),
+        };
+        let claude = manager.create(claude).unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_ne!(first.id, claude.id);
+        assert_eq!(manager.list().len(), 2);
+        manager.shutdown();
     }
 
     #[test]

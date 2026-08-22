@@ -15,7 +15,7 @@ interface AppSidebarProps {
   workspace: WorkspaceResponse;
   settings: SettingsResponse;
   icons: Record<string, WorkspaceIconName>;
-  activeNativeId?: string | null;
+  activeNativeKey?: string | null;
   attentionByNativeId: Record<string, AttentionKind>;
   open: boolean;
   workspaceEnabled: boolean;
@@ -207,7 +207,7 @@ function HistoryRow({ item, active, attention, reorder, onPointerReorder, onResu
 
 function HistoryList({
   items,
-  activeNativeId,
+  activeNativeKey,
   attentionByNativeId,
   sortMode,
   scope,
@@ -216,7 +216,7 @@ function HistoryList({
   empty,
 }: {
   items: HistoryItem[];
-  activeNativeId?: string | null;
+  activeNativeKey?: string | null;
   attentionByNativeId: Record<string, AttentionKind>;
   sortMode: SortMode;
   scope: string;
@@ -233,7 +233,7 @@ function HistoryList({
         <HistoryRow
           key={itemId}
           item={item}
-          active={item.id === activeNativeId}
+          active={itemId === activeNativeKey}
           attention={attentionByNativeId[itemId]}
           reorder={sortMode === 'manual' ? { kind: 'sessions', scope, id: itemId, ids: items.map(entry => `${entry.agent}:${entry.id}`) } : null}
           onPointerReorder={onPointerReorder}
@@ -398,7 +398,7 @@ export function AppSidebar(props: AppSidebarProps) {
                   <Collapsible.Content>
                     <HistoryList
                       items={group.history}
-                      activeNativeId={props.activeNativeId}
+                      activeNativeKey={props.activeNativeKey}
                       attentionByNativeId={props.attentionByNativeId}
                       sortMode={settings.project_sort}
                       scope={`project:${group.project.id}`}
@@ -479,7 +479,7 @@ export function AppSidebar(props: AppSidebarProps) {
                   <Collapsible.Content>
                     <HistoryList
                       items={group.items}
-                      activeNativeId={props.activeNativeId}
+                      activeNativeKey={props.activeNativeKey}
                       attentionByNativeId={props.attentionByNativeId}
                       sortMode={settings.directory_sort[group.path] || settings.general_sort}
                       scope={`directory:${group.path}`}
@@ -554,7 +554,7 @@ export function AppSidebar(props: AppSidebarProps) {
                   <Collapsible.Content>
                     <HistoryList
                       items={group.items}
-                      activeNativeId={props.activeNativeId}
+                      activeNativeKey={props.activeNativeKey}
                       attentionByNativeId={props.attentionByNativeId}
                       sortMode={settings.directory_sort[group.path] || settings.other_sort}
                       scope={`directory:${group.path}`}

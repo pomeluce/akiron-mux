@@ -105,7 +105,13 @@ const workspace = {
       history: [],
     },
   ],
-  general: [],
+  general: [
+    {
+      path: '/home/test/workbench/codex',
+      available: true,
+      items: [history('codex-native', 'Existing Codex history', '/home/test/workbench/codex')],
+    },
+  ],
   other: [
     { path: '/home/test/other-a', available: true, items: [] },
     { path: '/home/test/other-b', available: true, items: [] },
@@ -119,6 +125,7 @@ async function mockBackend(page: Page) {
       __akmuxSocketEvents: [],
       __akmuxReorders: [],
       __akmuxNotifications: [],
+      __akmuxSessionCreates: 0,
       __akmuxOpenedUrls: [],
       __akmuxEmitBellOnResize: false,
       __akmuxReplayApprovalOnConnect: false,
@@ -316,6 +323,13 @@ async function mockBackend(page: Page) {
     }
     if (url.pathname === '/api/sessions' && request.method() === 'GET') {
       await route.fulfill({ json: sessions });
+      return;
+    }
+    if (url.pathname === '/api/sessions' && request.method() === 'POST') {
+      await page.evaluate(() => {
+        (window as unknown as { __akmuxSessionCreates: number }).__akmuxSessionCreates += 1;
+      });
+      await route.fulfill({ status: 201, json: sessions[0] });
       return;
     }
     if (url.pathname === '/api/directories') {
@@ -583,6 +597,17 @@ test('Ctrl+Tab and Ctrl+Shift+Tab cycle session tabs in both directions', async 
 test('clicking a session tab focuses its terminal', async ({ page }) => {
   await page.locator('[data-session-tab="session-claude"]').click();
   await expect(page.locator('.terminal-host[aria-hidden="false"] .xterm-helper-textarea')).toBeFocused();
+});
+
+test('clicking native history switches to its existing managed session', async ({ page }) => {
+  await page.locator('[data-session-tab="session-claude"]').click();
+  await page.getByText('General sessions', { exact: true }).click();
+  await page.locator('[data-directory-row="/home/test/workbench/codex"] > button').first().click();
+  await page.getByText('Existing Codex history', { exact: true }).click();
+
+  await expect(page.locator('[data-session-tab="session-codex"]')).toHaveAttribute('data-active', 'true');
+  await expect(page.locator('.terminal-host[aria-hidden="false"] .xterm-helper-textarea')).toBeFocused();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __akmuxSessionCreates: number }).__akmuxSessionCreates)).toBe(0);
 });
 
 test('desktop controls do not expose browser focus outlines', async ({ page }) => {

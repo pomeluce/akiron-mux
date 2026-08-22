@@ -5,6 +5,7 @@
 
 use std::{
     collections::HashMap,
+    io::BufRead,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -748,6 +749,104 @@ struct CodexLine {
     payload: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexThreadOrigin {
+    Primary,
+    Child,
+}
+
+#[derive(Debug)]
+struct CodexSessionMetadata {
+    id: String,
+    cwd: String,
+    provider: String,
+    parent_thread_id: Option<String>,
+    start_time: Option<String>,
+}
+
+fn parse_codex_session_metadata_line(raw: &str) -> Option<CodexSessionMetadata> {
+    let line: CodexLine = serde_json::from_str(raw).ok()?;
+    if line.line_type != "session_meta" {
+        return None;
+    }
+    let id = line
+        .payload
+        .get("id")
+        .or_else(|| line.payload.get("session_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())?;
+    Some(CodexSessionMetadata {
+        id: id.to_string(),
+        cwd: line.payload.get("cwd").and_then(serde_json::Value::as_str).unwrap_or("").to_string(),
+        provider: line.payload.get("model_provider").and_then(serde_json::Value::as_str).unwrap_or("").to_string(),
+        parent_thread_id: line
+            .payload
+            .get("parent_thread_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned),
+        start_time: line.payload.get("timestamp").and_then(serde_json::Value::as_str).and_then(normalize_session_timestamp),
+    })
+}
+
+fn parse_codex_session_metadata(content: &str) -> Option<CodexSessionMetadata> {
+    content.lines().find_map(parse_codex_session_metadata_line)
+}
+
+pub(crate) fn codex_thread_origin(thread_id: &str) -> anyhow::Result<Option<CodexThreadOrigin>> {
+    let root = NativeRoots::system().codex_sessions;
+    codex_thread_origin_in(&root, thread_id)
+}
+
+fn codex_thread_origin_in(root: &Path, thread_id: &str) -> anyhow::Result<Option<CodexThreadOrigin>> {
+    if thread_id.is_empty() || !thread_id.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_')) {
+        anyhow::bail!("Invalid Codex thread identifier");
+    }
+    let Some(path) = find_codex_session_file(root, thread_id, 10)? else {
+        return Ok(None);
+    };
+    let reader = std::io::BufReader::new(std::fs::File::open(&path)?);
+    let mut metadata = None;
+    for line in reader.lines().take(64) {
+        if let Some(found) = parse_codex_session_metadata_line(&line?) {
+            metadata = Some(found);
+            break;
+        }
+    }
+    let metadata = metadata.ok_or_else(|| anyhow::anyhow!("Codex rollout has no canonical session metadata"))?;
+    anyhow::ensure!(metadata.id == thread_id, "Codex rollout metadata does not match the completion thread");
+    Ok(Some(if metadata.parent_thread_id.is_some() {
+        CodexThreadOrigin::Child
+    } else {
+        CodexThreadOrigin::Primary
+    }))
+}
+
+fn find_codex_session_file(dir: &Path, thread_id: &str, depth: usize) -> anyhow::Result<Option<PathBuf>> {
+    if depth == 0 || !dir.exists() {
+        return Ok(None);
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_symlink() {
+            continue;
+        }
+        if path.is_dir() {
+            if let Some(found) = find_codex_session_file(&path, thread_id, depth - 1)? {
+                return Ok(Some(found));
+            }
+        } else if path.extension().is_some_and(|extension| extension == "jsonl")
+            && path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == thread_id || name.ends_with(&format!("-{thread_id}")))
+        {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
 fn cleanup_removed_session_files(db: &Db, root: &std::path::Path, app_type: &str, file_index: &HashMap<String, i64>) -> Result<usize, anyhow::Error> {
     let stale_paths = file_index
         .keys()
@@ -831,11 +930,14 @@ fn apply_codex_session_index(db: &Db, index: &HashMap<String, String>) -> Result
 fn parse_codex_session_file(path: &Path) -> Result<Option<SessionRecord>, anyhow::Error> {
     let metadata = std::fs::metadata(path)?;
     let content = std::fs::read_to_string(path)?;
-    let mut session_id = String::new();
-    let mut cwd = String::new();
-    let mut provider = String::new();
-    let mut parent_thread_id: Option<String> = None;
-    let mut start_time = String::new();
+    let Some(canonical) = parse_codex_session_metadata(&content) else {
+        return Ok(None);
+    };
+    let session_id = canonical.id;
+    let cwd = canonical.cwd;
+    let provider = canonical.provider;
+    let parent_thread_id = canonical.parent_thread_id;
+    let mut start_time = canonical.start_time.unwrap_or_default();
     let mut end_time = String::new();
     let mut title: Option<String> = None;
     let mut event_message_count = 0i64;
@@ -853,34 +955,9 @@ fn parse_codex_session_file(path: &Path) -> Result<Option<SessionRecord>, anyhow
             end_time = normalized;
         }
         match line.line_type.as_str() {
-            "session_meta" => {
-                let canonical_id = line
-                    .payload
-                    .get("id")
-                    .or_else(|| line.payload.get("session_id"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
-                // A forked rollout can contain a second session_meta copied
-                // from its parent. The first valid metadata record identifies
-                // the rollout; later records must not overwrite it.
-                if !session_id.is_empty() || canonical_id.is_empty() {
-                    continue;
-                }
-                session_id = canonical_id.to_string();
-                cwd = line.payload.get("cwd").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
-                provider = line.payload.get("model_provider").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
-                parent_thread_id = line
-                    .payload
-                    .get("parent_thread_id")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|id| !id.is_empty())
-                    .map(str::to_owned);
-                if let Some(timestamp) = line.payload.get("timestamp").and_then(serde_json::Value::as_str) {
-                    if let Some(normalized) = normalize_session_timestamp(timestamp) {
-                        start_time = normalized;
-                    }
-                }
-            }
+            // The first valid metadata record is canonical. Forked rollouts can
+            // contain later metadata copied from their parent.
+            "session_meta" => {}
             "event_msg" => {
                 let event_type = line.payload.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
                 if matches!(event_type, "user_message" | "agent_message") {
@@ -910,9 +987,6 @@ fn parse_codex_session_file(path: &Path) -> Result<Option<SessionRecord>, anyhow
             }
             _ => {}
         }
-    }
-    if session_id.is_empty() {
-        return Ok(None);
     }
     let project_name = std::path::Path::new(&cwd)
         .file_name()
@@ -1724,6 +1798,36 @@ mod tests {
         assert_eq!(stored.len(), 2);
         assert!(stored.iter().any(|session| session.id == "parent-session"));
         assert!(stored.iter().any(|session| session.id == "fork-session"));
+    }
+
+    #[test]
+    fn codex_completion_origin_uses_the_canonical_session_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("2026/08/22")).unwrap();
+        std::fs::write(
+            dir.path().join("2026/08/22/rollout-root-session.jsonl"),
+            r#"{"type":"session_meta","payload":{"id":"root-session","cwd":"/tmp/root"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("2026/08/22/rollout-child-session.jsonl"),
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"child-session","cwd":"/tmp/child","parent_thread_id":"root-session"}}"#,
+                "\n",
+                r#"{"type":"session_meta","payload":{"id":"root-session","cwd":"/tmp/root"}}"#,
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("2026/08/22/rollout-fork-session.jsonl"),
+            r#"{"type":"session_meta","payload":{"id":"fork-session","cwd":"/tmp/fork","forked_from_id":"root-session"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(codex_thread_origin_in(dir.path(), "root-session").unwrap(), Some(CodexThreadOrigin::Primary));
+        assert_eq!(codex_thread_origin_in(dir.path(), "child-session").unwrap(), Some(CodexThreadOrigin::Child));
+        assert_eq!(codex_thread_origin_in(dir.path(), "fork-session").unwrap(), Some(CodexThreadOrigin::Primary));
+        assert_eq!(codex_thread_origin_in(dir.path(), "missing-session").unwrap(), None);
     }
 
     #[test]

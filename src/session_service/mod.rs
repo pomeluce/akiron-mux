@@ -1,4 +1,5 @@
 use std::{
+    io::Write,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
@@ -19,7 +20,10 @@ use url::Url;
 
 use crate::{
     agent::{AgentKind, LaunchMode},
-    core::{config, native_history::NativeHistoryIngestion},
+    core::{
+        config,
+        native_history::{codex_thread_origin, CodexThreadOrigin, NativeHistoryIngestion},
+    },
     db::Db,
     session_runtime::{AttentionKind, CreateSession, SessionInfo, SessionManager},
 };
@@ -1158,11 +1162,43 @@ fn service_state_path() -> PathBuf {
 pub async fn emit_session_event(managed_session_id: &str, event: &str, payload: Option<&str>) -> anyhow::Result<()> {
     let kind = match event {
         "input" => AttentionKind::Input,
-        "completed" => AttentionKind::Completed,
+        "completed" | "claude-completed" => {
+            if !payload.is_some_and(claude_completion_is_primary) {
+                record_session_event_diagnostic(managed_session_id, event, "ignored non-primary or unreadable Claude completion");
+                return Ok(());
+            }
+            AttentionKind::Completed
+        }
         "codex-completed" => {
-            let payload: serde_json::Value = serde_json::from_str(payload.unwrap_or_default())?;
+            let Ok(payload) = serde_json::from_str::<serde_json::Value>(payload.unwrap_or_default()) else {
+                record_session_event_diagnostic(managed_session_id, event, "ignored unreadable Codex completion payload");
+                return Ok(());
+            };
             if payload.get("type").and_then(serde_json::Value::as_str) != Some("agent-turn-complete") {
                 return Ok(());
+            }
+            let Some(thread_id) = payload.get("thread-id").and_then(serde_json::Value::as_str) else {
+                record_session_event_diagnostic(managed_session_id, event, "ignored Codex completion without a thread identifier");
+                return Ok(());
+            };
+            let mut origin = None;
+            for attempt in 0..5 {
+                match codex_thread_origin(thread_id) {
+                    Ok(Some(found)) => {
+                        origin = Some(found);
+                        break;
+                    }
+                    Ok(None) | Err(_) if attempt < 4 => tokio::time::sleep(std::time::Duration::from_millis(40)).await,
+                    Ok(None) | Err(_) => {}
+                }
+            }
+            match origin {
+                Some(CodexThreadOrigin::Primary) => {}
+                Some(CodexThreadOrigin::Child) => return Ok(()),
+                None => {
+                    record_session_event_diagnostic(managed_session_id, event, "ignored Codex completion with unverified thread metadata");
+                    return Ok(());
+                }
             }
             AttentionKind::Completed
         }
@@ -1186,6 +1222,47 @@ pub async fn emit_session_event(managed_session_id: &str, event: &str, payload: 
     Ok(())
 }
 
+fn claude_completion_is_primary(payload: &str) -> bool {
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return false;
+    };
+    if payload.get("hook_event_name").and_then(serde_json::Value::as_str) != Some("Stop") || payload.get("agent_id").is_some() {
+        return false;
+    }
+    !payload
+        .get("background_tasks")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|task| task.get("type").and_then(serde_json::Value::as_str))
+        .any(|task_type| matches!(task_type, "subagent" | "teammate" | "workflow" | "monitor" | "cloud session"))
+}
+
+fn record_session_event_diagnostic(managed_session_id: &str, event: &str, reason: &str) {
+    let directory = config::data_dir();
+    if std::fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let Ok(mut file) = options.open(directory.join("akmux-session-events.log")) else {
+        return;
+    };
+    let _ = writeln!(
+        file,
+        "{} managed_session_id={} event={} {}",
+        chrono::Utc::now().to_rfc3339(),
+        managed_session_id,
+        event,
+        reason
+    );
+}
+
 fn write_service_state(address: SocketAddr) -> anyhow::Result<()> {
     let path = service_state_path();
     if let Some(parent) = path.parent() {
@@ -1203,7 +1280,6 @@ fn write_service_state(address: SocketAddr) -> anyhow::Result<()> {
         options.mode(0o600);
     }
     let mut file = options.open(path)?;
-    use std::io::Write;
     file.write_all(&body)?;
     file.sync_all()?;
     Ok(())
@@ -1230,7 +1306,7 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{app_state, directory_listing, is_local_authority, is_local_origin, remote_router, router};
+    use super::{app_state, claude_completion_is_primary, directory_listing, is_local_authority, is_local_origin, remote_router, router};
     use crate::db::Db;
     use crate::session_runtime::SessionManager;
     use axum::{
@@ -1264,6 +1340,21 @@ mod tests {
         for value in ["0.0.0.0", "8.8.8.8", "1.1.1.1", "::", "2001:4860:4860::8888"] {
             assert!(!super::is_safe_remote_bind(value.parse::<IpAddr>().unwrap()), "{value}");
         }
+    }
+
+    #[test]
+    fn claude_completion_requires_a_primary_stop_without_agent_background_work() {
+        assert!(claude_completion_is_primary(r#"{"hook_event_name":"Stop","background_tasks":[],"session_crons":[]}"#));
+        assert!(claude_completion_is_primary(
+            r#"{"hook_event_name":"Stop","background_tasks":[{"id":"1","type":"shell","status":"running","description":"build"}]}"#
+        ));
+        assert!(!claude_completion_is_primary(
+            r#"{"hook_event_name":"Stop","background_tasks":[{"id":"2","type":"subagent","status":"running","description":"review"}]}"#
+        ));
+        assert!(!claude_completion_is_primary(
+            r#"{"hook_event_name":"SubagentStop","agent_id":"child","background_tasks":[]}"#
+        ));
+        assert!(!claude_completion_is_primary("not-json"));
     }
 
     #[test]

@@ -126,4 +126,37 @@ mod tests {
         assert_eq!(spec.program, "codex");
         assert_eq!(spec.args, ["resume", "codex-session"]);
     }
+
+    #[test]
+    fn managed_claude_sessions_only_register_primary_completion_hooks() {
+        let spec = launch_spec(&LaunchRequest {
+            agent: AgentKind::Claude,
+            cwd: PathBuf::from("/tmp/project"),
+            mode: LaunchMode::New,
+            managed_session_id: Some("managed-session".into()),
+        })
+        .unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&spec.args[1]).unwrap();
+
+        assert!(settings["hooks"]["Stop"].is_array());
+        assert!(settings["hooks"].get("SubagentStop").is_none());
+        assert!(settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("session-event managed-session claude-completed"));
+    }
+
+    #[test]
+    fn managed_codex_sessions_forward_legacy_completion_payloads() {
+        let spec = launch_spec(&LaunchRequest {
+            agent: AgentKind::Codex,
+            cwd: PathBuf::from("/tmp/project"),
+            mode: LaunchMode::New,
+            managed_session_id: Some("managed-session".into()),
+        })
+        .unwrap();
+
+        assert!(spec.args.iter().any(|argument| argument.contains("codex-completed")));
+        assert!(spec.args.iter().any(|argument| argument == "tui.notifications=[\"approval-requested\"]"));
+    }
 }

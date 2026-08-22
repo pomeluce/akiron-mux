@@ -11,7 +11,7 @@ impl AgentDriver for ClaudeDriver {
         };
         if let Some(managed_session_id) = request.managed_session_id.as_deref() {
             let permission = session_event_command(managed_session_id, "input");
-            let completed = session_event_command(managed_session_id, "completed");
+            let completed = session_event_command(managed_session_id, "claude-completed");
             let settings = serde_json::json!({
                 "hooks": {
                     "PermissionRequest": [{ "hooks": [{ "type": "command", "command": permission }] }],

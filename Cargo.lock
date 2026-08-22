@@ -16,7 +16,7 @@ dependencies = [
 
 [[package]]
 name = "akiron-mux"
-version = "1.14.8"
+version = "1.14.9"
 dependencies = [
  "anyhow",
  "axum",

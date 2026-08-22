@@ -2,6 +2,7 @@ use super::super::lang;
 use super::super::theme::{self, THEMES};
 use super::super::widgets::shared::display_width;
 use super::TabContent;
+use crate::core::agent_configuration::AgentConfiguration;
 use crate::core::config::{self, ConfigManager};
 use crossterm::event::KeyCode;
 use qrcode::{render::unicode, QrCode};
@@ -170,7 +171,7 @@ impl SettingsTab {
             crate::core::models::SwitchMode::Local
         };
         if let (Some(prov_id), Some(prof_id)) = (self.mgr.get_setting("active_provider"), self.mgr.get_setting("active_profile")) {
-            if let Err(e) = crate::core::switcher::switch_profile(&self.mgr, &prov_id, &prof_id, mode, None) {
+            if let Err(e) = AgentConfiguration::new(&self.mgr).apply_claude_profile(&prov_id, &prof_id, mode) {
                 tracing::warn!("Failed to apply mode switch: {}", e);
             }
         }

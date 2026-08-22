@@ -5,8 +5,12 @@ const config = JSON.parse(fs.readFileSync(new URL('../src-tauri/tauri.conf.json'
 const capability = JSON.parse(fs.readFileSync(new URL('../src-tauri/capabilities/main-window.json', import.meta.url), 'utf8'));
 const cargoManifest = fs.readFileSync(new URL('../src-tauri/Cargo.toml', import.meta.url), 'utf8');
 const desktopLibrary = fs.readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+const nativeAppearance = fs.readFileSync(new URL('../src-tauri/src/native_appearance/mod.rs', import.meta.url), 'utf8');
+const windowsAppearance = fs.readFileSync(new URL('../src-tauri/src/native_appearance/windows.rs', import.meta.url), 'utf8');
 const packageManifest = fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8');
 const backendHook = fs.readFileSync(new URL('../src/features/backends/use-backends.ts', import.meta.url), 'utf8');
+const backendLifecycle = fs.readFileSync(new URL('../src/features/backends/backend-profile-lifecycle.ts', import.meta.url), 'utf8');
+const app = fs.readFileSync(new URL('../src/app/app.tsx', import.meta.url), 'utf8');
 const settingsDialog = fs.readFileSync(new URL('../src/features/preferences/settings-dialog.tsx', import.meta.url), 'utf8');
 const terminalView = fs.readFileSync(new URL('../src/features/sessions/terminal-view.tsx', import.meta.url), 'utf8');
 const releaseWorkflow = fs.readFileSync(new URL('../../../.github/workflows/release.yml', import.meta.url), 'utf8');
@@ -21,47 +25,23 @@ assert.equal(nsis.installerIcon, 'icons/icon.ico', 'NSIS installer must use the 
 assert.equal(window.transparent, true, 'native backdrop materials require a transparent Tauri window');
 assert.equal(window.decorations, false, 'desktop builds must use the custom title bar');
 assert.match(cargoManifest, /\[target\.'cfg\(target_os = "windows"\)'\.dependencies\][\s\S]*window-vibrancy\s*=/, 'Windows backdrop materials must use the native vibrancy API');
-assert.match(desktopLibrary, /#\[cfg\(target_os = "windows"\)\]\s*use windows_sys::Win32/, 'Windows appearance messages must not compile on macOS or Linux');
-assert.match(
-  desktopLibrary,
-  /#\[cfg\(all\(desktop, not\(target_os = "windows"\)\)\)\]\s*fn setup_native_backdrop_listener[\s\S]*?\{\s*Ok\(\(\)\)\s*\}/,
-  'macOS and Linux must use the no-op native backdrop listener',
-);
-assert.match(
-  desktopLibrary,
-  /#\[cfg\(not\(target_os = "windows"\)\)\]\s*let _ = \(window, settings\);/,
-  'macOS and Linux must not apply Windows native backdrop effects',
-);
-assert.match(desktopLibrary, /window_vibrancy::apply_mica\([^,]+, Some\(settings\.dark\)\)/, 'Windows 11 Mica must follow the resolved application theme');
-assert.match(desktopLibrary, /window\.set_theme\(Some\(native_theme\(settings\)\)\)/, 'the resolved application theme must be persisted through the official Tauri window API');
-assert.ok(
-  desktopLibrary.indexOf('window.set_theme(Some(native_theme(settings)))') < desktopLibrary.indexOf('window_vibrancy::apply_mica'),
-  'the native window theme must be synchronized before applying backdrop materials',
-);
-assert.match(desktopLibrary, /apply_mica[\s\S]*is_err\(\)[\s\S]*window_vibrancy::apply_acrylic/, 'Windows 10 must fall back to a theme-aware Acrylic tint when Mica is unavailable');
-assert.match(desktopLibrary, /material_transparency[\s\S]*tint_alpha/, 'Windows 10 Acrylic tint must follow material transparency');
-assert.match(desktopLibrary, /sync_native_backdrop/, 'the desktop shell must expose native backdrop theme synchronization');
-assert.match(desktopLibrary, /NativeBackdropState/, 'the desktop shell must retain the resolved native backdrop state');
-assert.match(
-  desktopLibrary,
-  /WindowEvent::Focused\(true\)[\s\S]*restore_native_backdrop/,
-  'Windows must restore the native backdrop after system settings invalidate it while the app is unfocused',
-);
-assert.match(desktopLibrary, /SetWindowSubclass/, 'Windows must observe native setting broadcasts while the app is unfocused');
-assert.match(
-  desktopLibrary,
-  /WM_SETTINGCHANGE[\s\S]*WM_THEMECHANGED[\s\S]*WM_DWMCOLORIZATIONCOLORCHANGED/,
-  'Windows setting, theme, and DWM color broadcasts must schedule a native backdrop restore',
-);
-assert.match(desktopLibrary, /SetTimer/, 'Windows backdrop restoration must wait until native setting broadcasts settle');
-assert.match(
-  desktopLibrary,
-  /WM_TIMER[\s\S]*KillTimer[\s\S]*restore_native_backdrop/,
-  'Windows must restore the native backdrop after the debounce timer fires',
-);
-assert.match(desktopLibrary, /generate_handler!\[\s*sync_native_backdrop(?:,|\s*\])/, 'native backdrop synchronization must be registered as a Tauri command');
+assert.match(desktopLibrary, /mod native_appearance;/, 'native appearance behavior must live behind a dedicated module');
+assert.doesNotMatch(desktopLibrary, /windows_sys|window_vibrancy|WM_[A-Z_]+/, 'the desktop entry point must not own platform appearance details');
+assert.match(desktopLibrary, /manage\(native_appearance::NativeAppearanceState::default\(\)\)/, 'the desktop shell must retain resolved native appearance state');
+assert.match(desktopLibrary, /native_appearance::install/, 'the desktop shell must install native appearance handling during setup');
+assert.match(desktopLibrary, /native_appearance::handle_window_event/, 'window events must cross the native appearance seam');
+assert.match(desktopLibrary, /native_appearance::sync_native_backdrop/, 'native appearance synchronization must be registered as a Tauri command');
+assert.match(nativeAppearance, /#\[cfg\(target_os = "windows"\)\]\s*mod windows;/, 'Windows appearance code must be isolated behind target compilation');
+assert.match(nativeAppearance, /#\[cfg\(not\(target_os = "windows"\)\)\]/, 'non-Windows builds must use the platform-neutral no-op path');
+assert.match(windowsAppearance, /use windows_sys::Win32/, 'the Windows adapter must own native appearance messages');
+assert.match(windowsAppearance, /window_vibrancy::/, 'the Windows adapter must own native backdrop materials');
 assert.match(desktopLibrary, /backend::list_backend_profiles/, 'desktop backend profile commands must be registered with Tauri');
-assert.match(desktopLibrary, /backend::pair_backend_profile/, 'device pairing must be handled by the native desktop layer');
+assert.match(desktopLibrary, /backend::apply_backend_profile_intent/, 'Backend Profile lifecycle intents must be handled by the native desktop layer');
+assert.match(backendLifecycle, /apply_backend_profile_intent/, 'the WebView must cross one typed Backend Profile lifecycle seam');
+assert.match(backendLifecycle, /generation !== this\.generation/, 'late refresh results from a previous Backend Profile must be ignored');
+assert.match(backendLifecycle, /this\.inFlight/, 'active Remote Profile refreshes must not overlap');
+assert.doesNotMatch(app, /test_backend_profile|BACKEND_IDENTITY_CHANGED/, 'App must not orchestrate Backend Profile security ordering');
+assert.doesNotMatch(settingsDialog, /BACKEND_IDENTITY_CHANGED/, 'settings must consume typed identity confirmation outcomes');
 assert.match(cargoManifest, /tauri\s*=\s*\{[^}]*features\s*=\s*\["tray-icon"\]/, 'desktop builds must enable the Tauri tray API');
 assert.match(desktopLibrary, /tray::setup/, 'desktop builds must create the system tray');
 assert.match(desktopLibrary, /tray::sync_tray_state/, 'the WebView must be able to synchronize tray preferences and sessions');

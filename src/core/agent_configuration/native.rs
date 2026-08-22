@@ -13,7 +13,7 @@ const LEGACY_CODEX_MANAGED_PROVIDER_IDS: [&str; 2] = ["openai", "ccs"];
 const OFFICIAL_CODEX_AUTH_BACKUP: &str = "auth_openai.json";
 const AKMUX_CODEX_AUTH_BACKUP: &str = "auth_akmux.json";
 
-pub fn switch_profile(mgr: &ConfigManager, provider_id: &str, profile_id: &str, mode: SwitchMode, settings_path: Option<&Path>) -> Result<ActiveConfig> {
+pub(super) fn apply_claude_profile(mgr: &ConfigManager, provider_id: &str, profile_id: &str, mode: SwitchMode, settings_path: &Path) -> Result<ActiveConfig> {
     let (provider, profile) = mgr
         .find_profile(provider_id, profile_id)?
         .with_context(|| format!("Profile not found: {}/{}", provider_id, profile_id))?;
@@ -45,21 +45,10 @@ pub fn switch_profile(mgr: &ConfigManager, provider_id: &str, profile_id: &str, 
     };
 
     write_settings_json(&config, mode, settings_path)?;
-    mgr.set_setting("active_provider", &config.provider_id)?;
-    mgr.set_setting("active_profile", &config.profile_id)?;
-    mgr.set_setting("proxy_mode", if mode == SwitchMode::Proxy { "true" } else { "false" })?;
-    if mode == SwitchMode::Proxy {
-        mgr.set_setting("proxy_port", &DEFAULT_PROXY_PORT.to_string())?;
-    }
     Ok(config)
 }
 
-fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Path>) -> Result<()> {
-    let settings_path = path.map(|p| p.to_path_buf()).unwrap_or_else(|| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        Path::new(&home).join(".claude").join("settings.json")
-    });
-
+fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, settings_path: &Path) -> Result<()> {
     tracing::debug!(
         "write_settings_json: path={} base_url={} auth_token={} reasoning={} task={}",
         settings_path.display(),
@@ -70,7 +59,7 @@ fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Pa
     );
 
     let mut existing: serde_json::Value = if settings_path.exists() {
-        let content = std::fs::read_to_string(&settings_path)?;
+        let content = std::fs::read_to_string(settings_path)?;
         serde_json::from_str(&content).context("Failed to parse Claude settings.json")?
     } else {
         json!({})
@@ -140,30 +129,12 @@ fn write_settings_json(config: &ActiveConfig, mode: SwitchMode, path: Option<&Pa
         }
     }
 
-    write_private_file(&settings_path, serde_json::to_string_pretty(&existing)?.as_bytes())?;
+    write_private_file(settings_path, serde_json::to_string_pretty(&existing)?.as_bytes())?;
     tracing::debug!("write_settings_json: wrote to {}", settings_path.display());
     Ok(())
 }
 
-/// Switch Codex to a provider and update ~/.codex/config.toml + auth.json.
-/// Official and third-party sessions share the reserved `akmux` provider ID;
-/// authentication files are swapped independently from the provider metadata.
-#[allow(dead_code)]
-pub fn switch_codex_provider(mgr: &ConfigManager, provider_id: &str, config_path: Option<&Path>, auth_path: Option<&Path>) -> Result<Provider> {
-    let provider = mgr
-        .find_provider_for(AppType::Codex, provider_id)?
-        .with_context(|| format!("Codex provider not found: {}", provider_id))?;
-    validate_provider(&provider)?;
-    let model_slug = provider
-        .models
-        .iter()
-        .find(|model| model.default)
-        .or_else(|| provider.models.first())
-        .map(|model| model.slug.as_str());
-    switch_codex_model(mgr, provider_id, model_slug, config_path, auth_path)
-}
-
-pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Option<&str>, config_path: Option<&Path>, auth_path: Option<&Path>) -> Result<Provider> {
+pub(super) fn apply_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Option<&str>, config_path: &Path, auth_path: &Path) -> Result<Provider> {
     let provider = mgr
         .find_provider_for(AppType::Codex, provider_id)?
         .with_context(|| format!("Codex provider not found: {}", provider_id))?;
@@ -191,10 +162,8 @@ pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Op
         Some(token)
     };
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let codex_dir = Path::new(&home).join(".codex");
-    let config_path = config_path.map(Path::to_path_buf).unwrap_or_else(|| codex_dir.join("config.toml"));
-    let auth_path = auth_path.map(Path::to_path_buf).unwrap_or_else(|| codex_dir.join("auth.json"));
+    let config_path = config_path.to_path_buf();
+    let auth_path = auth_path.to_path_buf();
     let catalog_path = config_path.parent().map(|dir| dir.join("akmux/models.json")).unwrap_or_else(default_catalog_path);
 
     if let Some(parent) = config_path.parent() {
@@ -241,8 +210,6 @@ pub fn switch_codex_model(mgr: &ConfigManager, provider_id: &str, model_slug: Op
     }
     write_private_file(&config_path, config.to_string().as_bytes())?;
 
-    mgr.set_setting(AppType::Codex.active_provider_key(), &provider.id)?;
-    mgr.set_setting("active_codex_model", selected_model.map(|model| model.slug.as_str()).unwrap_or(""))?;
     Ok(provider)
 }
 
@@ -363,30 +330,6 @@ fn restore_official_codex_auth(auth_path: &Path, previously_third_party: bool) -
     Ok(())
 }
 
-/// Remove AkironMux's association with a Codex provider. Provider definitions
-/// remain in config.toml because existing Codex sessions refer to them by ID.
-pub fn remove_codex_provider(mgr: &ConfigManager, provider_id: &str, config_path: Option<&Path>) -> Result<()> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let config_path = config_path.map(Path::to_path_buf).unwrap_or_else(|| Path::new(&home).join(".codex/config.toml"));
-    if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)?;
-        let mut config: toml_edit::DocumentMut = content.parse().context("Failed to parse Codex config.toml")?;
-        let last_source_matches = managed_last_switch(&config).and_then(|table| table.get("source")).and_then(toml_edit::Item::as_str) == Some(provider_id);
-        if last_source_matches {
-            for namespace in ["akmux", "ccswitch"] {
-                if let Some(table) = config.as_table_mut().get_mut(namespace).and_then(toml_edit::Item::as_table_mut) {
-                    table.remove("last_switch");
-                }
-            }
-        }
-        write_private_file(&config_path, config.to_string().as_bytes())?;
-    }
-    if mgr.get_setting(AppType::Codex.active_provider_key()).as_deref() == Some(provider_id) {
-        mgr.set_setting(AppType::Codex.active_provider_key(), "")?;
-    }
-    Ok(())
-}
-
 fn managed_last_switch(config: &toml_edit::DocumentMut) -> Option<&toml_edit::Table> {
     ["akmux", "ccswitch"].into_iter().find_map(|namespace| {
         config
@@ -405,7 +348,7 @@ fn move_private_file(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_private_file(path: &Path, content: &[u8]) -> Result<()> {
+pub(super) fn write_private_file(path: &Path, content: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

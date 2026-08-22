@@ -1,5 +1,5 @@
 import { Check, PanelLeft, Server } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { desktopShell } from '@/features/desktop/desktop-shell';
 import { useDesktopTray } from '@/features/desktop/use-desktop-tray';
 import { useBackends } from '@/features/backends/use-backends';
@@ -9,8 +9,8 @@ import { usePreferences } from '@/features/preferences/use-preferences';
 import { useWorkspaceIcons } from '@/features/preferences/use-workspace-icons';
 import { SearchDialog } from '@/features/sessions/search-dialog';
 import { SessionDialog } from '@/features/sessions/session-dialog';
-import { notifySession } from '@/features/sessions/session-notifications';
-import { useSessions } from '@/features/sessions/use-sessions';
+import { appHasFocus, notifySession } from '@/features/sessions/session-notifications';
+import { useSessions, type SessionNotificationAdapter } from '@/features/sessions/use-sessions';
 import { WorkspaceShell } from '@/features/sessions/workspace-shell';
 import { AppSidebar } from '@/features/workspaces/app-sidebar';
 import { IconDialog } from '@/features/workspaces/icon-dialog';
@@ -24,10 +24,10 @@ import type { WorkspaceIconName } from '@/shared/components/workspace-icon';
 import { Button } from '@/shared/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/shared/ui/dropdown-menu';
 import { Tooltip, TooltipProvider } from '@/shared/ui/tooltip';
-import type { AttentionKind, BackendProfile, ClientPreferences, Project, SortMode } from '@/types';
+import type { ClientPreferences, Project, SortMode } from '@/types';
 
 type SessionDialogState = { open: boolean; mode: 'general' | 'project'; path: string };
-type ConfirmState = { kind: 'session' } | { kind: 'project'; project: Project } | { kind: 'backend'; profile: BackendProfile; instanceId: string } | null;
+type ConfirmState = { kind: 'session' } | { kind: 'project'; project: Project } | { kind: 'backend'; challengeId: string; observedInstanceId: string } | null;
 
 const SIDEBAR_MIN_WIDTH = 188;
 const SIDEBAR_DEFAULT_WIDTH = 224;
@@ -45,11 +45,18 @@ export function App() {
   const backendFeaturesReady = backendReady && workspaceSupported;
   const backendAddress = desktopShell ? (backendReady ? backends.active.address : '') : preferences.backendAddress;
   const backendKey = desktopShell ? (backendReady ? backends.active.id : 'desktop-loading') : backendAddress || 'embedded';
+  const sessionNotifications = useMemo<SessionNotificationAdapter>(
+    () => ({
+      shouldNotify: () => !appHasFocus(),
+      notify: (session, kind) => notifySession(session, kind, preferences.locale),
+    }),
+    [preferences.locale],
+  );
   const workspaceIcons = useWorkspaceIcons();
   const t = useMemo(() => (key: Parameters<typeof translate>[1]) => translate(preferences.locale, key), [preferences.locale]);
   const workspaces = useWorkspaces(backendAddress, backendKey, backendFeaturesReady);
-  const sessionState = useSessions(backendAddress, backendKey, backendFeaturesReady);
-  useDesktopTray(preferences, sessionState.sessions, sessionState.setActiveId);
+  const sessionState = useSessions({ backendAddress, backendKey, enabled: backendFeaturesReady, notifications: sessionNotifications });
+  useDesktopTray(preferences, sessionState.sessions, sessionState.select);
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 760);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = Number(localStorage.getItem('akironmux-sidebar-width')) || SIDEBAR_DEFAULT_WIDTH;
@@ -63,18 +70,8 @@ export function App() {
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [iconPath, setIconPath] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState>(null);
+  const acceptedBackendChallenge = useRef<string | null>(null);
   const [imeComposing, setImeComposing] = useState(false);
-  const [terminalFocusRequest, setTerminalFocusRequest] = useState<{ backendKey: string; sessionId: string | null; sequence: number }>({
-    backendKey,
-    sessionId: null,
-    sequence: 0,
-  });
-
-  const selectSessionForInput = (sessionId: string) => {
-    sessionState.setActiveId(sessionId);
-    setTerminalFocusRequest(current => ({ backendKey, sessionId, sequence: current.sequence + 1 }));
-  };
-
   useEffect(() => {
     const clamp = () => setSidebarWidth(value => clampSidebarWidth(value));
     window.addEventListener('resize', clamp);
@@ -100,19 +97,20 @@ export function App() {
       const currentIndex = sessionState.sessions.findIndex(session => session.id === sessionState.activeId);
       const direction = event.shiftKey ? -1 : 1;
       const nextIndex = currentIndex < 0 ? (direction < 0 ? sessionState.sessions.length - 1 : 0) : (currentIndex + direction + sessionState.sessions.length) % sessionState.sessions.length;
-      selectSessionForInput(sessionState.sessions[nextIndex].id);
+      sessionState.select(sessionState.sessions[nextIndex].id);
     };
     window.addEventListener('keydown', switchSessionTab, true);
     return () => window.removeEventListener('keydown', switchSessionTab, true);
-  }, [sessionState.activeId, sessionState.sessions, sessionState.setActiveId]);
+  }, [sessionState.activeId, sessionState.select, sessionState.sessions]);
 
   useEffect(() => {
-    if (!desktopShell || backends.loading || backends.active.kind !== 'remote' || backends.active.requiresAuth) return;
-    const refresh = () => void backends.refreshActive(backends.active.id).catch(() => undefined);
-    refresh();
-    const timer = window.setInterval(refresh, 10_000);
-    return () => window.clearInterval(timer);
-  }, [backends.active.id, backends.active.kind, backends.active.requiresAuth, backends.loading, backends.refreshActive]);
+    if (settingsOpen || !backends.identityConfirmation) return;
+    setConfirm({
+      kind: 'backend',
+      challengeId: backends.identityConfirmation.challengeId,
+      observedInstanceId: backends.identityConfirmation.observedInstanceId,
+    });
+  }, [backends.identityConfirmation, settingsOpen]);
 
   const openGeneralSession = () => setSessionDialog({ open: true, mode: 'general', path: workspaces.workspace.general_root });
   const openProjectSession = (path: string) => setSessionDialog({ open: true, mode: 'project', path });
@@ -150,28 +148,11 @@ export function App() {
     sessionState.update(session);
   };
 
-  const handleSessionAttention = (session: (typeof sessionState.sessions)[number], kind: AttentionKind) => {
-    if (session.id !== sessionState.activeId) sessionState.markAttention(session.id, kind);
-    void notifySession(session, kind, preferences.locale);
-  };
-
-  const selectBackend = async (profile: BackendProfile) => {
-    if (profile.kind === 'remote') {
-      try {
-        const health = await backends.test(profile);
-        if (!profile.instanceId || profile.instanceId !== health.instanceId) {
-          setConfirm({ kind: 'backend', profile, instanceId: health.instanceId });
-          return;
-        }
-        if (profile.capabilities.join('\0') !== health.capabilities.join('\0')) {
-          await backends.save(profile);
-        }
-      } catch {
-        await backends.select(profile.id);
-        return;
-      }
+  const selectBackend = async (profileId: string) => {
+    const outcome = await backends.select(profileId);
+    if (outcome.type === 'identityConfirmationRequired') {
+      setConfirm({ kind: 'backend', challengeId: outcome.challengeId, observedInstanceId: outcome.observedInstanceId });
     }
-    await backends.select(profile.id);
   };
 
   const confirmTitle = confirm?.kind === 'project' ? t('remove') : confirm?.kind === 'backend' ? t('confirm') : t('closeTitle');
@@ -215,7 +196,7 @@ export function App() {
                     className="text-xs"
                     disabled={imeComposing}
                     title={imeComposing ? t('finishComposition') : undefined}
-                    onSelect={() => void selectBackend(profile)}
+                    onSelect={() => void selectBackend(profile.id)}
                   >
                     <Check className={profile.id === backends.active.id ? '' : 'opacity-0'} />
                     <span className="min-w-0 flex-1 truncate">{profile.kind === 'local' ? t('localBackend') : profile.name}</span>
@@ -279,10 +260,11 @@ export function App() {
           />
           <WorkspaceShell
             backendAddress={backendAddress}
+            backendKey={backendKey}
             sessions={sessionState.sessions}
             active={sessionState.active}
             activeId={sessionState.activeId}
-            terminalFocusRequest={terminalFocusRequest.backendKey === backendKey ? terminalFocusRequest : { sessionId: null, sequence: terminalFocusRequest.sequence }}
+            terminalFocusRequest={{ sessionId: sessionState.focusRequest.sessionId, sequence: sessionState.focusRequest.revision }}
             attention={sessionState.attention}
             terminalFontSize={preferences.terminalFontSize}
             detailsOpen={detailsOpen}
@@ -290,9 +272,9 @@ export function App() {
             workspaceEnabled={workspaceSupported}
             locale={preferences.locale}
             t={t}
-            onSelect={selectSessionForInput}
+            onSelect={sessionState.select}
             onStatus={handleSessionStatus}
-            onAttention={handleSessionAttention}
+            onAttention={sessionState.handleAttention}
             onNew={openGeneralSession}
             onDetails={() => setDetailsOpen(value => !value)}
             onRestart={() => sessionState.active && void sessionApi.restartSession(backendAddress, sessionState.active.id)}
@@ -351,13 +333,20 @@ export function App() {
         cancelLabel={t('cancel')}
         destructive
         onOpenChange={open => {
-          if (!open) setConfirm(null);
+          if (!open) {
+            if (confirm?.kind === 'backend' && acceptedBackendChallenge.current !== confirm.challengeId) {
+              void backends.cancelIdentity(confirm.challengeId);
+            }
+            acceptedBackendChallenge.current = null;
+            setConfirm(null);
+          }
         }}
         onConfirm={() => {
           if (confirm?.kind === 'session' && sessionState.active) void sessionState.close(sessionState.active.id);
           if (confirm?.kind === 'project') void sessionApi.deleteProject(backendAddress, confirm.project.id).then(workspaces.load);
           if (confirm?.kind === 'backend') {
-            void backends.save(confirm.profile, confirm.instanceId).then(() => backends.select(confirm.profile.id));
+            acceptedBackendChallenge.current = confirm.challengeId;
+            void backends.confirmIdentity(confirm.challengeId);
           }
         }}
       />

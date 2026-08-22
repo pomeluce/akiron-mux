@@ -3,7 +3,8 @@ pub mod form;
 use super::super::theme;
 use super::super::widgets::shared::{clear_popup_area, render_confirm_popup as shared_confirm, render_message_popup as shared_msg};
 use super::TabContent;
-use crate::core::codex_catalog::{catalog_status, default_catalog_path, model_entry, write_catalog};
+use crate::core::agent_configuration::AgentConfiguration;
+use crate::core::codex_catalog::{catalog_status, default_catalog_path, model_entry};
 use crate::core::config::ConfigManager;
 use crate::core::models::{validate_codex_model, validate_profile, validate_provider, AppType, CodexCatalog, CodexModel, Profile, Provider, OFFICIAL_CODEX_PROVIDER_ID};
 use crate::tui::lang;
@@ -92,8 +93,9 @@ fn sort_providers(app: AppType, providers: &mut [Provider]) {
 
 impl ProvidersTab {
     pub fn new(mgr: Rc<ConfigManager>, app: AppType) -> Self {
-        crate::core::sync::sync_active_from_settings(&mgr);
-        crate::core::sync::sync_codex_active_from_config(&mgr);
+        if let Err(error) = AgentConfiguration::new(&mgr).reconcile() {
+            tracing::warn!("Failed to reconcile Agent configuration: {error:#}");
+        }
 
         let mut providers = mgr.list_providers_for(app).unwrap_or_default();
         sort_providers(app, &mut providers);
@@ -299,30 +301,12 @@ impl ProvidersTab {
                 return;
             }
         }
-        let apply_active_codex = self.app == AppType::Codex && self.active_provider == pr.id;
-        if let Err(e) = self.mgr.db().insert_provider(&pr, self.app.as_str()) {
+        if let Err(e) = AgentConfiguration::new(&self.mgr).save_provider(self.app, &pr) {
             self.message = Some(lang::pick_owned(format!("Failed to save provider: {}", e), format!("保存供应商失败：{}", e)));
             return;
         }
         self.provider_form = None;
         self.refresh_providers();
-        if self.app == AppType::Codex {
-            self.rebuild_catalog_if_present();
-        }
-        if apply_active_codex {
-            let model = if self.active_codex_model.is_empty() {
-                None
-            } else {
-                Some(self.active_codex_model.as_str())
-            };
-            if let Err(error) = crate::core::switcher::switch_codex_model(&self.mgr, &pr.id, model, None, None) {
-                self.message = Some(lang::pick_owned(
-                    format!("Provider saved, but applying it to Codex failed: {}", error),
-                    format!("供应商已保存，但应用到 Codex 失败：{}", error),
-                ));
-                return;
-            }
-        }
         self.status_message = Some(format!("Provider '{}' saved", pr.name));
     }
 
@@ -335,38 +319,11 @@ impl ProvidersTab {
             return;
         }
         let provider_id = prov.id.clone();
-        if self.app == AppType::Codex && self.active_provider == provider_id {
-            self.message = Some(lang::pick_owned(
-                "Switch to another Codex provider before deleting the active provider".into(),
-                "请先切换到其他 Codex 供应商，再删除当前供应商".into(),
-            ));
-            return;
-        }
-        if self.app == AppType::Codex {
-            if let Err(e) = crate::core::switcher::remove_codex_provider(&self.mgr, &provider_id, None) {
-                self.message = Some(lang::pick_owned(
-                    format!("Failed to update Codex config.toml: {}", e),
-                    format!("更新 Codex config.toml 失败：{}", e),
-                ));
-                return;
-            }
-        }
-        if let Err(e) = self.mgr.db().delete_provider(&provider_id, self.app.as_str()) {
+        if let Err(e) = AgentConfiguration::new(&self.mgr).delete_provider(self.app, &provider_id) {
             self.message = Some(lang::pick_owned(format!("Failed to delete provider: {}", e), format!("删除供应商失败：{}", e)));
             return;
         }
-        if self.active_provider == provider_id {
-            self.active_provider.clear();
-            self.active_profile.clear();
-            let _ = self.mgr.set_setting(self.app.active_provider_key(), "");
-            if self.app == AppType::Claude {
-                let _ = self.mgr.set_setting("active_profile", "");
-            }
-        }
         self.refresh_providers();
-        if self.app == AppType::Codex {
-            self.rebuild_catalog_if_present();
-        }
         self.status_message = Some(format!("Provider '{}' deleted", provider_id));
     }
 
@@ -558,21 +515,12 @@ impl ProvidersTab {
             self.message = Some(localized_error(&error));
             return;
         }
-        if let Err(error) = self.mgr.db().insert_codex_model(&provider_id, &model) {
+        if let Err(error) = AgentConfiguration::new(&self.mgr).save_codex_model(&provider_id, &model) {
             self.message = Some(format!("Failed to save model: {}", error));
             return;
         }
         self.codex_model_form = None;
         self.refresh_providers();
-        self.rebuild_catalog_if_present();
-        if self.active_provider == provider_id && self.active_codex_model == model.slug {
-            if let Err(error) = crate::core::switcher::switch_codex_model(&self.mgr, &provider_id, Some(&model.slug), None, None) {
-                self.message = Some(lang::pick_owned(
-                    format!("Model saved, but applying it to Codex failed: {}", error),
-                    format!("模型已保存，但应用到 Codex 失败：{}", error),
-                ));
-            }
-        }
         self.status_message = Some(format!("Model '{}' saved", model.display_name));
     }
 
@@ -581,31 +529,12 @@ impl ProvidersTab {
             return;
         };
         let provider_id = self.selected_provider().map(|provider| provider.id.clone()).unwrap_or_default();
-        if self.active_provider == provider_id && self.active_codex_model == model.slug {
-            self.message = Some(lang::pick_owned(
-                "Switch to another Codex model before deleting the active model".into(),
-                "请先切换到其他 Codex 模型，再删除当前模型".into(),
-            ));
-            return;
-        }
-        if let Err(error) = self.mgr.db().delete_codex_model(&provider_id, &model.slug) {
+        if let Err(error) = AgentConfiguration::new(&self.mgr).delete_codex_model(&provider_id, &model.slug) {
             self.message = Some(format!("Failed to delete model: {}", error));
             return;
         }
         self.refresh_providers();
-        self.rebuild_catalog_if_present();
         self.status_message = Some(format!("Model '{}' deleted", model.slug));
-    }
-
-    fn rebuild_catalog_if_present(&mut self) {
-        let path = default_catalog_path();
-        if !path.exists() {
-            return;
-        }
-        let result = self.mgr.list_providers_for(AppType::Codex).and_then(|providers| write_catalog(&path, &providers));
-        if let Err(error) = result {
-            self.message = Some(format!("Failed to rebuild models.json: {}", error));
-        }
     }
 
     fn show_catalog_status(&mut self) {
@@ -734,9 +663,9 @@ impl ProvidersTab {
             ));
             return;
         }
-        if let Err(e) = self.mgr.db().insert_profile(&form.prov_id, &pr) {
+        if let Err(e) = AgentConfiguration::new(&self.mgr).save_profile(&form.prov_id, &pr) {
             self.message = Some(lang::pick_owned(format!("Failed to save profile: {}", e), format!("保存模型配置失败：{}", e)));
-            tracing::error!("Failed to insert user profile: {}", e);
+            tracing::error!("Failed to save user profile: {}", e);
             return;
         }
         self.edit_form = None;
@@ -755,13 +684,13 @@ impl ProvidersTab {
                 .filter(|provider| provider.codex_catalog == CodexCatalog::Custom)
                 .and_then(|_| self.selected_codex_model())
                 .map(|model| model.slug.clone());
-            match crate::core::switcher::switch_codex_model(&self.mgr, &prov_id, model_slug.as_deref(), None, None) {
+            match AgentConfiguration::new(&self.mgr).apply_codex_model(&prov_id, model_slug.as_deref()) {
                 Ok(_) => {
                     self.active_provider = prov_id.clone();
                     self.active_codex_model = model_slug.unwrap_or_default();
                     self.status_message = Some(format!("Codex switched to '{}'", self.active_context()));
                 }
-                Err(e) => self.message = Some(localized_error(&e)),
+                Err(e) => self.message = Some(lang::pick_owned(format!("Error: {}", e), format!("错误：{}", e))),
             }
             return;
         }
@@ -774,19 +703,13 @@ impl ProvidersTab {
         } else {
             crate::core::models::SwitchMode::Local
         };
-        if let Err(e) = crate::core::switcher::switch_profile(&self.mgr, &prov_id, &prof_id, mode, None) {
-            self.message = Some(localized_error(&e));
+        if let Err(e) = AgentConfiguration::new(&self.mgr).apply_claude_profile(&prov_id, &prof_id, mode) {
+            self.message = Some(lang::pick_owned(format!("Error: {}", e), format!("错误：{}", e)));
             return;
         }
         self.active_provider = prov_id;
         self.active_profile = prof_id;
         self.status_message = Some(format!("Claude switched to '{}/{}'", self.active_provider, self.active_profile));
-        if let Err(e) = self.mgr.set_setting("active_provider", &self.active_provider) {
-            tracing::error!("Failed to save active_provider: {}", e);
-        }
-        if let Err(e) = self.mgr.set_setting("active_profile", &self.active_profile) {
-            tracing::error!("Failed to save active_profile: {}", e);
-        }
     }
 
     fn do_delete(&mut self) {
@@ -800,14 +723,10 @@ impl ProvidersTab {
             let provider_id = self.selected_provider().map(|provider| provider.id.clone()).unwrap_or_default();
             (provider_id, prof.id.clone())
         };
-        if let Err(e) = self.mgr.db().delete_profile(&provider_id, &prof_id) {
+        if let Err(e) = AgentConfiguration::new(&self.mgr).delete_profile(&provider_id, &prof_id) {
             self.message = Some(lang::pick_owned(format!("Failed to delete profile: {}", e), format!("删除模型配置失败：{}", e)));
             tracing::error!("Failed to delete user profile: {}", e);
             return;
-        }
-        if self.active_provider == provider_id && self.active_profile == prof_id {
-            self.active_profile.clear();
-            let _ = self.mgr.set_setting("active_profile", "");
         }
         self.refresh_providers();
         self.status_message = Some(format!("Profile '{}' deleted", prof_id));

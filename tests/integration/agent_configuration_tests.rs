@@ -1,9 +1,27 @@
+use ccswitch::core::agent_configuration::{AgentConfigPaths, AgentConfiguration};
 use ccswitch::core::config::ConfigManager;
-use ccswitch::core::models::{CodexCatalog, CodexModel, Provider, Source, SwitchMode, OFFICIAL_CODEX_PROVIDER_ID};
-use ccswitch::core::switcher::{remove_codex_provider, switch_codex_model, switch_codex_provider, switch_profile};
+use ccswitch::core::models::{AppType, CodexCatalog, CodexModel, Provider, Source, SwitchMode, OFFICIAL_CODEX_PROVIDER_ID};
 use ccswitch::db::Db;
 use std::fs;
 use tempfile::tempdir;
+
+fn claude_configuration<'a>(mgr: &'a ConfigManager, settings_path: &std::path::Path) -> AgentConfiguration<'a> {
+    AgentConfiguration::with_paths(
+        mgr,
+        AgentConfigPaths::new(
+            settings_path.to_path_buf(),
+            settings_path.with_file_name("unused-config.toml"),
+            settings_path.with_file_name("unused-auth.json"),
+        ),
+    )
+}
+
+fn codex_configuration<'a>(mgr: &'a ConfigManager, config_path: &std::path::Path, auth_path: &std::path::Path) -> AgentConfiguration<'a> {
+    AgentConfiguration::with_paths(
+        mgr,
+        AgentConfigPaths::new(config_path.with_file_name("unused-settings.json"), config_path.to_path_buf(), auth_path.to_path_buf()),
+    )
+}
 
 #[test]
 fn test_switch_local_writes_settings_json() {
@@ -43,7 +61,7 @@ default = true
     )
     .unwrap();
     let mgr = ConfigManager::new(&db_path, Some(&defaults_path)).unwrap();
-    let config = switch_profile(&mgr, "p1", "prof1", SwitchMode::Local, Some(&settings_path)).unwrap();
+    let config = claude_configuration(&mgr, &settings_path).apply_claude_profile("p1", "prof1", SwitchMode::Local).unwrap();
 
     assert_eq!(config.opus, "opus-model");
     assert_eq!(config.sonnet, "sonnet-model");
@@ -108,7 +126,9 @@ fn custom_codex_model_writes_aggregated_catalog_and_model_config() {
     let mgr = ConfigManager::new(&db_path, Some(&defaults_path)).unwrap();
     let config_path = dir.path().join("codex/config.toml");
     let auth_path = dir.path().join("codex/auth.json");
-    switch_codex_model(&mgr, &provider.id, Some(&model.slug), Some(&config_path), Some(&auth_path)).unwrap();
+    codex_configuration(&mgr, &config_path, &auth_path)
+        .apply_codex_model(&provider.id, Some(&model.slug))
+        .unwrap();
 
     let config: toml::Value = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     assert_eq!(config["model"].as_str(), Some("third-party-coder"));
@@ -172,8 +192,9 @@ fn switching_from_custom_to_builtin_removes_managed_model_fields() {
     let mgr = ConfigManager::new(&db_path, Some(&defaults_path)).unwrap();
     let config_path = dir.path().join("codex/config.toml");
     let auth_path = dir.path().join("codex/auth.json");
-    switch_codex_model(&mgr, "custom", Some("custom-coder"), Some(&config_path), Some(&auth_path)).unwrap();
-    switch_codex_model(&mgr, "builtin", None, Some(&config_path), Some(&auth_path)).unwrap();
+    let configuration = codex_configuration(&mgr, &config_path, &auth_path);
+    configuration.apply_codex_model("custom", Some("custom-coder")).unwrap();
+    configuration.apply_codex_model("builtin", None).unwrap();
     let config: toml::Value = toml::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
     assert!(config.get("model_catalog_json").is_none());
     assert!(config.get("model").is_none());
@@ -209,7 +230,8 @@ fn switching_between_official_and_third_party_codex_preserves_separate_auth_file
     fs::write(&config_path, "model_provider = \"openai\"\nmodel = \"gpt-5\"\n").unwrap();
     fs::write(&auth_path, official_auth).unwrap();
 
-    switch_codex_provider(&mgr, "third-party", Some(&config_path), Some(&auth_path)).unwrap();
+    let configuration = codex_configuration(&mgr, &config_path, &auth_path);
+    configuration.apply_codex_provider("third-party").unwrap();
 
     let third_party_config: toml::Value = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     assert_eq!(third_party_config["model_provider"].as_str(), Some("akmux"));
@@ -218,7 +240,7 @@ fn switching_between_official_and_third_party_codex_preserves_separate_auth_file
     let third_party_auth: serde_json::Value = serde_json::from_str(&fs::read_to_string(&auth_path).unwrap()).unwrap();
     assert_eq!(third_party_auth["OPENAI_API_KEY"], "sk-third-party");
 
-    switch_codex_provider(&mgr, OFFICIAL_CODEX_PROVIDER_ID, Some(&config_path), Some(&auth_path)).unwrap();
+    configuration.apply_codex_provider(OFFICIAL_CODEX_PROVIDER_ID).unwrap();
 
     let official_config: toml::Value = toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     assert_eq!(official_config["model_provider"].as_str(), Some("akmux"));
@@ -262,7 +284,9 @@ subagent = "subagent"
     fs::write(&settings_path, "{ invalid json").unwrap();
     let mgr = ConfigManager::new(&dir.path().join("ccswitch.db"), Some(&defaults_path)).unwrap();
 
-    let error = switch_profile(&mgr, "p1", "prof1", SwitchMode::Local, Some(&settings_path)).unwrap_err();
+    let error = claude_configuration(&mgr, &settings_path)
+        .apply_claude_profile("p1", "prof1", SwitchMode::Local)
+        .unwrap_err();
     assert!(error.to_string().contains("Failed to parse Claude settings.json"));
     assert_eq!(fs::read_to_string(&settings_path).unwrap(), "{ invalid json");
 }
@@ -296,7 +320,7 @@ subagent = "subagent-model"
     let settings_path = dir.path().join("settings.json");
 
     let mgr = ConfigManager::new(&db_path, Some(&defaults_path)).unwrap();
-    let config = switch_profile(&mgr, "p1", "prof1", SwitchMode::Proxy, Some(&settings_path)).unwrap();
+    let config = claude_configuration(&mgr, &settings_path).apply_claude_profile("p1", "prof1", SwitchMode::Proxy).unwrap();
 
     assert_eq!(config.base_url, "http://127.0.0.1:15721");
     assert_eq!(mgr.get_setting("active_provider"), Some("p1".into()));
@@ -367,7 +391,8 @@ source = "legacy-provider"
     .unwrap();
     fs::write(&auth_path, r#"{"other":"preserved"}"#).unwrap();
 
-    switch_codex_provider(&mgr, "codex-proxy", Some(&config_path), Some(&auth_path)).unwrap();
+    let configuration = codex_configuration(&mgr, &config_path, &auth_path);
+    configuration.apply_codex_provider("codex-proxy").unwrap();
 
     let config_text = fs::read_to_string(&config_path).unwrap();
     assert!(config_text.contains("# keep this comment"));
@@ -398,19 +423,30 @@ source = "legacy-provider"
     }
     assert_eq!(mgr.get_setting("active_codex_provider"), Some("codex-proxy".into()));
 
-    remove_codex_provider(&mgr, "codex-proxy", Some(&config_path)).unwrap();
-    let removed_text = fs::read_to_string(&config_path).unwrap();
-    let removed: toml::Value = toml::from_str(&removed_text).unwrap();
-    assert_eq!(removed["model_provider"].as_str(), Some("akmux"));
-    assert_eq!(removed["model_providers"]["akmux"]["base_url"].as_str(), Some("https://codex.example.com/v1"));
-    assert_eq!(removed["model_providers"]["codex-proxy"]["base_url"].as_str(), Some("https://legacy.example.com/v1"));
-    assert_eq!(removed["model_providers"]["existing"]["name"].as_str(), Some("Existing"));
-    assert!(removed.get("akmux").and_then(|item| item.get("last_switch")).is_none());
-    assert_eq!(mgr.get_setting("active_codex_provider"), Some(String::new()));
+    let error = configuration.delete_provider(AppType::Codex, "codex-proxy").unwrap_err();
+    assert!(error.to_string().contains("Cannot delete active provider"));
+    configuration.apply_codex_provider(OFFICIAL_CODEX_PROVIDER_ID).unwrap();
+    configuration.delete_provider(AppType::Codex, "codex-proxy").unwrap();
+    assert!(mgr.find_provider_for(AppType::Codex, "codex-proxy").unwrap().is_none());
 
     let new_config_path = dir.path().join("new/config.toml");
     let new_auth_path = dir.path().join("new/auth.json");
-    switch_codex_provider(&mgr, "codex-proxy", Some(&new_config_path), Some(&new_auth_path)).unwrap();
+    configuration
+        .save_provider(
+            AppType::Codex,
+            &Provider {
+                id: "codex-proxy".into(),
+                name: "Codex Proxy".into(),
+                api_url: "https://codex.example.com/v1".into(),
+                api_key: "sk-codex".into(),
+                codex_catalog: Default::default(),
+                profiles: vec![],
+                models: vec![],
+                source: Source::User,
+            },
+        )
+        .unwrap();
+    codex_configuration(&mgr, &new_config_path, &new_auth_path).apply_codex_provider("codex-proxy").unwrap();
     assert!(new_config_path.exists());
     assert!(new_auth_path.exists());
     let new_config: toml::Value = toml::from_str(&fs::read_to_string(&new_config_path).unwrap()).unwrap();
@@ -424,7 +460,9 @@ source = "legacy-provider"
     let original_config = "model = \"preserved\"\n";
     fs::write(&guarded_config_path, original_config).unwrap();
     fs::write(&corrupt_auth_path, "{ invalid json").unwrap();
-    switch_codex_provider(&mgr, "codex-proxy", Some(&guarded_config_path), Some(&corrupt_auth_path)).unwrap();
+    codex_configuration(&mgr, &guarded_config_path, &corrupt_auth_path)
+        .apply_codex_provider("codex-proxy")
+        .unwrap();
     assert_eq!(fs::read_to_string(guarded_dir.join("auth_openai.json")).unwrap(), "{ invalid json");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&corrupt_auth_path).unwrap()).unwrap()["OPENAI_API_KEY"],
@@ -434,6 +472,118 @@ source = "legacy-provider"
     let invalid_table_path = dir.path().join("invalid-table.toml");
     let invalid_table = "model_providers = \"do not overwrite\"\n";
     fs::write(&invalid_table_path, invalid_table).unwrap();
-    assert!(switch_codex_provider(&mgr, "codex-proxy", Some(&invalid_table_path), Some(&new_auth_path),).is_err());
+    assert!(codex_configuration(&mgr, &invalid_table_path, &new_auth_path).apply_codex_provider("codex-proxy").is_err());
     assert_eq!(fs::read_to_string(&invalid_table_path).unwrap(), invalid_table);
+}
+
+fn user_claude_provider() -> Provider {
+    Provider {
+        id: "user-provider".into(),
+        name: "User Provider".into(),
+        api_url: "https://api.example.com".into(),
+        api_key: "sk-user".into(),
+        codex_catalog: Default::default(),
+        profiles: vec![],
+        models: vec![],
+        source: Source::User,
+    }
+}
+
+fn user_claude_profile(sonnet: &str) -> ccswitch::core::models::Profile {
+    ccswitch::core::models::Profile {
+        id: "user-profile".into(),
+        name: "User Profile".into(),
+        opus: "opus-model".into(),
+        sonnet: sonnet.into(),
+        haiku: "haiku-model".into(),
+        subagent: "subagent-model".into(),
+        default: false,
+        source: Source::User,
+    }
+}
+
+#[test]
+fn active_profile_cannot_be_deleted() {
+    let directory = tempdir().unwrap();
+    let mgr = ConfigManager::new(&directory.path().join("akmux.db"), Some(&directory.path().join("missing-defaults.toml"))).unwrap();
+    let settings_path = directory.path().join("claude/settings.json");
+    let configuration = claude_configuration(&mgr, &settings_path);
+    configuration.save_provider(AppType::Claude, &user_claude_provider()).unwrap();
+    configuration.save_profile("user-provider", &user_claude_profile("sonnet-before")).unwrap();
+    configuration.apply_claude_profile("user-provider", "user-profile", SwitchMode::Local).unwrap();
+
+    let error = configuration.delete_profile("user-provider", "user-profile").unwrap_err();
+
+    assert!(error.to_string().contains("Cannot delete active model profile"));
+    assert!(mgr.find_profile("user-provider", "user-profile").unwrap().is_some());
+}
+
+#[test]
+fn editing_active_profile_reapplies_native_configuration() {
+    let directory = tempdir().unwrap();
+    let mgr = ConfigManager::new(&directory.path().join("akmux.db"), Some(&directory.path().join("missing-defaults.toml"))).unwrap();
+    let settings_path = directory.path().join("claude/settings.json");
+    let configuration = claude_configuration(&mgr, &settings_path);
+    configuration.save_provider(AppType::Claude, &user_claude_provider()).unwrap();
+    configuration.save_profile("user-provider", &user_claude_profile("sonnet-before")).unwrap();
+    configuration.apply_claude_profile("user-provider", "user-profile", SwitchMode::Local).unwrap();
+
+    configuration.save_profile("user-provider", &user_claude_profile("sonnet-after")).unwrap();
+
+    let settings: serde_json::Value = serde_json::from_str(&fs::read_to_string(settings_path).unwrap()).unwrap();
+    assert_eq!(settings["env"]["ANTHROPIC_MODEL"], "sonnet-after");
+    assert_eq!(mgr.find_profile("user-provider", "user-profile").unwrap().unwrap().1.sonnet, "sonnet-after");
+}
+
+#[test]
+fn failed_active_profile_write_rolls_back_catalog_change() {
+    let directory = tempdir().unwrap();
+    let mgr = ConfigManager::new(&directory.path().join("akmux.db"), Some(&directory.path().join("missing-defaults.toml"))).unwrap();
+    let settings_path = directory.path().join("claude/settings.json");
+    let configuration = claude_configuration(&mgr, &settings_path);
+    configuration.save_provider(AppType::Claude, &user_claude_provider()).unwrap();
+    configuration.save_profile("user-provider", &user_claude_profile("sonnet-before")).unwrap();
+    configuration.apply_claude_profile("user-provider", "user-profile", SwitchMode::Local).unwrap();
+    fs::write(&settings_path, "{ invalid json").unwrap();
+
+    let error = configuration.save_profile("user-provider", &user_claude_profile("sonnet-after")).unwrap_err();
+
+    assert!(error.to_string().contains("Failed to parse Claude settings.json"));
+    assert_eq!(mgr.find_profile("user-provider", "user-profile").unwrap().unwrap().1.sonnet, "sonnet-before");
+    assert_eq!(fs::read_to_string(settings_path).unwrap(), "{ invalid json");
+}
+
+#[test]
+fn reconcile_rebuilds_active_projection_from_native_configuration() {
+    let directory = tempdir().unwrap();
+    let mgr = ConfigManager::new(&directory.path().join("akmux.db"), Some(&directory.path().join("missing-defaults.toml"))).unwrap();
+    let settings_path = directory.path().join("claude/settings.json");
+    let configuration = claude_configuration(&mgr, &settings_path);
+    configuration.save_provider(AppType::Claude, &user_claude_provider()).unwrap();
+    configuration.save_profile("user-provider", &user_claude_profile("sonnet-model")).unwrap();
+    configuration.apply_claude_profile("user-provider", "user-profile", SwitchMode::Proxy).unwrap();
+    mgr.set_setting("active_provider", "stale-provider").unwrap();
+    mgr.set_setting("active_profile", "stale-profile").unwrap();
+    mgr.set_setting("proxy_mode", "false").unwrap();
+
+    configuration.reconcile().unwrap();
+
+    assert_eq!(mgr.get_setting("active_provider").as_deref(), Some("user-provider"));
+    assert_eq!(mgr.get_setting("active_profile").as_deref(), Some("user-profile"));
+    assert_eq!(mgr.get_setting("proxy_mode").as_deref(), Some("true"));
+}
+
+#[test]
+fn reconcile_keeps_agents_independent_when_one_native_file_is_invalid() {
+    let directory = tempdir().unwrap();
+    let mgr = ConfigManager::new(&directory.path().join("akmux.db"), Some(&directory.path().join("missing-defaults.toml"))).unwrap();
+    let settings_path = directory.path().join("settings.json");
+    fs::write(&settings_path, "{ invalid json").unwrap();
+    mgr.set_setting("active_codex_provider", "stale-provider").unwrap();
+    let configuration = claude_configuration(&mgr, &settings_path);
+
+    let error = configuration.reconcile().unwrap_err();
+
+    assert!(error.to_string().contains("Claude"));
+    assert_eq!(mgr.get_setting("active_codex_provider").as_deref(), Some(OFFICIAL_CODEX_PROVIDER_ID));
 }

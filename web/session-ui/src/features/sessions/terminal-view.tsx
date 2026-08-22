@@ -3,16 +3,16 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Terminal } from '@xterm/xterm';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { useEffect, useRef, useState } from 'react';
-import { sessionApi, websocketUrl } from '@/shared/lib/api';
-import { currentDesktopBackend } from '@/features/backends/desktop-backend';
 import { desktopShell } from '@/features/desktop/desktop-shell';
 import type { MessageKey } from '@/shared/lib/i18n';
 import { Button } from '@/shared/ui/button';
 import { cn } from '@/shared/lib/utils';
 import type { AttentionKind, SessionInfo } from '@/types';
+import { TerminalConnection, type TerminalConnectionPhase, type TerminalLeaseState } from './terminal-connection';
 
 interface TerminalViewProps {
   backendAddress: string;
+  backendKey: string;
   session: SessionInfo;
   active: boolean;
   focusRequest: number;
@@ -21,13 +21,6 @@ interface TerminalViewProps {
   onStatus: (session: SessionInfo) => void;
   onAttention: (session: SessionInfo, kind: AttentionKind) => void;
 }
-
-interface LeaseState {
-  version: number;
-  controller_device_name?: string;
-}
-
-const ATTENTION_MAX_DELIVERY_AGE_MS = 30_000;
 
 function openExternalUrl(value: string) {
   let url: URL;
@@ -44,16 +37,17 @@ function openExternalUrl(value: string) {
   window.open(url.toString(), '_blank', 'noopener,noreferrer');
 }
 
-export function TerminalView({ backendAddress, session, active, focusRequest, fontSize, t, onStatus, onAttention }: TerminalViewProps) {
+export function TerminalView({ backendAddress, backendKey, session, active, focusRequest, fontSize, t, onStatus, onAttention }: TerminalViewProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const statusRef = useRef(onStatus);
   const attentionRef = useRef(onAttention);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const syncingViewportRef = useRef(false);
-  const socketRef = useRef<WebSocket | null>(null);
-  const [lease, setLease] = useState<LeaseState | null>(null);
-  const [canWrite, setCanWrite] = useState(true);
+  const connectionRef = useRef<TerminalConnection | null>(null);
+  const [lease, setLease] = useState<TerminalLeaseState | null>(null);
+  const [canWrite, setCanWrite] = useState(false);
+  const [connectionPhase, setConnectionPhase] = useState<TerminalConnectionPhase>('connecting');
 
   statusRef.current = onStatus;
   attentionRef.current = onAttention;
@@ -68,8 +62,7 @@ export function TerminalView({ backendAddress, session, active, focusRequest, fo
         if (terminalRef.current !== terminal || fitRef.current !== fit) return;
         fit.fit();
         // xterm 6 can leave its custom viewport stale when a visibility-hidden terminal
-        // becomes active. A real one-row resize pulse rebuilds the scroll model, matching
-        // the redraw that previously happened only after the sidebar was dragged.
+        // becomes active. A real one-row resize pulse rebuilds the scroll model.
         const { cols, rows } = terminal;
         const viewportY = terminal.buffer.active.viewportY;
         syncingViewportRef.current = true;
@@ -121,124 +114,64 @@ export function TerminalView({ backendAddress, session, active, focusRequest, fo
     terminal.loadAddon(new WebLinksAddon((_event, url) => openExternalUrl(url)));
     terminal.open(host);
     requestAnimationFrame(() => fit.fit());
-    let socket: WebSocket | null = null;
-    let reconnectTimer: number | null = null;
-    let disposed = false;
-    let lastResizeAt = 0;
     let terminalControlTail = '';
     let terminalAttentionReady = false;
-    let serverClockOffsetMs: number | null = null;
-    let lastAttention: { kind: AttentionKind; at: number } | null = null;
-    let reconnectAttempts = 0;
-    const recoveryKey = `akmux.lease-recovery:${backendAddress}:${session.id}`;
+    let lastResizeAt = 0;
 
     const sendResize = (rows = terminal.rows, cols = terminal.cols) => {
       lastResizeAt = performance.now();
-      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', rows, cols }));
+      connectionRef.current?.resize(rows, cols);
     };
-
     const emitAttention = (kind: AttentionKind) => {
-      const now = performance.now();
-      if (lastAttention?.kind === kind && now - lastAttention.at < 2_000) return;
-      lastAttention = { kind, at: now };
       attentionRef.current(session, kind);
     };
-
-    const scheduleReconnect = () => {
-      if (disposed || reconnectTimer !== null) return;
-      const delay = Math.min(1_200 * 2 ** reconnectAttempts, 30_000);
-      reconnectAttempts += 1;
-      reconnectTimer = window.setTimeout(() => void connect(), delay);
-    };
-
-    const connect = async () => {
-      if (disposed) return;
-      const url = new URL(websocketUrl(backendAddress, `/api/sessions/${encodeURIComponent(session.id)}/terminal`));
-      const backend = currentDesktopBackend();
-      if (backend?.kind === 'remote') {
-        try {
-          const ticket = await sessionApi.wsTicket(backendAddress, session.id);
-          url.searchParams.set('ticket', ticket.ticket);
-        } catch {
-          scheduleReconnect();
-          return;
-        }
-      }
-      if (disposed) return;
-      const recoveryCredential = sessionStorage.getItem(recoveryKey);
-      terminalAttentionReady = false;
-      terminalControlTail = '';
-      serverClockOffsetMs = null;
-      socket = new WebSocket(url);
-      socketRef.current = socket;
-      socket.binaryType = 'arraybuffer';
-      socket.addEventListener('open', () => {
-        reconnectTimer = null;
-        reconnectAttempts = 0;
-        if (recoveryCredential) socket?.send(JSON.stringify({ type: 'recover-control', credential: recoveryCredential }));
+    const fitAndResize = () => {
+      fit.fit();
+      sendResize();
+      requestAnimationFrame(() => {
+        if (terminalRef.current !== terminal) return;
         fit.fit();
         sendResize();
-        requestAnimationFrame(() => {
-          fit.fit();
-          sendResize();
-        });
       });
-      socket.addEventListener('message', event => {
-        if (event.data instanceof ArrayBuffer) {
-          const bytes = new Uint8Array(event.data);
+    };
+
+    const connection = new TerminalConnection({
+      backendAddress,
+      backendKey,
+      session,
+      callbacks: {
+        onOutput: (bytes, replay) => {
+          if (replay?.replace) {
+            terminal.reset();
+            terminal.clear();
+          }
           terminal.write(bytes);
           const terminalControls = `${terminalControlTail}${new TextDecoder().decode(bytes)}`;
           terminalControlTail = terminalControls.slice(-3);
-          if (terminalAttentionReady && session.agent === 'codex' && terminalControls.includes('\x1b]9;') && performance.now() - lastResizeAt >= 100) {
+          if (!replay && terminalAttentionReady && session.agent === 'codex' && terminalControls.includes('\x1b]9;') && performance.now() - lastResizeAt >= 100) {
             emitAttention('input');
           }
-          return;
-        }
-        const message = JSON.parse(event.data) as {
-          type: string;
-          session?: SessionInfo;
-          credential?: string;
-          lease?: LeaseState;
-          can_write?: boolean;
-          kind?: AttentionKind;
-          occurred_at_ms?: number;
-          server_time_ms?: number;
-        };
-        if (message.type === 'status' && message.session) {
-          if (typeof message.server_time_ms === 'number' && Number.isFinite(message.server_time_ms)) {
-            serverClockOffsetMs = Date.now() - message.server_time_ms;
-          }
+        },
+        onStatus: next => {
           terminalAttentionReady = true;
-          statusRef.current(message.session);
-        }
-        const attentionAge =
-          message.occurred_at_ms === undefined || serverClockOffsetMs === null
-            ? 0
-            : Date.now() - (message.occurred_at_ms + serverClockOffsetMs);
-        if (
-          message.type === 'attention' &&
-          message.kind &&
-          attentionAge <= ATTENTION_MAX_DELIVERY_AGE_MS
-        ) {
-          emitAttention(message.kind);
-        }
-        if (message.type === 'lease' && message.lease) {
-          setLease(message.lease);
-          setCanWrite(Boolean(message.can_write));
-        }
-        if (message.type === 'lease-recovery' && message.credential) {
-          sessionStorage.setItem(recoveryKey, message.credential);
-          setCanWrite(true);
-        }
-        if (message.type === 'authorization-revoked') sessionStorage.removeItem(recoveryKey);
-      });
-      socket.addEventListener('close', () => {
-        scheduleReconnect();
-      });
-    };
+          statusRef.current(next);
+        },
+        onAttention: emitAttention,
+        onLease: (nextLease, nextCanWrite) => {
+          setLease(nextLease);
+          setCanWrite(nextCanWrite);
+        },
+        onPhase: phase => {
+          setConnectionPhase(phase);
+          if (phase === 'open') fitAndResize();
+        },
+        onProtocolError: message => console.warn(message),
+      },
+    });
+    connectionRef.current = connection;
 
     const dataDisposable = terminal.onData(data => {
-      if (socket?.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data));
+      connection.sendInput(data);
     });
     terminal.attachCustomKeyEventHandler(event => {
       const copySelection = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c' && terminal.hasSelection();
@@ -252,13 +185,11 @@ export function TerminalView({ backendAddress, session, active, focusRequest, fo
     });
     const observer = new ResizeObserver(() => requestAnimationFrame(() => fit.fit()));
     observer.observe(host);
-    void connect();
+    connection.start();
 
     return () => {
-      disposed = true;
-      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
-      socket?.close();
-      socketRef.current = null;
+      connection.dispose();
+      connectionRef.current = null;
       observer.disconnect();
       dataDisposable.dispose();
       resizeDisposable.dispose();
@@ -266,15 +197,10 @@ export function TerminalView({ backendAddress, session, active, focusRequest, fo
       fitRef.current = null;
       terminal.dispose();
     };
-  }, [backendAddress, session.id]);
-
-  const takeControl = () => {
-    if (!lease || socketRef.current?.readyState !== WebSocket.OPEN) return;
-    socketRef.current.send(JSON.stringify({ type: 'take-control', expected_version: lease.version }));
-  };
+  }, [backendAddress, backendKey, session.id]);
 
   return (
-    <div className={cn('terminal-view-shell', !active && 'invisible pointer-events-none')} aria-hidden={!active}>
+    <div className={cn('terminal-view-shell', !active && 'invisible pointer-events-none')} aria-hidden={!active} data-connection-phase={connectionPhase}>
       <div ref={hostRef} className="terminal-host" aria-hidden={!active} />
       {lease && !canWrite && (
         <div className="terminal-lease-banner">
@@ -282,7 +208,7 @@ export function TerminalView({ backendAddress, session, active, focusRequest, fo
             {t('readOnly')}
             {lease.controller_device_name ? ` · ${t('controlledBy')} ${lease.controller_device_name}` : ''}
           </span>
-          <Button size="sm" variant="secondary" onClick={takeControl}>
+          <Button size="sm" variant="secondary" onClick={() => connectionRef.current?.takeControl()}>
             {t('takeControl')}
           </Button>
         </div>

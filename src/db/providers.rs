@@ -1,6 +1,6 @@
 use super::connection::Db;
 use crate::core::models::{CodexModel, Profile, Provider, Source};
-use rusqlite::{params, types::Type};
+use rusqlite::{params, types::Type, Connection, Transaction, TransactionBehavior};
 
 // ── Providers ──
 
@@ -43,14 +43,91 @@ impl Db {
     }
 
     pub fn insert_codex_model(&self, provider_id: &str, model: &CodexModel) -> Result<(), rusqlite::Error> {
-        let efforts = serde_json::to_string(&model.supported_reasoning_efforts).map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
-        let modalities = serde_json::to_string(&model.input_modalities).map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
-        let transaction = self.conn().unchecked_transaction()?;
-        if model.default {
-            transaction.execute("UPDATE codex_models SET is_default=0 WHERE provider_id=?1", params![provider_id])?;
-        }
+        let transaction = Transaction::new_unchecked(self.conn(), TransactionBehavior::Immediate)?;
+        insert_codex_model(&transaction, provider_id, model)?;
+        transaction.commit()
+    }
+
+    pub(crate) fn insert_codex_model_in(&self, transaction: &Transaction<'_>, provider_id: &str, model: &CodexModel) -> Result<(), rusqlite::Error> {
+        insert_codex_model(transaction, provider_id, model)
+    }
+
+    pub(crate) fn clear_codex_model_in(&self, transaction: &Transaction<'_>, provider_id: &str, slug: &str) -> Result<(), rusqlite::Error> {
+        transaction.execute("DELETE FROM codex_models WHERE provider_id=?1 AND slug=?2", params![provider_id, slug])?;
+        Ok(())
+    }
+
+    pub(crate) fn save_provider_in(&self, transaction: &Transaction<'_>, provider: &Provider, app_type: &str) -> Result<(), rusqlite::Error> {
+        let source = provider.source.as_str();
         transaction.execute(
-            "INSERT INTO codex_models
+            "INSERT INTO providers (id, app_type, name, api_url, api_key, codex_catalog, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id, app_type) DO UPDATE SET
+                name=excluded.name, api_url=excluded.api_url,
+                api_key=excluded.api_key, codex_catalog=excluded.codex_catalog,
+                source=excluded.source",
+            params![
+                provider.id,
+                app_type,
+                provider.name,
+                provider.api_url,
+                provider.api_key,
+                provider.codex_catalog.as_str(),
+                source
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn save_profile_in(&self, transaction: &Transaction<'_>, provider_id: &str, profile: &Profile) -> Result<(), rusqlite::Error> {
+        transaction.execute(
+            "INSERT INTO profiles (id, name, provider_id, opus_model, sonnet_model, haiku_model, subagent_model, is_default, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id, provider_id) DO UPDATE SET
+                name=excluded.name, provider_id=excluded.provider_id,
+                opus_model=excluded.opus_model, sonnet_model=excluded.sonnet_model,
+                haiku_model=excluded.haiku_model, subagent_model=excluded.subagent_model,
+                is_default=excluded.is_default, source=excluded.source",
+            params![
+                profile.id,
+                profile.name,
+                provider_id,
+                profile.opus,
+                profile.sonnet,
+                profile.haiku,
+                profile.subagent,
+                profile.default as i32,
+                profile.source.as_str()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_profile_in(&self, transaction: &Transaction<'_>, provider_id: &str, profile_id: &str) -> Result<(), rusqlite::Error> {
+        transaction.execute("DELETE FROM profiles WHERE provider_id = ?1 AND id = ?2", params![provider_id, profile_id])?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_provider_in(&self, transaction: &Transaction<'_>, provider_id: &str, app_type: &str) -> Result<(), rusqlite::Error> {
+        if app_type == "claude" {
+            transaction.execute("DELETE FROM profiles WHERE provider_id = ?1", params![provider_id])?;
+        }
+        if app_type == "codex" {
+            transaction.execute("DELETE FROM codex_models WHERE provider_id = ?1", params![provider_id])?;
+        }
+        transaction.execute("DELETE FROM providers WHERE id = ?1 AND app_type = ?2", params![provider_id, app_type])?;
+        Ok(())
+    }
+}
+
+fn insert_codex_model(connection: &Connection, provider_id: &str, model: &CodexModel) -> Result<(), rusqlite::Error> {
+    let efforts = serde_json::to_string(&model.supported_reasoning_efforts).map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+    let modalities = serde_json::to_string(&model.input_modalities).map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+    if model.default {
+        connection.execute("UPDATE codex_models SET is_default=0 WHERE provider_id=?1", params![provider_id])?;
+    }
+    connection.execute(
+        "INSERT INTO codex_models
              (provider_id, slug, display_name, description, context_window, max_context_window,
               effective_context_window_percent, default_reasoning_effort,
               supported_reasoning_efforts, input_modalities, supports_parallel_tool_calls,
@@ -67,28 +144,29 @@ impl Db {
               support_verbosity=excluded.support_verbosity, default_verbosity=excluded.default_verbosity,
               supports_search_tool=excluded.supports_search_tool, is_default=excluded.is_default,
               source=excluded.source",
-            params![
-                provider_id,
-                model.slug,
-                model.display_name,
-                model.description,
-                model.context_window as i64,
-                model.max_context_window.map(|value| value as i64),
-                model.effective_context_window_percent as i64,
-                model.default_reasoning_effort,
-                efforts,
-                modalities,
-                model.supports_parallel_tool_calls,
-                model.support_verbosity,
-                model.default_verbosity,
-                model.supports_search_tool,
-                model.default,
-                model.source.as_str()
-            ],
-        )?;
-        transaction.commit()
-    }
+        params![
+            provider_id,
+            model.slug,
+            model.display_name,
+            model.description,
+            model.context_window as i64,
+            model.max_context_window.map(|value| value as i64),
+            model.effective_context_window_percent as i64,
+            model.default_reasoning_effort,
+            efforts,
+            modalities,
+            model.supports_parallel_tool_calls,
+            model.support_verbosity,
+            model.default_verbosity,
+            model.supports_search_tool,
+            model.default,
+            model.source.as_str()
+        ],
+    )?;
+    Ok(())
+}
 
+impl Db {
     pub fn get_codex_models(&self, provider_id: &str) -> Result<Vec<CodexModel>, rusqlite::Error> {
         let mut stmt = self.conn().prepare(
             "SELECT slug, display_name, description, context_window, max_context_window,

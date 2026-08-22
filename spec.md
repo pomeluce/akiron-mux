@@ -100,6 +100,11 @@ The existing `session_history` rows index Claude and Codex native history files.
 Opening one in the WebUI creates a Managed Session using the compatible native
 resume command. Native History Sessions are not the source of truth for live
 process state.
+Native History Ingestion uses one typed Agent interface for discovery, revision,
+cleanup, persistence, and progress. Claude and Codex file formats are internal
+adapters. Session and usage revisions are independent. Each changed file and its
+sync index commit atomically; an unreadable or malformed file retains its last
+valid indexed state while database failures stop the ingestion run.
 The session service exposes these records to the WebUI and classifies them
 dynamically. Codex internal child threads identified by `parent_thread_id` are
 hidden from native history and contribute their message and usage totals to the
@@ -167,6 +172,21 @@ Installed clients persist them through a Tauri-native configuration store. Devic
 credentials are stored separately in the operating-system credential store. A
 credential-store failure permits an in-memory connection for the current process
 only and must never fall back to `localStorage` or a plaintext configuration file.
+
+The native Backend Profile Lifecycle is the authority for pairing, Backend
+Instance ID confirmation, capability validation, activation, refresh, and
+revocation ordering. WebView callers submit typed intents and receive typed
+outcomes for identity confirmation, authentication requirements, offline
+selection, and revocation warnings; expected lifecycle states are not encoded in
+error strings. Identity confirmation uses an opaque, single-use native challenge
+that expires after two minutes and is bound to the pending operation.
+
+Profile metadata is replaced atomically. Pairing stores the Device Credential
+before committing metadata and removes the new credential if that commit fails.
+Deletion destroys the local credential before committing metadata removal; a
+metadata failure therefore leaves a profile that requires re-authentication,
+never a silently usable credential. Server-side revocation is best-effort and a
+failure is returned as a typed warning after local deletion completes.
 
 On upgrade, an existing loopback `akironmux-backend-address` value is imported
 into the built-in Local profile. A non-loopback legacy value requires explicit
@@ -470,7 +490,8 @@ Authenticated health and capability discovery returns the backend instance ID,
 application version, API protocol version, capability set, and host metadata
 needed to verify a connection. Adding or editing a Remote profile must pass this
 authenticated connection test before it can be saved. Local profiles may be
-saved while their service is offline.
+saved while their service is offline. Backends that support explicit terminal
+snapshot framing advertise the `terminal-replay-v1` capability.
 
 ### 6.4 WebSocket authentication and protocol
 
@@ -482,7 +503,8 @@ a URL or sent as a WebSocket frame. Reconnection obtains a new ticket.
 Server to browser:
 
 - binary frames: raw PTY output
-- text frames: JSON status events
+- text frames: typed JSON events for `replay`, `status`, `lease`,
+  `lease-recovery`, `attention`, `authorization-revoked`, and `protocol-error`
 
 Browser to server:
 
@@ -493,9 +515,18 @@ Browser to server:
 { "type": "resize", "rows": 30, "cols": 100 }
 ```
 
-On connection, the server first sends the bounded scrollback buffer and current
-status. A slow browser may lose intermediate broadcast frames and must reconnect to
-receive the latest scrollback state.
+On connection, the server sends the current lease first so an eligible writer can
+synchronize the PTY size before output is rendered. It then sends a `replay`
+event with `replace: false`, the bounded scrollback as one binary frame, and the
+current status. The binary frame is present even when the snapshot is empty, so
+the replay marker always applies to exactly one frame.
+
+If a browser falls behind the bounded live-output channel, the server sends a
+fresh `replay` event with `replace: true` followed by the latest scrollback
+snapshot. The client replaces its terminal buffer without reconnecting. Clients
+accept the legacy `reset` event as a replacement marker during minor-version
+compatibility. Unknown event or control types are ignored and logged; malformed
+known controls receive `protocol-error` without terminating the managed session.
 
 ### 6.5 Terminal control lease
 
@@ -594,6 +625,21 @@ client notifications for non-active backends. Switching is blocked while an IME
 composition is active and instructs the user to commit or cancel the composition;
 normal terminal characters have already been streamed and are not replayed.
 
+The Unified Sessions client publishes one snapshot tagged with the selected
+Backend Profile and a monotonically increasing generation. A backend switch
+immediately hides the previous live session list and restores only the target
+profile's persisted active-session hint; the target backend must provide a fresh
+Managed Session list. Results from create, resume, close, and polling requests
+belonging to an older generation are ignored.
+
+Tabs, keyboard cycling, tray actions, creation, and native-history resume use one
+user-selection intent that clears Managed and Native attention, persists the
+selection for that Backend Profile, and focuses the terminal. Restoring a saved
+selection and reconciling a polling response do not request focus. Removing the
+active session through close or process exit selects and focuses its adjacent
+session. Attention freshness and duplicate suppression are Unified Sessions
+policy; platform notification and tray APIs remain client adapters.
+
 Backend reconnect uses exponential backoff capped at 30 seconds. Reconnection
 does not reload the React application or discard xterm scrollback, UI state, or
 an unfinished IME composition. After reconnecting, the client retrieves bounded
@@ -614,6 +660,11 @@ The native material follows AkironMux's resolved light or dark theme rather than
 the Windows system theme, including when the user overrides the application theme.
 Switching the application theme updates both WebUI color tokens and
 `MicaLight`/`MicaDark` or the corresponding Acrylic tint.
+
+The desktop native-appearance layer owns resolved appearance state, platform
+application, and restoration after window events. Windows-specific DWM messages
+and backdrop APIs remain inside its Windows adapter; other platforms use the
+same application seam without compiling Windows implementation details.
 
 The WebView overlay interpolates from an application tint to transparent. The
 dark tint uses a deeper neutral black so increasing transparency does not produce
@@ -926,6 +977,12 @@ each security boundary can be tested and rolled back.
 4. Switching profiles does not stop sessions, does not silently fall back to
    Local, and restores the selected backend's last active session and navigation.
 5. Network reconnect does not reload the GUI or discard terminal/UI state.
+6. Active Remote profile refreshes do not overlap, late results from a previously
+   selected profile are ignored, and identity changes stop automatic refresh
+   until the user explicitly confirms or cancels them.
+7. Switching Backend Profiles never renders a cached live session list from the
+   previous backend, and late session operations cannot mutate the selected
+   backend's Unified Sessions snapshot.
 
 ### 13.5 Android
 

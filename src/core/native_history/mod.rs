@@ -1,23 +1,596 @@
-//! Session and usage data import from Claude Code / Codex CLI JSONL files.
+//! Native History ingestion from Claude Code and Codex JSONL files.
 //!
-//! These functions read JSONL files from the filesystem, parse them, and write
-//! results to the database. Separated from the `db` module to keep the DB
-//! layer focused on CRUD operations.
+//! The public interface owns discovery, revision, cleanup, persistence, and
+//! progress semantics. Claude and Codex file formats remain internal adapters.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
+    thread::JoinHandle,
+};
 
 const MAX_USAGE_TOKENS: i64 = 1_000_000_000_000;
 const CLAUDE_IMPORT_REVISION_KEY: &str = "claude_import_revision";
 const CLAUDE_IMPORT_REVISION: &str = "1";
 const CODEX_IMPORT_REVISION_KEY: &str = "codex_import_revision";
 const CODEX_IMPORT_REVISION: &str = "4";
+const CLAUDE_SESSION_REVISION: &str = "1";
+const CLAUDE_USAGE_REVISION: &str = "1";
+const CODEX_SESSION_REVISION: &str = "4";
+const CODEX_USAGE_REVISION: &str = "4";
+const USAGE_PROGRESS_BATCH_SIZE: usize = 10;
 
 use serde::Deserialize;
 
+use crate::agent::AgentKind;
 use crate::db::connection::Db;
 use crate::db::sessions::SessionRecord;
-use crate::db::usage::{ScanContext, ScanEvent, UsageRecord};
+
+#[derive(Debug, Clone)]
+pub struct IngestionProgress {
+    pub files_done: usize,
+    pub files_total: usize,
+    pub records: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IngestionReport {
+    pub processed: usize,
+    pub changed: usize,
+    pub removed: usize,
+    pub skipped: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug)]
+pub enum UsageScanUpdate {
+    Running(IngestionProgress),
+    Complete(IngestionReport),
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+struct UsageRecord {
+    msg_id: String,
+    model: String,
+    date: String,
+    input: i64,
+    output: i64,
+    cr: i64,
+    cc: i64,
+}
+
+#[derive(Debug, Clone)]
+struct NativeRoots {
+    claude_projects: PathBuf,
+    claude_config: PathBuf,
+    codex_sessions: PathBuf,
+    codex_session_index: PathBuf,
+}
+
+impl NativeRoots {
+    fn system() -> Self {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        let home = PathBuf::from(home);
+        Self {
+            claude_projects: home.join(".claude/projects"),
+            claude_config: home.join(".claude.json"),
+            codex_sessions: home.join(".codex/sessions"),
+            codex_session_index: home.join(".codex/session_index.jsonl"),
+        }
+    }
+}
+
+pub struct NativeHistoryIngestion<'db> {
+    db: &'db Db,
+    roots: NativeRoots,
+}
+
+trait NativeHistoryAdapter: Send {
+    fn agent(&self) -> AgentKind;
+    fn session_root(&self) -> &Path;
+    fn accepts_session_file(&self, path: &Path) -> bool;
+    fn accepts_usage_file(&self, _path: &Path) -> bool {
+        true
+    }
+    fn parse_session(&self, path: &Path) -> anyhow::Result<Option<SessionRecord>>;
+    fn finish_session_scan(&self, db: &Db) -> anyhow::Result<usize>;
+    fn parse_usage(&self, path: &Path, fallback_session_id: &str) -> anyhow::Result<(String, Vec<UsageRecord>)>;
+}
+
+struct ClaudeHistoryAdapter {
+    projects_dir: PathBuf,
+    project_paths: HashMap<String, PathBuf>,
+}
+
+impl ClaudeHistoryAdapter {
+    fn new(roots: &NativeRoots) -> Self {
+        Self {
+            projects_dir: roots.claude_projects.clone(),
+            project_paths: load_claude_project_paths(&roots.claude_config),
+        }
+    }
+}
+
+impl NativeHistoryAdapter for ClaudeHistoryAdapter {
+    fn agent(&self) -> AgentKind {
+        AgentKind::Claude
+    }
+
+    fn session_root(&self) -> &Path {
+        &self.projects_dir
+    }
+
+    fn accepts_session_file(&self, path: &Path) -> bool {
+        !path.file_stem().and_then(|name| name.to_str()).is_some_and(|id| id.starts_with("agent-"))
+    }
+
+    fn parse_session(&self, path: &Path) -> anyhow::Result<Option<SessionRecord>> {
+        parse_session_file(path, &self.projects_dir, &self.project_paths)
+    }
+
+    fn finish_session_scan(&self, _db: &Db) -> anyhow::Result<usize> {
+        Ok(0)
+    }
+
+    fn parse_usage(&self, path: &Path, fallback_session_id: &str) -> anyhow::Result<(String, Vec<UsageRecord>)> {
+        Ok((fallback_session_id.to_string(), parse_claude_usage_file(path, fallback_session_id)?))
+    }
+}
+
+struct CodexHistoryAdapter {
+    sessions_dir: PathBuf,
+    session_index: HashMap<String, String>,
+}
+
+impl CodexHistoryAdapter {
+    fn new(roots: &NativeRoots) -> Self {
+        Self {
+            sessions_dir: roots.codex_sessions.clone(),
+            session_index: load_codex_session_index(&roots.codex_session_index),
+        }
+    }
+}
+
+impl NativeHistoryAdapter for CodexHistoryAdapter {
+    fn agent(&self) -> AgentKind {
+        AgentKind::Codex
+    }
+
+    fn session_root(&self) -> &Path {
+        &self.sessions_dir
+    }
+
+    fn accepts_session_file(&self, _path: &Path) -> bool {
+        true
+    }
+
+    fn parse_session(&self, path: &Path) -> anyhow::Result<Option<SessionRecord>> {
+        parse_codex_session_file(path)
+    }
+
+    fn finish_session_scan(&self, db: &Db) -> anyhow::Result<usize> {
+        apply_codex_session_index(db, &self.session_index).map_err(Into::into)
+    }
+
+    fn parse_usage(&self, path: &Path, fallback_session_id: &str) -> anyhow::Result<(String, Vec<UsageRecord>)> {
+        parse_codex_usage_file(path, fallback_session_id)
+    }
+}
+
+fn adapter(agent: AgentKind, roots: &NativeRoots) -> Box<dyn NativeHistoryAdapter> {
+    match agent {
+        AgentKind::Claude => Box::new(ClaudeHistoryAdapter::new(roots)),
+        AgentKind::Codex => Box::new(CodexHistoryAdapter::new(roots)),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NativeDataset {
+    Sessions,
+    Usage,
+}
+
+impl NativeDataset {
+    fn scan_type(self) -> &'static str {
+        match self {
+            Self::Sessions => "session",
+            Self::Usage => "usage",
+        }
+    }
+
+    fn revision_name(self) -> &'static str {
+        match self {
+            Self::Sessions => "sessions",
+            Self::Usage => "usage",
+        }
+    }
+}
+
+impl<'db> NativeHistoryIngestion<'db> {
+    pub fn new(db: &'db Db) -> Self {
+        Self { db, roots: NativeRoots::system() }
+    }
+
+    #[cfg(test)]
+    fn with_roots(db: &'db Db, roots: NativeRoots) -> Self {
+        Self { db, roots }
+    }
+
+    pub fn refresh_sessions(&self, agent: AgentKind, mut on_progress: impl FnMut(IngestionProgress)) -> anyhow::Result<IngestionReport> {
+        let adapter = adapter(agent, &self.roots);
+        ensure_revision(self.db, adapter.as_ref(), NativeDataset::Sessions)?;
+        let file_index = load_sync_index(self.db, NativeDataset::Sessions)?;
+        let mut report = IngestionReport {
+            removed: cleanup_removed_session_files(self.db, adapter.session_root(), agent_key(agent), &file_index)?,
+            ..IngestionReport::default()
+        };
+        let files = collect_jsonl_files(adapter.session_root())
+            .into_iter()
+            .filter(|path| adapter.accepts_session_file(path))
+            .collect::<Vec<_>>();
+        let files_total = files.len();
+
+        for (index, path) in files.iter().enumerate() {
+            report.processed += 1;
+            let path_text = path.to_string_lossy().to_string();
+            let mtime = file_mtime(path).unwrap_or(0);
+            if file_index.get(&path_text) == Some(&mtime) {
+                report.skipped += 1;
+            } else {
+                match adapter.parse_session(path) {
+                    Ok(Some(record)) => {
+                        persist_session_file(self.db, agent, &record, path, mtime)?;
+                        report.changed += 1;
+                    }
+                    Ok(None) => {
+                        report.failed += 1;
+                        tracing::warn!(path = %path.display(), "Native History session file did not contain a session record");
+                    }
+                    Err(error) => {
+                        report.failed += 1;
+                        tracing::warn!(path = %path.display(), %error, "Failed to parse Native History session file");
+                    }
+                }
+            }
+            on_progress(IngestionProgress {
+                files_done: index + 1,
+                files_total,
+                records: report.changed,
+            });
+        }
+        adapter.finish_session_scan(self.db)?;
+        if files_total == 0 {
+            on_progress(IngestionProgress {
+                files_done: 0,
+                files_total: 0,
+                records: 0,
+            });
+        }
+        Ok(report)
+    }
+
+    pub fn refresh_titles(&self) -> anyhow::Result<IngestionReport> {
+        let mut report = self.refresh_sessions(AgentKind::Claude, |_| {})?;
+        let codex = adapter(AgentKind::Codex, &self.roots);
+        report.changed += codex.finish_session_scan(self.db)?;
+        Ok(report)
+    }
+
+    pub fn start_usage_scan(&self, agent: AgentKind) -> anyhow::Result<UsageScan> {
+        let adapter = adapter(agent, &self.roots);
+        ensure_revision(self.db, adapter.as_ref(), NativeDataset::Usage)?;
+        self.db.conn().execute("DELETE FROM usage_logs WHERE model = '<synthetic>'", [])?;
+        let file_index = load_sync_index(self.db, NativeDataset::Usage)?;
+        let report = IngestionReport {
+            removed: cleanup_removed_session_files(self.db, adapter.session_root(), agent_key(agent), &file_index)?,
+            ..IngestionReport::default()
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let (sender, receiver) = mpsc::channel();
+        let handle = std::thread::spawn(move || usage_worker(adapter, file_index, worker_cancel, sender));
+        Ok(UsageScan {
+            agent,
+            receiver,
+            handle: Some(handle),
+            cancel,
+            report,
+            terminal: false,
+        })
+    }
+}
+
+enum UsageWorkerEvent {
+    Started { skipped: usize },
+    File { path: PathBuf, session_id: String, records: Vec<UsageRecord> },
+    FileFailed { path: PathBuf, message: String },
+    Progress(IngestionProgress),
+    Done,
+}
+
+pub struct UsageScan {
+    agent: AgentKind,
+    receiver: mpsc::Receiver<UsageWorkerEvent>,
+    handle: Option<JoinHandle<()>>,
+    cancel: Arc<AtomicBool>,
+    report: IngestionReport,
+    terminal: bool,
+}
+
+impl UsageScan {
+    pub fn poll(&mut self, db: &Db) -> Option<UsageScanUpdate> {
+        if self.terminal {
+            return None;
+        }
+        let mut latest_progress = None;
+        loop {
+            match self.receiver.try_recv() {
+                Ok(UsageWorkerEvent::Started { skipped }) => self.report.skipped = skipped,
+                Ok(UsageWorkerEvent::File { path, session_id, records }) => {
+                    self.report.processed += 1;
+                    if let Err(error) = persist_usage_file(db, self.agent, &session_id, &path, &records) {
+                        return Some(self.fail(error.to_string()));
+                    }
+                    self.report.changed += 1;
+                }
+                Ok(UsageWorkerEvent::FileFailed { path, message }) => {
+                    self.report.processed += 1;
+                    self.report.failed += 1;
+                    tracing::warn!(path = %path.display(), error = %message, "Failed to parse Native History usage file");
+                }
+                Ok(UsageWorkerEvent::Progress(progress)) => latest_progress = Some(progress),
+                Ok(UsageWorkerEvent::Done) => {
+                    self.join_worker();
+                    self.terminal = true;
+                    return Some(UsageScanUpdate::Complete(self.report.clone()));
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Some(self.fail("Native History usage worker stopped unexpectedly".into()));
+                }
+            }
+        }
+        latest_progress.map(UsageScanUpdate::Running)
+    }
+
+    pub fn shutdown(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.join_worker();
+        self.terminal = true;
+    }
+
+    fn fail(&mut self, message: String) -> UsageScanUpdate {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.join_worker();
+        self.terminal = true;
+        UsageScanUpdate::Failed(message)
+    }
+
+    fn join_worker(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for UsageScan {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn usage_worker(adapter: Box<dyn NativeHistoryAdapter>, file_index: HashMap<String, i64>, cancel: Arc<AtomicBool>, sender: mpsc::Sender<UsageWorkerEvent>) {
+    let files = collect_jsonl_files(adapter.session_root())
+        .into_iter()
+        .filter(|path| adapter.accepts_usage_file(path))
+        .collect::<Vec<_>>();
+    let mut changed_files = Vec::new();
+    let mut skipped = 0;
+    for path in files {
+        let path_text = path.to_string_lossy().to_string();
+        if file_index.get(&path_text) == file_mtime(&path).as_ref() {
+            skipped += 1;
+        } else {
+            changed_files.push(path);
+        }
+    }
+    if sender.send(UsageWorkerEvent::Started { skipped }).is_err() {
+        return;
+    }
+    let files_total = changed_files.len();
+    let mut records_total = 0;
+    let mut last_report = 0;
+    for (index, path) in changed_files.into_iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let fallback_session_id = path.file_stem().and_then(|name| name.to_str()).unwrap_or("");
+        match adapter.parse_usage(&path, fallback_session_id) {
+            Ok((session_id, records)) => {
+                records_total += records.len();
+                if sender
+                    .send(UsageWorkerEvent::File {
+                        path: path.clone(),
+                        session_id,
+                        records,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(error) => {
+                if sender
+                    .send(UsageWorkerEvent::FileFailed {
+                        path: path.clone(),
+                        message: error.to_string(),
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+        let files_done = index + 1;
+        if files_done - last_report >= USAGE_PROGRESS_BATCH_SIZE || files_done == files_total {
+            if sender
+                .send(UsageWorkerEvent::Progress(IngestionProgress {
+                    files_done,
+                    files_total,
+                    records: records_total,
+                }))
+                .is_err()
+            {
+                return;
+            }
+            last_report = files_done;
+        }
+    }
+    let _ = sender.send(UsageWorkerEvent::Done);
+}
+
+fn agent_key(agent: AgentKind) -> &'static str {
+    match agent {
+        AgentKind::Claude => "claude",
+        AgentKind::Codex => "codex",
+    }
+}
+
+fn load_sync_index(db: &Db, dataset: NativeDataset) -> anyhow::Result<HashMap<String, i64>> {
+    let mut statement = db.conn().prepare("SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type = ?1")?;
+    let rows = statement.query_map([dataset.scan_type()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+fn ensure_revision(db: &Db, adapter: &dyn NativeHistoryAdapter, dataset: NativeDataset) -> anyhow::Result<()> {
+    let agent = adapter.agent();
+    let revision = match (agent, dataset) {
+        (AgentKind::Claude, NativeDataset::Sessions) => CLAUDE_SESSION_REVISION,
+        (AgentKind::Claude, NativeDataset::Usage) => CLAUDE_USAGE_REVISION,
+        (AgentKind::Codex, NativeDataset::Sessions) => CODEX_SESSION_REVISION,
+        (AgentKind::Codex, NativeDataset::Usage) => CODEX_USAGE_REVISION,
+    };
+    let key = format!("native_history_revision:{}:{}", agent_key(agent), dataset.revision_name());
+    if db.get_setting(&key).as_deref() == Some(revision) {
+        return Ok(());
+    }
+    let legacy_is_current = match (agent, dataset) {
+        (AgentKind::Claude, NativeDataset::Sessions) => db.get_setting(CLAUDE_IMPORT_REVISION_KEY).as_deref() == Some(CLAUDE_IMPORT_REVISION),
+        (AgentKind::Claude, NativeDataset::Usage) => true,
+        (AgentKind::Codex, _) => db.get_setting(CODEX_IMPORT_REVISION_KEY).as_deref() == Some(CODEX_IMPORT_REVISION),
+    };
+    let transaction = db.conn().unchecked_transaction()?;
+    if !legacy_is_current {
+        match dataset {
+            NativeDataset::Sessions => {
+                transaction.execute("DELETE FROM session_history WHERE app_type = ?1", [agent_key(agent)])?;
+            }
+            NativeDataset::Usage => {
+                transaction.execute("DELETE FROM usage_logs WHERE app_type = ?1 AND data_source = 'import'", [agent_key(agent)])?;
+            }
+        }
+        let paths = {
+            let mut statement = transaction.prepare("SELECT file_path FROM session_log_sync WHERE scan_type = ?1")?;
+            let paths = statement.query_map([dataset.scan_type()], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+            paths
+        };
+        for path in paths.into_iter().filter(|path| Path::new(path).starts_with(adapter.session_root())) {
+            transaction.execute(
+                "DELETE FROM session_log_sync WHERE file_path = ?1 AND scan_type = ?2",
+                rusqlite::params![path, dataset.scan_type()],
+            )?;
+        }
+    }
+    transaction.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)", rusqlite::params![key, revision])?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn persist_session_file(db: &Db, agent: AgentKind, session: &SessionRecord, path: &Path, mtime: i64) -> anyhow::Result<()> {
+    let transaction = db.conn().unchecked_transaction()?;
+    transaction.execute(
+        "INSERT INTO session_history (id, app_type, project_path, profile_id, parent_thread_id, mode, start_time, end_time, prompt_tokens, completion_tokens, message_count, title, size_bytes, file_mtime)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+         ON CONFLICT(id, app_type) DO UPDATE SET
+            project_path=excluded.project_path, profile_id=excluded.profile_id,
+            parent_thread_id=excluded.parent_thread_id,
+            mode=excluded.mode, start_time=excluded.start_time, end_time=excluded.end_time,
+            prompt_tokens=excluded.prompt_tokens, completion_tokens=excluded.completion_tokens,
+            message_count=excluded.message_count, title=excluded.title,
+            size_bytes=excluded.size_bytes, file_mtime=excluded.file_mtime",
+        rusqlite::params![
+            session.id,
+            agent_key(agent),
+            session.project_path,
+            session.profile_id,
+            session.parent_thread_id,
+            session.mode,
+            session.start_time,
+            session.end_time,
+            session.prompt_tokens,
+            session.completion_tokens,
+            session.message_count,
+            session.title,
+            session.size_bytes,
+            session.file_mtime
+        ],
+    )?;
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    transaction.execute(
+        "INSERT INTO session_log_sync (file_path, file_mtime, scan_type, last_synced_at)
+         VALUES (?1, ?2, 'session', ?3)
+         ON CONFLICT(file_path, scan_type) DO UPDATE SET
+            file_mtime=excluded.file_mtime,
+            last_synced_at=excluded.last_synced_at",
+        rusqlite::params![path.to_string_lossy(), mtime, now],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn persist_usage_file(db: &Db, agent: AgentKind, session_id: &str, path: &Path, records: &[UsageRecord]) -> anyhow::Result<()> {
+    let mtime = file_mtime(path).ok_or_else(|| anyhow::anyhow!("Usage file metadata is unavailable"))?;
+    let transaction = db.conn().unchecked_transaction()?;
+    transaction.execute(
+        "DELETE FROM usage_logs WHERE app_type = ?1 AND session_id = ?2 AND data_source = 'import'",
+        rusqlite::params![agent_key(agent), session_id],
+    )?;
+    for record in records {
+        transaction.execute(
+            "INSERT OR IGNORE INTO usage_logs (app_type, model, provider_id, profile_id, session_id, message_id,
+             prompt_tokens, completion_tokens, cache_read_tokens, cache_creation_tokens, total_tokens, timestamp, data_source)
+             VALUES (?1, ?2, '', '', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'import')",
+            rusqlite::params![
+                agent_key(agent),
+                record.model,
+                session_id,
+                record.msg_id,
+                record.input,
+                record.output,
+                record.cr,
+                record.cc,
+                record.input.saturating_add(record.output).saturating_add(record.cr).saturating_add(record.cc),
+                record.date
+            ],
+        )?;
+    }
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    transaction.execute(
+        "INSERT INTO session_log_sync (file_path, file_mtime, scan_type, last_synced_at)
+         VALUES (?1, ?2, 'usage', ?3)
+         ON CONFLICT(file_path, scan_type) DO UPDATE SET
+            file_mtime=excluded.file_mtime,
+            last_synced_at=excluded.last_synced_at",
+        rusqlite::params![path.to_string_lossy(), mtime, now],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
 
 // ── Session Import ───────────────────────────────────────────────
 
@@ -54,26 +627,6 @@ struct MessageContent {
     /// Proxy mode marker injected by CCSwitch
     #[serde(default)]
     ccs_proxy: Option<bool>,
-}
-
-fn claude_projects_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".claude").join("projects")
-}
-
-fn claude_config_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".claude.json")
-}
-
-fn codex_sessions_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".codex").join("sessions")
-}
-
-fn codex_session_index_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".codex").join("session_index.jsonl")
 }
 
 enum TitleField {
@@ -148,80 +701,6 @@ fn ts_to_iso(ts_ms: i64) -> String {
     }
 }
 
-/// Import with progress callback. Incremental: only processes files whose
-/// mtime differs from the stored index in session_log_sync.
-pub fn import_claude_sessions_with_progress(db: &Db, on_progress: impl Fn(usize, usize, usize)) -> Result<usize, anyhow::Error> {
-    let projects_dir = claude_projects_dir();
-    let mut file_index: HashMap<String, i64> = {
-        let mut stmt = db.conn().prepare("SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type = 'session'")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-        rows.filter_map(|r| r.ok()).collect()
-    };
-    cleanup_removed_session_files(db, &projects_dir, "claude", &file_index)?;
-    if prepare_claude_import_revision(db, &projects_dir)? {
-        file_index.retain(|path, _| !Path::new(path).starts_with(&projects_dir));
-    }
-
-    let jsonl_files = collect_jsonl_files(&projects_dir);
-    let project_paths = load_claude_project_paths(&claude_config_path());
-    let total = jsonl_files.len();
-    let mut imported = 0usize;
-    let mut updated = 0usize;
-    let mut last_report = 0usize;
-    let now_iso = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    const APP_TYPE: &str = "claude";
-
-    for (idx, path) in jsonl_files.iter().enumerate() {
-        let sid = path.file_stem().and_then(|n| n.to_str()).unwrap_or("");
-        if sid.is_empty() || sid.starts_with("agent-") {
-            continue;
-        }
-
-        let current_mtime = file_mtime_secs(path);
-        let file_path_str = path.to_string_lossy().to_string();
-        if let Some(&stored_mtime) = file_index.get(&file_path_str) {
-            if stored_mtime == current_mtime {
-                continue;
-            }
-        }
-
-        match parse_session_file(path, &projects_dir, &project_paths) {
-            Ok(Some(record)) => {
-                db.insert_session(&record, APP_TYPE)?;
-                if file_index.contains_key(&file_path_str) {
-                    updated += 1;
-                } else {
-                    imported += 1;
-                }
-                db.conn().execute(
-                    "INSERT INTO session_log_sync (file_path, file_mtime, scan_type, last_synced_at)
-                     VALUES (?1, ?2, 'session', ?3)
-                     ON CONFLICT(file_path, scan_type) DO UPDATE SET
-                        file_mtime=excluded.file_mtime,
-                        last_synced_at=excluded.last_synced_at",
-                    rusqlite::params![file_path_str, current_mtime, now_iso],
-                )?;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!("Failed to parse session file {:?}: {}", path, e);
-            }
-        }
-
-        let files_done = idx + 1;
-        if files_done - last_report >= 5 || files_done == total {
-            on_progress(files_done, total, imported + updated);
-            last_report = files_done;
-        }
-    }
-
-    Ok(imported + updated)
-}
-
-pub fn import_claude_sessions(db: &Db) -> Result<usize, anyhow::Error> {
-    import_claude_sessions_with_progress(db, |_, _, _| {})
-}
-
 fn claude_project_directory_name(path: &str) -> String {
     path.chars().map(|character| if matches!(character, '/' | '\\' | ':') { '-' } else { character }).collect()
 }
@@ -267,96 +746,6 @@ struct CodexLine {
     line_type: String,
     #[serde(default)]
     payload: serde_json::Value,
-}
-
-/// Incrementally import Codex session transcripts from ~/.codex/sessions.
-pub fn import_codex_sessions(db: &Db) -> Result<usize, anyhow::Error> {
-    let sessions_dir = codex_sessions_dir();
-    prepare_codex_import_revision(db, &sessions_dir)?;
-    let session_index = load_codex_session_index(&codex_session_index_path());
-    let file_index: HashMap<String, i64> = {
-        let mut stmt = db.conn().prepare("SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type = 'session'")?;
-        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
-        rows.filter_map(|row| row.ok()).collect()
-    };
-    cleanup_removed_session_files(db, &sessions_dir, "codex", &file_index)?;
-
-    let mut imported = 0usize;
-    let now_iso = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    for path in collect_jsonl_files(&sessions_dir) {
-        let path_text = path.to_string_lossy().to_string();
-        let mtime = file_mtime_secs(&path);
-        if file_index.get(&path_text) == Some(&mtime) {
-            continue;
-        }
-        if let Some(record) = parse_codex_session_file(&path)? {
-            db.insert_session(&record, "codex")?;
-            db.conn().execute(
-                "INSERT INTO session_log_sync (file_path, file_mtime, scan_type, last_synced_at)
-                 VALUES (?1, ?2, 'session', ?3)
-                 ON CONFLICT(file_path, scan_type) DO UPDATE SET
-                    file_mtime=excluded.file_mtime,
-                    last_synced_at=excluded.last_synced_at",
-                rusqlite::params![path_text, mtime, now_iso],
-            )?;
-            imported += 1;
-        }
-    }
-    apply_codex_session_index(db, &session_index)?;
-    Ok(imported)
-}
-
-/// Invalidate Codex import state when rollout parsing semantics change.
-///
-/// Session and usage scans have independent indexes, so both need to be
-/// cleared. Imported sessions and usage are rebuilt so rows created before
-/// parent_thread_id support cannot remain visible as root sessions.
-fn prepare_codex_import_revision(db: &Db, sessions_dir: &std::path::Path) -> Result<(), anyhow::Error> {
-    if db.get_setting(CODEX_IMPORT_REVISION_KEY).as_deref() == Some(CODEX_IMPORT_REVISION) {
-        return Ok(());
-    }
-
-    let codex_sync_paths = {
-        let mut statement = db.conn().prepare("SELECT DISTINCT file_path FROM session_log_sync")?;
-        let paths = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        paths.into_iter().filter(|path| std::path::Path::new(path).starts_with(sessions_dir)).collect::<Vec<_>>()
-    };
-
-    let transaction = db.conn().unchecked_transaction()?;
-    transaction.execute("DELETE FROM session_history WHERE app_type = 'codex'", [])?;
-    transaction.execute("DELETE FROM usage_logs WHERE app_type = 'codex' AND data_source = 'import'", [])?;
-    for path in codex_sync_paths {
-        transaction.execute("DELETE FROM session_log_sync WHERE file_path = ?1", [path])?;
-    }
-    transaction.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-        rusqlite::params![CODEX_IMPORT_REVISION_KEY, CODEX_IMPORT_REVISION],
-    )?;
-    transaction.commit()?;
-    Ok(())
-}
-
-fn prepare_claude_import_revision(db: &Db, projects_dir: &Path) -> Result<bool, anyhow::Error> {
-    if db.get_setting(CLAUDE_IMPORT_REVISION_KEY).as_deref() == Some(CLAUDE_IMPORT_REVISION) {
-        return Ok(false);
-    }
-
-    let claude_sync_paths = {
-        let mut statement = db.conn().prepare("SELECT file_path FROM session_log_sync WHERE scan_type = 'session'")?;
-        let paths = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        paths.into_iter().filter(|path| Path::new(path).starts_with(projects_dir)).collect::<Vec<_>>()
-    };
-
-    let transaction = db.conn().unchecked_transaction()?;
-    for path in claude_sync_paths {
-        transaction.execute("DELETE FROM session_log_sync WHERE file_path = ?1 AND scan_type = 'session'", [path])?;
-    }
-    transaction.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-        rusqlite::params![CLAUDE_IMPORT_REVISION_KEY, CLAUDE_IMPORT_REVISION],
-    )?;
-    transaction.commit()?;
-    Ok(true)
 }
 
 fn cleanup_removed_session_files(db: &Db, root: &std::path::Path, app_type: &str, file_index: &HashMap<String, i64>) -> Result<usize, anyhow::Error> {
@@ -426,24 +815,20 @@ fn load_codex_session_index(path: &std::path::Path) -> HashMap<String, String> {
         .collect()
 }
 
-fn apply_codex_session_index(db: &Db, index: &HashMap<String, String>) -> Result<(), rusqlite::Error> {
+fn apply_codex_session_index(db: &Db, index: &HashMap<String, String>) -> Result<usize, rusqlite::Error> {
+    let transaction = db.conn().unchecked_transaction()?;
+    let mut changed = 0;
     for (id, title) in index {
-        db.conn()
-            .execute("UPDATE session_history SET title = ?1 WHERE id = ?2 AND app_type = 'codex'", rusqlite::params![title, id])?;
+        changed += transaction.execute(
+            "UPDATE session_history SET title = ?1 WHERE id = ?2 AND app_type = 'codex' AND title IS NOT ?1",
+            rusqlite::params![title, id],
+        )?;
     }
-    Ok(())
+    transaction.commit()?;
+    Ok(changed)
 }
 
-/// Incrementally refresh native session titles without re-importing Codex rollouts.
-#[allow(dead_code)]
-pub fn refresh_session_titles(db: &Db) -> Result<(), anyhow::Error> {
-    import_claude_sessions(db)?;
-    let index = load_codex_session_index(&codex_session_index_path());
-    apply_codex_session_index(db, &index)?;
-    Ok(())
-}
-
-fn parse_codex_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, anyhow::Error> {
+fn parse_codex_session_file(path: &Path) -> Result<Option<SessionRecord>, anyhow::Error> {
     let metadata = std::fs::metadata(path)?;
     let content = std::fs::read_to_string(path)?;
     let mut session_id = String::new();
@@ -558,11 +943,7 @@ fn parse_codex_session_file(path: &PathBuf) -> Result<Option<SessionRecord>, any
     }))
 }
 
-fn file_mtime_secs(path: &PathBuf) -> i64 {
-    file_mtime(path).unwrap_or(0)
-}
-
-fn collect_jsonl_files(dir: &PathBuf) -> Vec<PathBuf> {
+fn collect_jsonl_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -604,7 +985,7 @@ fn detect_mode(lines: &[&str]) -> String {
     "local".to_string()
 }
 
-fn parse_session_file(path: &PathBuf, projects_dir: &Path, project_paths: &HashMap<String, PathBuf>) -> Result<Option<SessionRecord>, anyhow::Error> {
+fn parse_session_file(path: &Path, projects_dir: &Path, project_paths: &HashMap<String, PathBuf>) -> Result<Option<SessionRecord>, anyhow::Error> {
     let meta = std::fs::metadata(path)?;
     let size_bytes = meta.len() as i64;
     let file_mtime = meta
@@ -633,11 +1014,13 @@ fn parse_session_file(path: &PathBuf, projects_dir: &Path, project_paths: &HashM
     let mut custom_title: Option<String> = None;
     let mut ai_title: Option<String> = None;
     let mut last_prompt: Option<String> = None;
+    let mut recognized_line = false;
 
     for (i, line) in lines.iter().enumerate() {
         let in_range = i < head_count || i >= lines.len().saturating_sub(tail_count);
         if !in_range {
             if let Some(title) = parse_title_only(line) {
+                recognized_line = true;
                 match title {
                     TitleField::Custom(t) => {
                         custom_title = Some(t);
@@ -656,6 +1039,14 @@ fn parse_session_file(path: &PathBuf, projects_dir: &Path, project_paths: &HashM
             Ok(l) => l,
             Err(_) => continue,
         };
+        recognized_line |= parsed.session_id.is_some()
+            || parsed.cwd.is_some()
+            || parsed.timestamp.is_some()
+            || parsed.msg_type.is_some()
+            || parsed.message.is_some()
+            || parsed.custom_title.is_some()
+            || parsed.ai_title.is_some()
+            || parsed.last_prompt.is_some();
         if let Some(ref sid) = parsed.session_id {
             if session_id.is_none() {
                 session_id = Some(sid.clone());
@@ -686,6 +1077,10 @@ fn parse_session_file(path: &PathBuf, projects_dir: &Path, project_paths: &HashM
                 last_prompt = Some(truncate_title(lp));
             }
         }
+    }
+
+    if !recognized_line {
+        return Ok(None);
     }
 
     let mut fallback_title: Option<String> = None;
@@ -790,110 +1185,58 @@ struct UsageData {
     cache_creation_input_tokens: Option<i64>,
 }
 
-/// Background-thread function: collect changed files, parse them, send batches via channel.
-pub fn parse_files_in_background(app_type: String, ctx: ScanContext, batch_size: usize, tx: std::sync::mpsc::Sender<ScanEvent>) {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let projects_dir = if app_type == "codex" {
-        PathBuf::from(&home).join(".codex/sessions")
-    } else {
-        PathBuf::from(&home).join(".claude/projects")
-    };
-    let mut changed_files: Vec<(PathBuf, String)> = Vec::new();
-    if projects_dir.exists() {
-        collect_changed_files(&projects_dir, &mut changed_files, &ctx.file_index);
-    }
-
-    let total = changed_files.len();
-    if total == 0 {
-        let _ = tx.send(ScanEvent::Done {});
-        return;
-    }
-
-    let mut total_records = 0usize;
-    let mut last_report = 0usize;
-
-    for (idx, (path, fallback_sid)) in changed_files.iter().enumerate() {
-        let (sid, records) = if app_type == "codex" {
-            parse_codex_usage_file(path, fallback_sid)
-        } else {
-            (fallback_sid.clone(), parse_claude_usage_file(path, fallback_sid))
+fn parse_claude_usage_file(path: &Path, fallback_sid: &str) -> anyhow::Result<Vec<UsageRecord>> {
+    let content = std::fs::read_to_string(path)?;
+    let mut recognized_line = false;
+    let mut records = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        let parsed: UsageLine = match serde_json::from_str(line) {
+            Ok(parsed) => parsed,
+            Err(_) => continue,
         };
-        let n = records.len();
-        total_records += n;
-
-        let _ = tx.send(ScanEvent::Batch {
-            app_type: app_type.clone(),
-            sid: sid.clone(),
-            file_path: path.clone(),
-            records,
-        });
-
-        let files_done = idx + 1;
-        if files_done - last_report >= batch_size || files_done == total {
-            let _ = tx.send(ScanEvent::Progress {
-                files_done,
-                files_total: total,
-                records: total_records,
-            });
-            last_report = files_done;
+        recognized_line |= parsed.msg_type.is_some() || parsed.message.is_some() || parsed.timestamp.is_some() || parsed.session_id.is_some();
+        if parsed.msg_type.as_deref() != Some("assistant") {
+            continue;
         }
+        let Some(msg) = parsed.message.as_ref() else {
+            continue;
+        };
+        let Some(usage) = msg.usage.as_ref() else {
+            continue;
+        };
+        let timestamp = parsed.timestamp.as_deref().unwrap_or("");
+        let msg_id = msg.id.clone().unwrap_or_else(|| format!("claude:{}:{}:{}", fallback_sid, timestamp, index));
+        let model = msg.ccs_model.as_deref().or(msg.model.as_deref()).unwrap_or("unknown").replace("[1m]", "");
+        if model == "<synthetic>" {
+            continue;
+        }
+        let date = normalize_usage_timestamp(timestamp);
+        let input = usage.input_tokens.unwrap_or(0).clamp(0, MAX_USAGE_TOKENS);
+        let output = usage.output_tokens.unwrap_or(0).clamp(0, MAX_USAGE_TOKENS);
+        let cr = usage.cache_read_input_tokens.unwrap_or(0).clamp(0, MAX_USAGE_TOKENS);
+        let cc = usage.cache_creation_input_tokens.unwrap_or(0).clamp(0, MAX_USAGE_TOKENS);
+        if input == 0 && output == 0 && cr == 0 && cc == 0 {
+            continue;
+        }
+        records.push(UsageRecord {
+            msg_id,
+            model,
+            date,
+            input,
+            output,
+            cr,
+            cc,
+        });
     }
-
-    let _ = tx.send(ScanEvent::Done {});
+    anyhow::ensure!(recognized_line, "Usage file contains no recognizable Claude history records");
+    Ok(records)
 }
 
-fn parse_claude_usage_file(path: &PathBuf, fallback_sid: &str) -> Vec<UsageRecord> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    content
-        .lines()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let parsed: UsageLine = serde_json::from_str(line).ok()?;
-            if parsed.msg_type.as_deref() != Some("assistant") {
-                return None;
-            }
-            let msg = parsed.message.as_ref()?;
-            let usage = msg.usage.as_ref()?;
-            let timestamp = parsed.timestamp.as_deref().unwrap_or("");
-            let msg_id = msg.id.clone().unwrap_or_else(|| format!("claude:{}:{}:{}", fallback_sid, timestamp, index));
-            // Prefer ccs_model (actual upstream model from proxy) over message.model
-            let model = msg.ccs_model.as_deref().or(msg.model.as_deref()).unwrap_or("unknown").replace("[1m]", "");
-            if model == "<synthetic>" {
-                return None;
-            }
-            let ts = timestamp;
-            let date = normalize_usage_timestamp(ts);
-            let input = usage.input_tokens.unwrap_or(0).clamp(0, MAX_USAGE_TOKENS);
-            let output = usage.output_tokens.unwrap_or(0).clamp(0, MAX_USAGE_TOKENS);
-            let cr = usage.cache_read_input_tokens.unwrap_or(0).clamp(0, MAX_USAGE_TOKENS);
-            let cc = usage.cache_creation_input_tokens.unwrap_or(0).clamp(0, MAX_USAGE_TOKENS);
-            if input == 0 && output == 0 && cr == 0 && cc == 0 {
-                return None;
-            }
-            Some(UsageRecord {
-                msg_id,
-                model: model.to_string(),
-                date,
-                input,
-                output,
-                cr,
-                cc,
-            })
-        })
-        .collect()
-}
-
-fn parse_codex_usage_file(path: &PathBuf, fallback_sid: &str) -> (String, Vec<UsageRecord>) {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(_) => return (fallback_sid.to_string(), vec![]),
-    };
+fn parse_codex_usage_file(path: &Path, fallback_sid: &str) -> anyhow::Result<(String, Vec<UsageRecord>)> {
+    let content = std::fs::read_to_string(path)?;
     let mut sid = fallback_sid.to_string();
     let mut session_meta_seen = false;
+    let mut recognized_line = false;
     let mut model = "unknown".to_string();
     let mut records = Vec::new();
     for (index, raw) in content.lines().enumerate() {
@@ -901,6 +1244,7 @@ fn parse_codex_usage_file(path: &PathBuf, fallback_sid: &str) -> (String, Vec<Us
             Ok(line) => line,
             Err(_) => continue,
         };
+        recognized_line |= !line.line_type.is_empty();
         match line.line_type.as_str() {
             "session_meta" => {
                 if session_meta_seen {
@@ -944,7 +1288,8 @@ fn parse_codex_usage_file(path: &PathBuf, fallback_sid: &str) -> (String, Vec<Us
             _ => {}
         }
     }
-    (sid, records)
+    anyhow::ensure!(recognized_line, "Usage file contains no recognizable Codex history records");
+    Ok((sid, records))
 }
 
 fn normalize_usage_timestamp(timestamp: &str) -> String {
@@ -967,34 +1312,7 @@ fn normalize_session_timestamp(timestamp: &str) -> Option<String> {
         .ok()
 }
 
-// ── Helpers ──────────────────────────────────────────────────────
-
-pub fn collect_changed_files(dir: &PathBuf, out: &mut Vec<(PathBuf, String)>, file_index: &HashMap<String, i64>) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_symlink() {
-                continue;
-            }
-            if path.is_dir() {
-                collect_changed_files(&path, out, file_index);
-            } else if path.extension().is_some_and(|e| e == "jsonl") {
-                let sid = path.file_stem().and_then(|n| n.to_str()).unwrap_or("").to_string();
-                if !sid.is_empty() {
-                    let mtime = file_mtime(&path).unwrap_or(0);
-                    let file_path_str = path.to_string_lossy().to_string();
-                    let changed = file_index.get(&file_path_str).map_or(true, |&old| old != mtime);
-                    if changed {
-                        out.push((path, sid));
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Read file mtime as unix timestamp (seconds) — public for db/usage.rs
-pub fn file_mtime(path: &PathBuf) -> Option<i64> {
+fn file_mtime(path: &Path) -> Option<i64> {
     let meta = std::fs::metadata(path).ok()?;
     let dur = meta.modified().ok()?;
     let secs = dur.duration_since(std::time::UNIX_EPOCH).ok()?;
@@ -1004,6 +1322,152 @@ pub fn file_mtime(path: &PathBuf) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_roots(root: &Path) -> NativeRoots {
+        NativeRoots {
+            claude_projects: root.join("claude-projects"),
+            claude_config: root.join("claude.json"),
+            codex_sessions: root.join("codex-sessions"),
+            codex_session_index: root.join("codex-session-index.jsonl"),
+        }
+    }
+
+    fn session_record(id: &str) -> SessionRecord {
+        SessionRecord {
+            id: id.into(),
+            project_path: "/tmp/project".into(),
+            profile_id: None,
+            parent_thread_id: None,
+            mode: "direct".into(),
+            start_time: "2026-08-20 10:00:00".into(),
+            end_time: None,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            message_count: 1,
+            title: Some("Session".into()),
+            size_bytes: 1,
+            file_mtime: "2026-08-20 10:00:00".into(),
+            search_text: String::new(),
+        }
+    }
+
+    fn finish_usage_scan(scan: &mut UsageScan, db: &Db) -> UsageScanUpdate {
+        for _ in 0..1_000 {
+            if let Some(update @ (UsageScanUpdate::Complete(_) | UsageScanUpdate::Failed(_))) = scan.poll(db) {
+                return update;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("usage scan did not finish");
+    }
+
+    #[test]
+    fn ingestion_routes_both_agents_through_the_typed_interface() {
+        let root = tempfile::tempdir().unwrap();
+        let roots = test_roots(root.path());
+        std::fs::create_dir_all(roots.claude_projects.join("project")).unwrap();
+        std::fs::create_dir_all(&roots.codex_sessions).unwrap();
+        std::fs::write(
+            roots.claude_projects.join("project/claude-session.jsonl"),
+            r#"{"sessionId":"claude-session","cwd":"/tmp/claude","timestamp":"2026-08-20T10:00:00Z","aiTitle":"Claude title"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            roots.codex_sessions.join("rollout-codex-session.jsonl"),
+            r#"{"timestamp":"2026-08-20T10:00:00Z","type":"session_meta","payload":{"id":"codex-session","cwd":"/tmp/codex"}}"#,
+        )
+        .unwrap();
+        let db = Db::open(&root.path().join("ccswitch.db")).unwrap();
+        let ingestion = NativeHistoryIngestion::with_roots(&db, roots);
+
+        let claude = ingestion.refresh_sessions(AgentKind::Claude, |_| {}).unwrap();
+        let codex = ingestion.refresh_sessions(AgentKind::Codex, |_| {}).unwrap();
+
+        assert_eq!(claude.changed, 1);
+        assert_eq!(codex.changed, 1);
+        assert_eq!(db.query_sessions("claude", None, None, 10).unwrap()[0].id, "claude-session");
+        assert_eq!(db.query_sessions("codex", None, None, 10).unwrap()[0].id, "codex-session");
+        let incremental = ingestion.refresh_sessions(AgentKind::Claude, |_| {}).unwrap();
+        assert_eq!(incremental.changed, 0);
+        assert_eq!(incremental.skipped, 1);
+    }
+
+    #[test]
+    fn session_record_and_sync_index_commit_atomically() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        std::fs::write(&path, r#"{"type":"user","timestamp":"2026-08-20T10:01:00Z"}"#).unwrap();
+        let db = Db::open(&root.path().join("ccswitch.db")).unwrap();
+        db.conn()
+            .execute_batch(
+                "CREATE TRIGGER reject_native_history_sync
+                 BEFORE INSERT ON session_log_sync
+                 BEGIN SELECT RAISE(ABORT, 'sync rejected'); END;",
+            )
+            .unwrap();
+
+        assert!(persist_session_file(&db, AgentKind::Claude, &session_record("atomic-session"), &path, 1).is_err());
+        assert!(db.query_session("claude", "atomic-session").unwrap().is_none());
+    }
+
+    #[test]
+    fn malformed_changed_file_keeps_the_previous_session_record() {
+        let root = tempfile::tempdir().unwrap();
+        let roots = test_roots(root.path());
+        std::fs::create_dir_all(&roots.codex_sessions).unwrap();
+        let path = roots.codex_sessions.join("rollout-stable-session.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        let db = Db::open(&root.path().join("ccswitch.db")).unwrap();
+        db.set_setting(CODEX_IMPORT_REVISION_KEY, CODEX_IMPORT_REVISION).unwrap();
+        db.insert_session(&session_record("stable-session"), "codex").unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO session_log_sync (file_path, file_mtime, scan_type) VALUES (?1, 1, 'session')",
+                [path.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+
+        let report = NativeHistoryIngestion::with_roots(&db, roots).refresh_sessions(AgentKind::Codex, |_| {}).unwrap();
+
+        assert_eq!(report.failed, 1);
+        assert!(db.query_session("codex", "stable-session").unwrap().is_some());
+    }
+
+    #[test]
+    fn usage_scan_distinguishes_malformed_files_from_empty_snapshots() {
+        let root = tempfile::tempdir().unwrap();
+        let roots = test_roots(root.path());
+        std::fs::create_dir_all(roots.claude_projects.join("project")).unwrap();
+        let path = roots.claude_projects.join("project/session-1.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"assistant","timestamp":"2026-08-20T10:00:00Z","message":{"model":"claude-sonnet","usage":{"input_tokens":10,"output_tokens":2}}}"#,
+        )
+        .unwrap();
+        let db = Db::open(&root.path().join("ccswitch.db")).unwrap();
+        let ingestion = NativeHistoryIngestion::with_roots(&db, roots.clone());
+        let mut first = ingestion.start_usage_scan(AgentKind::Claude).unwrap();
+        assert!(matches!(finish_usage_scan(&mut first, &db), UsageScanUpdate::Complete(_)));
+        assert_eq!(db.query_usage("claude", "all").unwrap().len(), 1);
+
+        std::fs::write(&path, "{}\n").unwrap();
+        let mut second = ingestion.start_usage_scan(AgentKind::Claude).unwrap();
+        let UsageScanUpdate::Complete(malformed) = finish_usage_scan(&mut second, &db) else {
+            panic!("malformed usage scan did not complete");
+        };
+        assert_eq!(malformed.failed, 1);
+        assert_eq!(db.query_usage("claude", "all").unwrap().len(), 1);
+
+        std::fs::write(&path, r#"{"type":"user","timestamp":"2026-08-20T10:01:00Z"}"#).unwrap();
+        let mut third = ingestion.start_usage_scan(AgentKind::Claude).unwrap();
+        assert!(matches!(finish_usage_scan(&mut third, &db), UsageScanUpdate::Complete(_)));
+        assert!(db.query_usage("claude", "all").unwrap().is_empty());
+
+        let mut cancelled = ingestion.start_usage_scan(AgentKind::Claude).unwrap();
+        cancelled.shutdown();
+        assert!(cancelled.handle.is_none());
+        assert!(cancelled.terminal);
+    }
 
     #[test]
     fn claude_project_directory_overrides_stale_or_missing_jsonl_cwd() {
@@ -1067,7 +1531,12 @@ mod tests {
                 .unwrap();
         }
 
-        assert!(prepare_claude_import_revision(&db, &projects_dir).unwrap());
+        let roots = NativeRoots {
+            claude_projects: projects_dir.clone(),
+            ..test_roots(root.path())
+        };
+        let adapter = ClaudeHistoryAdapter::new(&roots);
+        ensure_revision(&db, &adapter, NativeDataset::Sessions).unwrap();
         let scan_rows = {
             let mut statement = db
                 .conn()
@@ -1093,7 +1562,7 @@ mod tests {
                 [claude_path.to_string_lossy().as_ref()],
             )
             .unwrap();
-        assert!(!prepare_claude_import_revision(&db, &projects_dir).unwrap());
+        ensure_revision(&db, &adapter, NativeDataset::Sessions).unwrap();
         let session_scan_count: i64 = db
             .conn()
             .query_row(
@@ -1124,7 +1593,7 @@ mod tests {
         assert_eq!(session.title.as_deref(), Some("Implement the feature"));
         assert_eq!(session.message_count, 2);
 
-        let (sid, records) = parse_codex_usage_file(&path, "fallback");
+        let (sid, records) = parse_codex_usage_file(&path, "fallback").unwrap();
         assert_eq!(sid, "session-1");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].model, "gpt-test");
@@ -1204,7 +1673,7 @@ mod tests {
         assert_eq!(child.project_path, "/tmp/fork");
         assert_eq!(child.profile_id.as_deref(), Some("fork-provider"));
 
-        let (sid, records) = parse_codex_usage_file(&child_path, "fallback");
+        let (sid, records) = parse_codex_usage_file(&child_path, "fallback").unwrap();
         assert_eq!(sid, "fork-session");
         assert_eq!(records.len(), 1);
         assert!(records[0].msg_id.starts_with("codex:fork-session:"));
@@ -1212,7 +1681,7 @@ mod tests {
         let db = Db::open(&dir.path().join("ccswitch.db")).unwrap();
         db.insert_session(&parent, "codex").unwrap();
         db.insert_session(&child, "codex").unwrap();
-        db.insert_usage_batch("codex", &sid, &child_path, &records).unwrap();
+        persist_usage_file(&db, AgentKind::Codex, &sid, &child_path, &records).unwrap();
         let stored = db.query_sessions("codex", None, None, 10).unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].id, "parent-session");
@@ -1296,7 +1765,25 @@ mod tests {
                 .unwrap();
         }
 
-        prepare_codex_import_revision(&db, &sessions_dir).unwrap();
+        let roots = NativeRoots {
+            codex_sessions: sessions_dir.clone(),
+            ..test_roots(dir.path())
+        };
+        let adapter = CodexHistoryAdapter::new(&roots);
+        ensure_revision(&db, &adapter, NativeDataset::Sessions).unwrap();
+
+        let usage_ids = {
+            let mut statement = db.conn().prepare("SELECT message_id FROM usage_logs ORDER BY message_id").unwrap();
+            statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(usage_ids, vec!["claude-import", "codex-import", "codex-manual"]);
+        let session_apps = {
+            let mut statement = db.conn().prepare("SELECT app_type FROM session_history ORDER BY app_type").unwrap();
+            statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(session_apps, vec!["claude"]);
+
+        ensure_revision(&db, &adapter, NativeDataset::Usage).unwrap();
 
         let usage_ids = {
             let mut statement = db.conn().prepare("SELECT message_id FROM usage_logs ORDER BY message_id").unwrap();
@@ -1308,12 +1795,8 @@ mod tests {
             statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
         };
         assert_eq!(sync_paths, vec![unrelated_path.to_string_lossy()]);
-        let session_apps = {
-            let mut statement = db.conn().prepare("SELECT app_type FROM session_history ORDER BY app_type").unwrap();
-            statement.query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
-        };
-        assert_eq!(session_apps, vec!["claude"]);
-        assert_eq!(db.get_setting(CODEX_IMPORT_REVISION_KEY).as_deref(), Some(CODEX_IMPORT_REVISION));
+        assert_eq!(db.get_setting("native_history_revision:codex:sessions").as_deref(), Some(CODEX_IMPORT_REVISION));
+        assert_eq!(db.get_setting("native_history_revision:codex:usage").as_deref(), Some(CODEX_IMPORT_REVISION));
 
         db.conn()
             .execute(
@@ -1321,7 +1804,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        prepare_codex_import_revision(&db, &sessions_dir).unwrap();
+        ensure_revision(&db, &adapter, NativeDataset::Usage).unwrap();
         let new_import_count: i64 = db
             .conn()
             .query_row("SELECT COUNT(*) FROM usage_logs WHERE message_id = 'new-import'", [], |row| row.get(0))
@@ -1346,20 +1829,20 @@ mod tests {
         )
         .unwrap();
 
-        let records = parse_claude_usage_file(&path, "session-1");
+        let records = parse_claude_usage_file(&path, "session-1").unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].msg_id, "claude:session-1:2026-07-27T10:00:00Z:0");
         assert_eq!(records[1].date, "today");
         assert_eq!(records[1].input, MAX_USAGE_TOKENS);
 
-        let reparsed = parse_claude_usage_file(&path, "session-1");
+        let reparsed = parse_claude_usage_file(&path, "session-1").unwrap();
         assert_eq!(
             records.iter().map(|record| &record.msg_id).collect::<Vec<_>>(),
             reparsed.iter().map(|record| &record.msg_id).collect::<Vec<_>>()
         );
 
         let db = Db::open(&dir.path().join("ccswitch.db")).unwrap();
-        db.insert_usage_batch("claude", "session-1", &path, &records).unwrap();
+        persist_usage_file(&db, AgentKind::Claude, "session-1", &path, &records).unwrap();
         let replacement = vec![UsageRecord {
             msg_id: records[0].msg_id.clone(),
             model: records[0].model.clone(),
@@ -1369,7 +1852,7 @@ mod tests {
             cr: 0,
             cc: 0,
         }];
-        db.insert_usage_batch("claude", "session-1", &path, &replacement).unwrap();
+        persist_usage_file(&db, AgentKind::Claude, "session-1", &path, &replacement).unwrap();
         let summary = db.query_usage("claude", "all").unwrap();
         assert_eq!(summary.len(), 1);
         assert_eq!(summary[0].total_prompt, 5);

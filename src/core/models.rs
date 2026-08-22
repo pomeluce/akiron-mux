@@ -41,6 +41,15 @@ impl AppType {
     }
 }
 
+impl From<AppType> for crate::agent::AgentKind {
+    fn from(value: AppType) -> Self {
+        match value {
+            AppType::Claude => Self::Claude,
+            AppType::Codex => Self::Codex,
+        }
+    }
+}
+
 impl std::str::FromStr for AppType {
     type Err = ();
 

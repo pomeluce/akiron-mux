@@ -5,6 +5,19 @@ Codex. This glossary defines the language used across the product.
 
 ## Configuration
 
+**Configuration Catalog**:
+The API Providers and their available Model Profiles or models configured for an
+Agent.
+_Avoid_: Agent Configuration
+
+**Agent Configuration**:
+The API Provider, applicable model selection, and Switching Mode currently
+effective for an Agent. It may be selected through AkironMux or discovered from
+the Agent's native configuration. The Agent's native configuration is the source
+of truth for what is effective; AkironMux's stored active selection is a
+rebuildable projection of it.
+_Avoid_: Configuration Catalog
+
 **Agent**:
 An executable AI coding tool whose conversations AkironMux can start, resume,
 and organize. The supported Agents are Claude Code and Codex.
@@ -35,14 +48,25 @@ A running Agent process and interactive terminal owned by the Session Backend.
 Its lifetime is independent of any connected client.
 _Avoid_: Native History Session, terminal
 
+**Terminal Connection**:
+A live channel between one client terminal surface and one Managed Session. It
+can observe terminal output and may hold that Managed Session's Control Lease.
+_Avoid_: Managed Session, Control Lease
+
 **Native History Session**:
 A persisted Agent conversation that AkironMux discovers in Claude Code or Codex
 history. It can be resumed as a Managed Session but is not live-process state.
 _Avoid_: Managed Session, history item
 
+**Native History Ingestion**:
+The incremental process that discovers Agent-native session and usage files and
+updates AkironMux's rebuildable Native History index.
+_Avoid_: Native History Session, live session synchronization
+
 **Unified Sessions**:
 The shared AkironMux view of Claude Code and Codex sessions through one list,
-workspace, API, and UI. The Agents do not share native conversation context.
+workspace, API, and UI. Its live client state belongs to exactly one selected
+Backend Profile at a time. The Agents do not share native conversation context.
 
 **Native Title**:
 A session title supplied by the Agent's native history. It supersedes the
@@ -87,6 +111,12 @@ _Avoid_: Backend Profile
 A client-owned connection record that locates a Backend Instance and remembers
 its expected identity and credential reference.
 _Avoid_: Profile, Backend Instance
+
+**Backend Profile Lifecycle**:
+The client-owned process that validates, pairs, confirms identity, activates,
+refreshes, reorders, and removes Backend Profiles while preserving Device
+Credential security ordering.
+_Avoid_: backend settings, connection form
 
 **Local Backend**:
 The client-facing name for a loopback-only connection to a Session Backend's

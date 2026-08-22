@@ -1,7 +1,7 @@
 use crate::cli::args::{BackendAction, BackendDeviceAction, BackendPairAction, CliArgs, Commands, ProxyAction, RemoteBackendAction, ServiceAction};
+use crate::core::agent_configuration::AgentConfiguration;
 use crate::core::config::ConfigManager;
-use crate::core::models::SwitchMode;
-use crate::core::switcher::switch_profile;
+use crate::core::models::{AppType, SwitchMode};
 use anyhow::{Context, Result};
 use clap::CommandFactory;
 use std::path::PathBuf;
@@ -42,6 +42,9 @@ pub fn run_cli(args: CliArgs) -> Result<()> {
     let db_path = get_db_path();
     let defaults_path: Option<&std::path::Path> = None;
     let mgr = ConfigManager::new(&db_path, defaults_path)?;
+    if let Err(error) = AgentConfiguration::new(&mgr).reconcile() {
+        tracing::warn!("Failed to reconcile Agent configuration: {error:#}");
+    }
 
     match command {
         Commands::Switch { target, local: _, proxy } => {
@@ -279,7 +282,7 @@ fn handle_switch(mgr: &ConfigManager, target: Option<String>, mode: SwitchMode) 
 
     let (provider_id, profile_id) = target.split_once('/').with_context(|| format!("Invalid target '{}'. Use provider_id/profile_id", target))?;
 
-    let config = switch_profile(mgr, provider_id, profile_id, mode, None)?;
+    let config = AgentConfiguration::new(mgr).apply_claude_profile(provider_id, profile_id, mode)?;
     println!("Switched to: {} / {}", config.provider_name, config.profile_name);
     println!("  Opus:      {}", config.opus);
     println!("  Sonnet:    {}", config.sonnet);
@@ -336,7 +339,7 @@ fn handle_add(mgr: &ConfigManager, what: &str, parent_provider: Option<&str>) ->
             if mgr.list_providers()?.iter().any(|provider| provider.id == p.id) {
                 anyhow::bail!("Provider '{}' already exists", p.id);
             }
-            mgr.db().insert_provider(&p, "claude")?;
+            AgentConfiguration::new(mgr).save_provider(AppType::Claude, &p)?;
             println!("Provider added.");
         }
         "profile" => {
@@ -368,7 +371,7 @@ fn handle_add(mgr: &ConfigManager, what: &str, parent_provider: Option<&str>) ->
             if provider.profiles.iter().any(|profile| profile.id == pr.id) {
                 anyhow::bail!("Profile '{}/{}' already exists", provider_id, pr.id);
             }
-            mgr.db().insert_profile(provider_id, &pr)?;
+            AgentConfiguration::new(mgr).save_profile(provider_id, &pr)?;
             println!("Profile added to provider '{}'.", provider.name);
         }
         _ => anyhow::bail!("Usage: akmux add <provider|profile> [parent_provider]"),
@@ -410,10 +413,7 @@ fn handle_remove(mgr: &ConfigManager, target: &str) -> Result<()> {
         if !profile.source.can_delete() {
             anyhow::bail!("Cannot delete system default profile '{}'", target);
         }
-        mgr.db().delete_profile(provider_id, profile_id)?;
-        if mgr.get_setting("active_provider").as_deref() == Some(provider_id) && mgr.get_setting("active_profile").as_deref() == Some(profile_id) {
-            mgr.set_setting("active_profile", "")?;
-        }
+        AgentConfiguration::new(mgr).delete_profile(provider_id, profile_id)?;
         println!("Removed profile: {}", target);
     } else {
         let providers = mgr.list_providers()?;
@@ -424,11 +424,7 @@ fn handle_remove(mgr: &ConfigManager, target: &str) -> Result<()> {
         if !provider.source.can_delete() {
             anyhow::bail!("Cannot delete system default provider '{}'", target);
         }
-        mgr.db().delete_provider(target, "claude")?;
-        if mgr.get_setting("active_provider").as_deref() == Some(target) {
-            mgr.set_setting("active_provider", "")?;
-            mgr.set_setting("active_profile", "")?;
-        }
+        AgentConfiguration::new(mgr).delete_provider(AppType::Claude, target)?;
         println!("Removed provider: {}", target);
     }
     Ok(())
@@ -490,8 +486,8 @@ fn project_name(s: &crate::db::sessions::SessionRecord) -> Option<String> {
 
 fn handle_history(mgr: &ConfigManager, project: Option<&str>, search: Option<&str>) -> Result<()> {
     // Auto-import Claude Code sessions before listing
-    match crate::core::import::import_claude_sessions(mgr.db()) {
-        Ok(n) if n > 0 => eprintln!("Imported {} new session(s)", n),
+    match crate::core::native_history::NativeHistoryIngestion::new(mgr.db()).refresh_sessions(crate::agent::AgentKind::Claude, |_| {}) {
+        Ok(report) if report.changed > 0 => eprintln!("Imported {} new session(s)", report.changed),
         Err(e) => eprintln!("Warning: failed to import sessions: {}", e),
         _ => {}
     }

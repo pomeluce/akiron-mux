@@ -34,7 +34,7 @@
             cargo = rust;
             rustc = rust;
           };
-          version = "1.14.7";
+          version = "1.14.8";
           tuiPackage = rustPlatform.buildRustPackage {
             pname = "akiron-mux";
             inherit version;

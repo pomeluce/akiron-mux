@@ -269,6 +269,10 @@ impl ConfigManager {
         self.db.set_setting(key, value)
     }
 
+    pub(crate) fn set_settings(&self, settings: &[(&str, &str)]) -> Result<(), rusqlite::Error> {
+        self.db.set_settings(settings)
+    }
+
     pub fn list_providers(&self) -> Result<Vec<Provider>, anyhow::Error> {
         self.list_providers_for(AppType::Claude)
     }

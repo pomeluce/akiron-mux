@@ -1,7 +1,11 @@
 use std::{
     collections::HashMap,
+    io::Write,
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    },
 };
 
 use reqwest::Method;
@@ -10,10 +14,14 @@ use tauri::{AppHandle, Manager};
 use url::Url;
 use zeroize::Zeroizing;
 
+mod lifecycle;
+
+pub use lifecycle::{BackendLifecycleOutcome, BackendProfileIntent};
+
 const LOCAL_PROFILE_ID: &str = "local";
 const PROTOCOL_MAJOR: &str = "1";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendProfile {
     pub id: String,
@@ -35,8 +43,6 @@ pub struct BackendProfile {
 pub struct BackendProfileState {
     pub profiles: Vec<BackendProfile>,
     pub active_profile_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revocation_warning: Option<String>,
 }
 
 impl Default for BackendProfileState {
@@ -53,7 +59,6 @@ impl Default for BackendProfileState {
                 capabilities: Vec::new(),
             }],
             active_profile_id: LOCAL_PROFILE_ID.into(),
-            revocation_warning: None,
         }
     }
 }
@@ -125,14 +130,6 @@ struct ParsedPairingLink {
     code: String,
 }
 
-struct PendingPairedCredential {
-    address: String,
-    instance_id: String,
-    capabilities: Vec<String>,
-    token: Zeroizing<String>,
-    expires_at: std::time::Instant,
-}
-
 trait CredentialStore {
     fn store(&self, profile_id: &str, token: &str) -> Result<(), String>;
     fn load(&self, profile_id: &str) -> Result<Zeroizing<String>, String>;
@@ -173,126 +170,8 @@ pub fn list_backend_profiles(app: AppHandle) -> Result<BackendProfileState, Stri
 }
 
 #[tauri::command]
-pub async fn save_backend_profile(app: AppHandle, mut profile: BackendProfile, confirmed_instance_id: Option<String>) -> Result<BackendProfileState, String> {
-    profile.name = profile.name.trim().to_string();
-    validate_profile(&profile)?;
-    let mut state = load_state(&app)?;
-    validate_profile_identity(&state, &profile)?;
-    if profile.kind == "remote" {
-        let credential = credential_for_unchanged_profile(&state, &profile).ok_or_else(|| "Remote profile requires a device credential".to_string())?;
-        let health = request_health(&profile, Some(&credential)).await?;
-        if !identity_change_is_confirmed(profile.instance_id.as_deref(), &health.instance_id, confirmed_instance_id.as_deref()) {
-            return Err(identity_changed_error(&health.instance_id));
-        }
-        validate_remote_capabilities(&health.capabilities)?;
-        profile.has_credential = true;
-        profile.requires_auth = false;
-        profile.instance_id = Some(health.instance_id);
-        profile.capabilities = health.capabilities;
-    } else {
-        profile.has_credential = false;
-        profile.requires_auth = false;
-        profile.instance_id = None;
-        profile.capabilities.clear();
-    }
-    if let Some(existing) = state.profiles.iter_mut().find(|item| item.id == profile.id) {
-        *existing = profile;
-    } else {
-        state.profiles.push(profile);
-    }
-    save_state(&app, &state)?;
-    Ok(state)
-}
-
-#[tauri::command]
-pub async fn pair_backend_profile(app: AppHandle, mut profile: BackendProfile, pairing_link: String, confirmed_instance_id: Option<String>) -> Result<BackendProfileState, String> {
-    profile.name = profile.name.trim().to_string();
-    validate_profile(&profile)?;
-    if profile.kind != "remote" {
-        return Err("Only Remote profiles use device pairing".into());
-    }
-    let mut state = load_state(&app)?;
-    validate_profile_identity(&state, &profile)?;
-
-    let pending = if pairing_link.trim().is_empty() {
-        take_pending_pairing(&profile, confirmed_instance_id.as_deref())?
-    } else {
-        let parsed = parse_pairing_link(&pairing_link, &profile.address)?;
-        let token = request_pairing_token(&profile, &parsed.code).await?;
-        let health = request_health(&profile, Some(&token)).await?;
-        validate_remote_capabilities(&health.capabilities)?;
-        PendingPairedCredential {
-            address: profile.address.clone(),
-            instance_id: health.instance_id,
-            capabilities: health.capabilities,
-            token,
-            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(120),
-        }
-    };
-
-    if !identity_change_is_confirmed(profile.instance_id.as_deref(), &pending.instance_id, confirmed_instance_id.as_deref()) {
-        let observed = pending.instance_id.clone();
-        store_pending_pairing(&profile.id, pending)?;
-        return Err(identity_changed_error(&observed));
-    }
-
-    store_credential(&profile.id, pending.token.as_str())?;
-    profile.has_credential = true;
-    profile.requires_auth = false;
-    profile.instance_id = Some(pending.instance_id);
-    profile.capabilities = pending.capabilities;
-    upsert_profile(&mut state, profile);
-    save_state(&app, &state)?;
-    Ok(state)
-}
-
-#[tauri::command]
-pub fn activate_backend_profile(app: AppHandle, profile_id: String) -> Result<BackendProfileState, String> {
-    let mut state = load_state(&app)?;
-    if !state.profiles.iter().any(|profile| profile.id == profile_id) {
-        return Err("Backend profile does not exist".into());
-    }
-    state.active_profile_id = profile_id;
-    save_state(&app, &state)?;
-    Ok(state)
-}
-
-#[tauri::command]
-pub fn reorder_backend_profiles(app: AppHandle, profile_ids: Vec<String>) -> Result<BackendProfileState, String> {
-    let mut state = load_state(&app)?;
-    if profile_ids.len() != state.profiles.len() || !state.profiles.iter().all(|profile| profile_ids.contains(&profile.id)) {
-        return Err("Backend profile order is invalid".into());
-    }
-    state
-        .profiles
-        .sort_by_key(|profile| profile_ids.iter().position(|id| id == &profile.id).unwrap_or(usize::MAX));
-    save_state(&app, &state)?;
-    Ok(state)
-}
-
-#[tauri::command]
-pub async fn delete_backend_profile(app: AppHandle, profile_id: String) -> Result<BackendProfileState, String> {
-    if profile_id == LOCAL_PROFILE_ID {
-        return Err("The built-in Local profile cannot be deleted".into());
-    }
-    let mut state = load_state(&app)?;
-    let profile = state
-        .profiles
-        .iter()
-        .find(|profile| profile.id == profile_id)
-        .cloned()
-        .ok_or_else(|| "Backend profile does not exist".to_string())?;
-    let revocation_confirmed = if profile.kind == "remote" { revoke_remote_device(&profile).await.is_ok() } else { true };
-    state.profiles.retain(|profile| profile.id != profile_id);
-    if state.active_profile_id == profile_id {
-        state.active_profile_id = LOCAL_PROFILE_ID.into();
-    }
-    delete_credential(&profile_id)?;
-    save_state(&app, &state)?;
-    if !revocation_confirmed {
-        state.revocation_warning = Some("Profile removed locally, but server-side device revocation could not be confirmed".into());
-    }
-    Ok(state)
+pub async fn apply_backend_profile_intent(app: AppHandle, intent: BackendProfileIntent) -> Result<BackendLifecycleOutcome, String> {
+    lifecycle::BackendProfileLifecycle::new(app).apply(intent).await
 }
 
 #[tauri::command]
@@ -305,71 +184,6 @@ pub async fn test_backend_profile(app: AppHandle, profile: BackendProfile) -> Re
         validate_remote_capabilities(&health.capabilities)?;
     }
     Ok(health)
-}
-
-#[tauri::command]
-pub async fn refresh_backend_profile(app: AppHandle, profile_id: String) -> Result<BackendProfileState, String> {
-    let mut state = load_state(&app)?;
-    let Some(profile) = state.profiles.iter().find(|profile| profile.id == profile_id).cloned() else {
-        return Err("Backend profile does not exist".into());
-    };
-    if profile.kind != "remote" {
-        return Ok(state);
-    }
-    let credential = credential_for_unchanged_profile(&state, &profile).ok_or_else(|| "Remote profile requires a device credential".to_string())?;
-    let health = request_health(&profile, Some(credential.as_str())).await?;
-    if profile.instance_id.as_deref() != Some(health.instance_id.as_str()) {
-        return Err("BACKEND_IDENTITY_CONFIRMATION_REQUIRED".into());
-    }
-    validate_remote_capabilities(&health.capabilities)?;
-    if let Some(current) = state.profiles.iter_mut().find(|current| current.id == profile_id) {
-        current.capabilities = health.capabilities;
-        current.has_credential = true;
-        current.requires_auth = false;
-    }
-    save_state(&app, &state)?;
-    Ok(state)
-}
-
-fn upsert_profile(state: &mut BackendProfileState, profile: BackendProfile) {
-    if let Some(existing) = state.profiles.iter_mut().find(|item| item.id == profile.id) {
-        *existing = profile;
-    } else {
-        state.profiles.push(profile);
-    }
-}
-
-fn identity_change_is_confirmed(expected: Option<&str>, observed: &str, confirmed: Option<&str>) -> bool {
-    expected.is_none() || expected == Some(observed) || confirmed == Some(observed)
-}
-
-fn identity_changed_error(observed: &str) -> String {
-    format!("BACKEND_IDENTITY_CHANGED:{observed}")
-}
-
-fn pending_pairings() -> &'static Mutex<HashMap<String, PendingPairedCredential>> {
-    static PENDING: OnceLock<Mutex<HashMap<String, PendingPairedCredential>>> = OnceLock::new();
-    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn store_pending_pairing(profile_id: &str, pairing: PendingPairedCredential) -> Result<(), String> {
-    pending_pairings()
-        .lock()
-        .map_err(|_| "Pairing state is unavailable".to_string())?
-        .insert(profile_id.to_owned(), pairing);
-    Ok(())
-}
-
-fn take_pending_pairing(profile: &BackendProfile, confirmed_instance_id: Option<&str>) -> Result<PendingPairedCredential, String> {
-    let mut pending = pending_pairings().lock().map_err(|_| "Pairing state is unavailable".to_string())?;
-    pending.retain(|_, value| value.expires_at > std::time::Instant::now());
-    let matches = pending
-        .get(&profile.id)
-        .is_some_and(|value| value.address == profile.address && confirmed_instance_id == Some(value.instance_id.as_str()));
-    if !matches {
-        return Err("A fresh pairing link is required".into());
-    }
-    pending.remove(&profile.id).ok_or_else(|| "A fresh pairing link is required".into())
 }
 
 fn parse_pairing_link(value: &str, expected_address: &str) -> Result<ParsedPairingLink, String> {
@@ -637,7 +451,6 @@ fn load_state(app: &AppHandle) -> Result<BackendProfileState, String> {
             .map(|profile| profile_from_persisted(profile, &PlatformCredentialStore))
             .collect(),
         active_profile_id: persisted.active_profile_id,
-        revocation_warning: None,
     };
     if !state.profiles.iter().any(|profile| profile.id == LOCAL_PROFILE_ID) {
         state
@@ -679,7 +492,36 @@ fn save_state(app: &AppHandle, state: &BackendProfileState) -> Result<(), String
         active_profile_id: state.active_profile_id.clone(),
     };
     let bytes = serde_json::to_vec_pretty(&persisted).map_err(|_| "Unable to serialize backend profiles".to_string())?;
-    std::fs::write(state_path(app)?, bytes).map_err(|_| "Unable to save backend profiles".to_string())
+    save_state_atomically(&state_path(app)?, &bytes)
+}
+
+fn save_state_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let temporary = path.with_extension(format!("json.{}.tmp", next_operation_id()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|_| "Unable to create a temporary Backend Profile state".to_string())?;
+        file.write_all(bytes).map_err(|_| "Unable to write Backend Profile state".to_string())?;
+        file.sync_all().map_err(|_| "Unable to synchronize Backend Profile state".to_string())?;
+        replace_state_file(&temporary, path).map_err(|_| "Unable to replace Backend Profile state".to_string())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn next_operation_id() -> String {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    format!("{timestamp:032x}{sequence:016x}")
+}
+
+fn replace_state_file(temporary: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+    std::fs::rename(temporary, destination)
 }
 
 async fn revoke_remote_device(profile: &BackendProfile) -> Result<(), String> {
@@ -947,7 +789,6 @@ mod tests {
         let state = BackendProfileState {
             profiles: vec![BackendProfileState::default().profiles.into_iter().next().unwrap(), saved.clone()],
             active_profile_id: "remote-1".into(),
-            revocation_warning: None,
         };
         assert_eq!(
             credential_for_unchanged_profile_with_store(&state, &saved, &credentials).as_deref().map(String::as_str),
@@ -992,14 +833,6 @@ mod tests {
     }
 
     #[test]
-    fn identity_confirmation_is_bound_to_the_observed_instance() {
-        assert!(identity_change_is_confirmed(Some("old"), "new", Some("new")));
-        assert!(!identity_change_is_confirmed(Some("old"), "newer", Some("new")));
-        assert!(!identity_change_is_confirmed(Some("old"), "new", None));
-        assert!(identity_change_is_confirmed(None, "first", None));
-    }
-
-    #[test]
     fn pairing_links_are_validated_and_bound_to_the_profile_origin() {
         let parsed = parse_pairing_link(
             "akmux://pair?url=https%3A%2F%2Fmux.example.com&name=Office&code=short-lived-code",
@@ -1012,6 +845,21 @@ mod tests {
             "https://mux.example.com",
         )
         .is_err());
+    }
+
+    #[test]
+    fn backend_profile_state_is_replaced_without_leaving_partial_files() {
+        let directory = std::env::temp_dir().join(format!("akmux-backend-state-test-{}-{}", std::process::id(), next_operation_id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("backends.json");
+        std::fs::write(&path, b"old").unwrap();
+
+        save_state_atomically(&path, b"new profile state").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new profile state");
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[cfg(target_os = "windows")]

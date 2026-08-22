@@ -17,6 +17,8 @@ use ratatui::{
     Frame,
 };
 
+use crate::{agent::AgentKind, core::native_history::NativeHistoryIngestion};
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum ConfirmAction {
     Open,
@@ -89,10 +91,7 @@ impl HistoryTab {
         self.cached_tokens_sid.clear();
         self.cached_prov_name.clear();
         self.cached_prof_name.clear();
-        let import_result = match app {
-            AppType::Claude => crate::core::import::import_claude_sessions(self.mgr.db()),
-            AppType::Codex => crate::core::import::import_codex_sessions(self.mgr.db()),
-        };
+        let import_result = NativeHistoryIngestion::new(self.mgr.db()).refresh_sessions(AgentKind::from(app), |_| {});
         if let Err(e) = import_result {
             tracing::warn!("Failed to import {} sessions: {}", app.as_str(), e);
         }

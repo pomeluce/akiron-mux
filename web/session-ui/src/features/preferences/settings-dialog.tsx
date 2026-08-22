@@ -4,7 +4,7 @@ import { InlineErrorState } from '@/shared/components/inline-error-state';
 import { isServiceUnavailable } from '@/shared/lib/api';
 import { Button } from '@/shared/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/shared/ui/dialog';
-import type { BackendProfile, ClientPreferences, Locale, ThemeMode } from '@/types';
+import type { BackendLifecycleOutcome, BackendProfile, ClientPreferences, Locale, ThemeMode } from '@/types';
 import type { BackendManager } from '@/features/backends/use-backends';
 import { desktopShell } from '@/features/desktop/desktop-shell';
 import type { MessageKey } from '@/shared/lib/i18n';
@@ -30,7 +30,29 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const [backendDraft, setBackendDraft] = useState<BackendProfile>(props.backends.active);
   const backendPairingRef = useRef<HTMLInputElement>(null);
   const [backendMessage, setBackendMessage] = useState('');
-  const [pendingIdentity, setPendingIdentity] = useState<{ instanceId: string; pairing: boolean } | null>(null);
+  const [pendingIdentity, setPendingIdentity] = useState<{ challengeId: string; observedInstanceId: string } | null>(null);
+
+  const discardPendingIdentity = () => {
+    if (pendingIdentity) void props.backends.cancelIdentity(pendingIdentity.challengeId);
+    setPendingIdentity(null);
+  };
+
+  const applyBackendOutcome = (outcome: BackendLifecycleOutcome) => {
+    if (outcome.type === 'identityConfirmationRequired') {
+      setPendingIdentity({ challengeId: outcome.challengeId, observedInstanceId: outcome.observedInstanceId });
+      if (backendPairingRef.current) backendPairingRef.current.value = '';
+      setBackendMessage(props.t('identityChanged'));
+      return;
+    }
+    const saved = outcome.state.profiles.find(profile => profile.id === backendDraft.id);
+    if (saved) setBackendDraft(saved);
+    setPendingIdentity(null);
+    if (backendPairingRef.current) backendPairingRef.current.value = '';
+    if (outcome.type === 'authenticationRequired') setBackendMessage(props.t('backendReauthRequired'));
+    else if (outcome.type === 'offline') setBackendMessage(props.t('backendUnavailableHint'));
+    else if (outcome.type === 'appliedWithWarning') setBackendMessage(outcome.warning);
+    else setBackendMessage(props.t('connectionPassed'));
+  };
 
   useEffect(() => {
     if (!props.open) return;
@@ -54,30 +76,18 @@ export function SettingsDialog(props: SettingsDialogProps) {
 
   const saveBackend = async () => {
     const pairingLink = backendPairingRef.current?.value.trim() || '';
-    const usePairing = backendDraft.kind === 'remote' && (Boolean(pairingLink) || pendingIdentity?.pairing === true);
     try {
-      const next = usePairing
-        ? await props.backends.pair(backendDraft, pairingLink, pendingIdentity?.instanceId)
-        : await props.backends.save(backendDraft, pendingIdentity?.instanceId);
-      const saved = next.profiles.find(profile => profile.id === backendDraft.id);
-      if (!saved) throw new Error('Saved backend profile is missing');
-      setBackendDraft(saved);
-      if (backendPairingRef.current) backendPairingRef.current.value = '';
-      setPendingIdentity(null);
-      setBackendMessage(props.t('connectionPassed'));
-    } catch (cause) {
-      const identity = String(cause).match(/BACKEND_IDENTITY_CHANGED:([^\s]+)/)?.[1];
-      if (identity) {
-        setPendingIdentity({ instanceId: identity, pairing: usePairing });
-        if (backendPairingRef.current) backendPairingRef.current.value = '';
-        setBackendMessage(props.t('identityChanged'));
-        return;
-      }
+      const outcome = pendingIdentity
+        ? await props.backends.confirmIdentity(pendingIdentity.challengeId)
+        : await props.backends.save(backendDraft, pairingLink);
+      applyBackendOutcome(outcome);
+    } catch {
       setBackendMessage(props.t('backendUnavailableHint'));
     }
   };
 
   const newBackend = () => {
+    discardPendingIdentity();
     setBackendDraft({
       id: crypto.randomUUID(),
       name: props.t('remoteBackend'),
@@ -90,14 +100,18 @@ export function SettingsDialog(props: SettingsDialogProps) {
     });
     if (backendPairingRef.current) backendPairingRef.current.value = '';
     setBackendMessage('');
-    setPendingIdentity(null);
+  };
+
+  const setOpen = (open: boolean) => {
+    if (!open) discardPendingIdentity();
+    props.onOpenChange(open);
   };
 
   const submit = async () => {
     setSaving(true);
     try {
       await props.onSave(draft, root);
-      props.onOpenChange(false);
+      setOpen(false);
     } catch (cause) {
       setError(isServiceUnavailable(cause) ? 'backend' : 'save');
     } finally {
@@ -107,7 +121,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
 
   return (
     <>
-      <Dialog open={props.open} onOpenChange={props.onOpenChange}>
+      <Dialog open={props.open} onOpenChange={setOpen}>
         <DialogContent className="settings-dialog w-[min(700px,calc(100vw-28px))]">
           <DialogHeader>
             <DialogTitle>{props.t('settingsTitle')}</DialogTitle>
@@ -205,10 +219,10 @@ export function SettingsDialog(props: SettingsDialogProps) {
                         size="sm"
                         variant={profile.id === backendDraft.id ? 'secondary' : 'outline'}
                         onClick={() => {
+                          discardPendingIdentity();
                           setBackendDraft(profile);
                           if (backendPairingRef.current) backendPairingRef.current.value = '';
                           setBackendMessage('');
-                          setPendingIdentity(null);
                         }}
                       >
                         <Server className="size-3.5" /> {profile.kind === 'local' ? props.t('localBackend') : profile.name}
@@ -293,9 +307,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
                       variant="destructive"
                       size="icon"
                       aria-label={props.t('remove')}
-                      onClick={() => void props.backends.remove(backendDraft.id).then(next => {
-                        setBackendDraft(next.profiles.find(profile => profile.id === next.activeProfileId) || next.profiles[0]);
-                        if (next.revocationWarning) setBackendMessage(next.revocationWarning);
+                      onClick={() => void props.backends.remove(backendDraft.id).then(outcome => {
+                        setBackendDraft(outcome.state.profiles.find(profile => profile.id === outcome.state.activeProfileId) || outcome.state.profiles[0]);
+                        if (outcome.type === 'appliedWithWarning') setBackendMessage(outcome.warning);
                       })}
                     >
                       <Trash2 />
@@ -338,7 +352,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
             )}
           </div>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => props.onOpenChange(false)}>
+            <Button variant="ghost" onClick={() => setOpen(false)}>
               {props.t('cancel')}
             </Button>
             <Button disabled={saving || (props.workspaceEnabled && !root)} onClick={() => void submit()}>

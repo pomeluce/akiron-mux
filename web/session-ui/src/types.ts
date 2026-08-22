@@ -21,7 +21,28 @@ export interface BackendProfile {
 export interface BackendProfileState {
   profiles: BackendProfile[];
   activeProfileId: string;
-  revocationWarning?: string;
+}
+
+export type BackendProfileIntent =
+  | { type: 'save'; profile: BackendProfile; pairingLink?: string }
+  | { type: 'select'; profileId: string }
+  | { type: 'confirmIdentity'; challengeId: string }
+  | { type: 'cancelIdentity'; challengeId: string }
+  | { type: 'reorder'; profileIds: string[] }
+  | { type: 'delete'; profileId: string }
+  | { type: 'refresh'; profileId: string };
+
+export type BackendLifecycleOutcome =
+  | { type: 'applied'; state: BackendProfileState }
+  | { type: 'identityConfirmationRequired'; state: BackendProfileState; challengeId: string; profileId: string; observedInstanceId: string }
+  | { type: 'authenticationRequired'; state: BackendProfileState; profileId: string }
+  | { type: 'offline'; state: BackendProfileState; profileId: string }
+  | { type: 'appliedWithWarning'; state: BackendProfileState; warning: string };
+
+export interface BackendIdentityConfirmation {
+  challengeId: string;
+  profileId: string;
+  observedInstanceId: string;
 }
 
 export interface BackendHealth {

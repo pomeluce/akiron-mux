@@ -4,8 +4,10 @@ use std::sync::mpsc;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{backend::CrosstermBackend, Frame, Terminal};
 
+use crate::agent::AgentKind;
 use crate::core::config::ConfigManager;
 use crate::core::models::AppType;
+use crate::core::native_history::NativeHistoryIngestion;
 
 use super::tabs::{history::HistoryTab, providers::ProvidersTab, settings::SettingsTab, usage::UsageTab, Tab, TabContent};
 use super::theme;
@@ -28,7 +30,7 @@ pub struct App {
 impl App {
     pub fn new(db_path: &std::path::Path, defaults_path: Option<&std::path::Path>) -> anyhow::Result<Self> {
         let mgr = Rc::new(ConfigManager::new(db_path, defaults_path)?);
-        if let Err(e) = crate::core::import::import_codex_sessions(mgr.db()) {
+        if let Err(e) = NativeHistoryIngestion::new(mgr.db()).refresh_sessions(AgentKind::Codex, |_| {}) {
             tracing::warn!("Failed to import Codex sessions: {}", e);
         }
         let current_app = mgr.get_setting("active_app").and_then(|value| value.parse().ok()).unwrap_or_default();
@@ -114,10 +116,8 @@ impl App {
             match rx.try_recv() {
                 Ok(true) => {
                     tracing::info!("File watcher: changes detected, running incremental imports");
-                    for result in [
-                        crate::core::import::import_claude_sessions(self.mgr.db()),
-                        crate::core::import::import_codex_sessions(self.mgr.db()),
-                    ] {
+                    let ingestion = NativeHistoryIngestion::new(self.mgr.db());
+                    for result in [ingestion.refresh_sessions(AgentKind::Claude, |_| {}), ingestion.refresh_sessions(AgentKind::Codex, |_| {})] {
                         if let Err(e) = result {
                             tracing::warn!("Polling session import failed: {}", e);
                         }

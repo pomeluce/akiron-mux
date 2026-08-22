@@ -1,7 +1,6 @@
 use super::connection::Db;
 use rusqlite::params;
 use serde::Serialize;
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UsageSummary {
@@ -23,42 +22,6 @@ pub struct SessionUsageDetails {
 }
 
 pub type DailyUsage = (String, i64, i64, i64, i64);
-
-/// Progress event sent from the background scan thread to the TUI
-#[derive(Debug, Clone)]
-pub enum ScanEvent {
-    /// A batch of parsed records from one file, ready for DB insert
-    Batch {
-        #[allow(dead_code)]
-        app_type: String,
-        sid: String,
-        file_path: PathBuf,
-        records: Vec<UsageRecord>,
-    },
-    /// Progress update (files done / files total, cumulative records)
-    Progress { files_done: usize, files_total: usize, records: usize },
-    /// All files parsed.
-    Done {},
-}
-
-/// Lightweight parser for assistant message usage data in JSONL files
-/// Parsed usage record awaiting DB insert
-#[derive(Debug, Clone)]
-pub struct UsageRecord {
-    pub msg_id: String,
-    pub model: String,
-    pub date: String,
-    pub input: i64,
-    pub output: i64,
-    pub cr: i64,
-    pub cc: i64,
-}
-
-/// Scan context prepared on main thread (DB queries only, fast).
-#[derive(Debug, Clone)]
-pub struct ScanContext {
-    pub file_index: std::collections::HashMap<String, i64>, // file_path → mtime
-}
 
 impl Db {
     pub fn query_session_usage_details(&self, app_type: &str, session_id: &str) -> Result<SessionUsageDetails, rusqlite::Error> {
@@ -158,76 +121,4 @@ impl Db {
         )?;
         stmt.query_row(params![app_type, session_id], |row| Ok((row.get(0)?, row.get(1)?)))
     }
-
-    /// Prepare scan context: load the file sync index from session_log_sync.
-    /// Called from main thread. Fast — no filesystem walk.
-    pub fn prepare_scan_context(&self) -> Result<ScanContext, anyhow::Error> {
-        // Cleanup synthetic entries
-        if let Err(e) = self.conn().execute("DELETE FROM usage_logs WHERE model = '<synthetic>'", []) {
-            tracing::warn!("synthetic cleanup failed: {}", e);
-        }
-
-        // Load stored file index from session_log_sync
-        let file_index: std::collections::HashMap<String, i64> = {
-            let mut stmt = self.conn().prepare("SELECT file_path, file_mtime FROM session_log_sync WHERE scan_type = 'usage'")?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-            rows.filter_map(|r| r.ok()).collect()
-        };
-
-        Ok(ScanContext { file_index })
-    }
-
-    /// Insert a batch of parsed records into usage_logs (single transaction for speed).
-    pub fn insert_usage_batch(&self, app_type: &str, sid: &str, file_path: &PathBuf, records: &[UsageRecord]) -> Result<usize, anyhow::Error> {
-        let mut imported = 0usize;
-        let result: Result<usize, anyhow::Error> = (|| {
-            self.conn().execute("BEGIN", [])?;
-            self.conn().execute(
-                "DELETE FROM usage_logs WHERE app_type = ?1 AND session_id = ?2 AND data_source = 'import'",
-                params![app_type, sid],
-            )?;
-            for r in records {
-                let inserted = self.conn().execute(
-                    "INSERT OR IGNORE INTO usage_logs (app_type, model, provider_id, profile_id, session_id, message_id,
-                     prompt_tokens, completion_tokens, cache_read_tokens, cache_creation_tokens, total_tokens, timestamp, data_source)
-                     VALUES (?1, ?2, '', '', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'import')",
-                    params![
-                        app_type,
-                        r.model,
-                        sid,
-                        r.msg_id,
-                        r.input,
-                        r.output,
-                        r.cr,
-                        r.cc,
-                        r.input.saturating_add(r.output).saturating_add(r.cr).saturating_add(r.cc),
-                        r.date
-                    ],
-                )?;
-                imported += inserted;
-            }
-            if let Some(mtime) = file_mtime(file_path) {
-                let now_iso = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                let file_path_str = file_path.to_string_lossy().to_string();
-                self.conn().execute(
-                    "INSERT INTO session_log_sync (file_path, file_mtime, scan_type, last_synced_at)
-                     VALUES (?1, ?2, 'usage', ?3)
-                     ON CONFLICT(file_path, scan_type) DO UPDATE SET
-                        file_mtime=excluded.file_mtime,
-                        last_synced_at=excluded.last_synced_at",
-                    params![file_path_str, mtime, now_iso],
-                )?;
-            }
-            self.conn().execute("COMMIT", [])?;
-            Ok(imported)
-        })();
-        if result.is_err() {
-            let _ = self.conn().execute("ROLLBACK", []);
-        }
-        result
-    }
-}
-
-fn file_mtime(path: &PathBuf) -> Option<i64> {
-    crate::core::import::file_mtime(path)
 }

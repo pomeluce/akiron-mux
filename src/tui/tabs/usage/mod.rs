@@ -4,9 +4,11 @@ use crate::tui::lang;
 use super::super::theme;
 use super::super::widgets::shared::{format_tokens, render_search_box as shared_search};
 use super::TabContent;
+use crate::agent::AgentKind;
 use crate::core::config::ConfigManager;
 use crate::core::models::AppType;
-use crate::db::usage::{DailyUsage, ScanContext, ScanEvent, UsageSummary};
+use crate::core::native_history::{NativeHistoryIngestion, UsageScan, UsageScanUpdate};
+use crate::db::usage::{DailyUsage, UsageSummary};
 use crossterm::event::KeyCode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -16,7 +18,6 @@ use ratatui::{
     Frame,
 };
 use std::rc::Rc;
-use std::sync::mpsc;
 
 /// Background scan state, updated by poll_scan_events()
 enum ScanState {
@@ -33,24 +34,19 @@ pub struct UsageTab {
     pub search_query: String,
     pub is_searching: bool,
     chart_scroll: usize,
-    app_type: String,
-    scan_app: String,
+    app: AppType,
+    scan_agent: AgentKind,
     /// Cached daily usage to avoid per-frame DB queries
     cached_daily: Option<(String, Vec<DailyUsage>)>,
-    /// Background scan receiver + state
-    scan_rx: Option<mpsc::Receiver<ScanEvent>>,
+    scan: Option<UsageScan>,
     scan_state: ScanState,
-    /// Handle for graceful shutdown of the background scan thread
-    scan_handle: Option<std::thread::JoinHandle<()>>,
     /// A file change arrived while a scan was running.
     rescan_pending: bool,
 }
 
 impl UsageTab {
     pub fn new(mgr: Rc<ConfigManager>, app: AppType) -> Self {
-        let scan_state;
-        let scan_rx;
-        let scan_handle;
+        let scan_agent = AgentKind::from(app);
         let app_type = app.as_str().to_string();
 
         // Check if this is first launch (no usage data yet)
@@ -63,38 +59,22 @@ impl UsageTab {
             count == 0
         };
 
-        // Prepare scan context on main thread (DB access only, fast) then spawn background parser
-        {
-            let (tx, rx) = mpsc::channel();
-            let ctx = match mgr.db().prepare_scan_context() {
-                Ok(c) => {
-                    tracing::info!("Scan prep: {} files in index", c.file_index.len());
-                    c
-                }
-                Err(e) => {
-                    tracing::error!("Failed to prepare scan context: {}", e);
-                    ScanContext {
-                        file_index: std::collections::HashMap::new(),
-                    }
-                }
-            };
-            // Always spawn background thread — it does its own file collection
-            let scan_target = app_type.clone();
-            let handle = std::thread::spawn(move || {
-                crate::core::import::parse_files_in_background(scan_target, ctx, 10, tx);
-            });
-            scan_rx = Some(rx);
-            scan_handle = Some(handle);
-            if is_first_launch {
-                scan_state = ScanState::Scanning {
-                    files_done: 0,
-                    files_total: 0,
-                    records: 0,
-                };
-            } else {
-                scan_state = ScanState::Idle;
+        let scan = match NativeHistoryIngestion::new(mgr.db()).start_usage_scan(scan_agent) {
+            Ok(scan) => Some(scan),
+            Err(error) => {
+                tracing::error!("Failed to start Native History usage scan: {}", error);
+                None
             }
-        }
+        };
+        let scan_state = if is_first_launch && scan.is_some() {
+            ScanState::Scanning {
+                files_done: 0,
+                files_total: 0,
+                records: 0,
+            }
+        } else {
+            ScanState::Idle
+        };
 
         let summaries = mgr.db().query_usage(&app_type, "all").unwrap_or_default();
         let mut state = ListState::default();
@@ -110,23 +90,22 @@ impl UsageTab {
             search_query: String::new(),
             is_searching: false,
             chart_scroll: 0,
-            scan_app: app_type.clone(),
-            app_type,
+            scan_agent,
+            app,
             cached_daily: None,
-            scan_rx,
+            scan,
             scan_state,
-            scan_handle,
             rescan_pending: false,
         }
     }
 
     pub fn set_app(&mut self, app: AppType) {
-        self.app_type = app.as_str().to_string();
+        self.app = app;
         self.cached_daily = None;
         self.selected_index = 0;
-        self.summaries = self.mgr.db().query_usage(&self.app_type, &self.range).unwrap_or_default();
+        self.summaries = self.mgr.db().query_usage(self.app.as_str(), &self.range).unwrap_or_default();
         self.sync_visible_selection();
-        if self.scan_handle.is_none() {
+        if self.scan.is_none() {
             self.trigger_incremental_scan();
         } else {
             self.rescan_pending = true;
@@ -135,7 +114,7 @@ impl UsageTab {
 
     /// Check if a background scan is currently running
     pub fn is_scanning(&self) -> bool {
-        matches!(self.scan_state, ScanState::Scanning { .. })
+        self.scan.is_some()
     }
 
     pub fn status_text(&self) -> String {
@@ -143,7 +122,7 @@ impl UsageTab {
             ScanState::Scanning { files_done, files_total, records } => {
                 format!(
                     "{} · {} {}/{} {} · {} {}",
-                    self.app_type,
+                    self.app.as_str(),
                     lang::pick("scanning", "扫描中"),
                     files_done,
                     files_total,
@@ -154,7 +133,7 @@ impl UsageTab {
             }
             ScanState::Idle => format!(
                 "{} · {} · {} {}",
-                self.app_type,
+                self.app.as_str(),
                 lang::pick("live", "实时"),
                 self.visible_indices().len(),
                 lang::pick("models", "模型")
@@ -164,35 +143,28 @@ impl UsageTab {
 
     /// Trigger an incremental scan (called by file watcher when changes detected)
     pub fn trigger_incremental_scan(&mut self) {
-        if self.scan_handle.is_some() {
+        if self.scan.is_some() {
             self.rescan_pending = true;
             return;
         }
-        let scan_app = self.app_type.clone();
-        let ctx = match self.mgr.db().prepare_scan_context() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Failed to prepare incremental scan: {}", e);
+        let scan_agent = AgentKind::from(self.app);
+        let scan = match NativeHistoryIngestion::new(self.mgr.db()).start_usage_scan(scan_agent) {
+            Ok(scan) => scan,
+            Err(error) => {
+                tracing::error!("Failed to start incremental Native History usage scan: {}", error);
                 return;
             }
         };
-        let (tx, rx) = mpsc::channel();
-        let worker_app = scan_app.clone();
-        let handle = std::thread::spawn(move || {
-            crate::core::import::parse_files_in_background(worker_app, ctx, 10, tx);
-        });
-        self.scan_rx = Some(rx);
-        self.scan_handle = Some(handle);
-        self.scan_app = scan_app;
+        self.scan = Some(scan);
+        self.scan_agent = scan_agent;
         self.rescan_pending = false;
         // Keep Idle — silent background scan, no progress bar in UI
     }
 
     /// Gracefully wait for background scan thread to finish.
     pub fn shutdown(&mut self) {
-        if let Some(handle) = self.scan_handle.take() {
-            self.scan_rx = None;
-            let _ = handle.join();
+        if let Some(mut scan) = self.scan.take() {
+            scan.shutdown();
         }
     }
 
@@ -235,58 +207,40 @@ impl UsageTab {
     /// Called every event-loop tick — drain ALL pending events at once to avoid
     /// batching delays (one-per-tick would take N×100ms for N files).
     pub fn poll_scan_events(&mut self) {
-        let rx = match &self.scan_rx {
-            Some(rx) => rx,
+        let update = match self.scan.as_mut() {
+            Some(scan) => scan.poll(self.mgr.db()),
             None => return,
         };
-
-        let mut done = false;
-        loop {
-            match rx.try_recv() {
-                Ok(ScanEvent::Batch {
-                    app_type,
-                    sid,
-                    file_path,
-                    records,
-                }) => {
-                    if !records.is_empty() {
-                        if let Err(e) = self.mgr.db().insert_usage_batch(&app_type, &sid, &file_path, &records) {
-                            tracing::error!("Failed to insert usage batch: {}", e);
-                        }
-                    }
-                }
-                Ok(ScanEvent::Progress { files_done, files_total, records }) => {
-                    if matches!(self.scan_state, ScanState::Scanning { .. }) {
-                        self.scan_state = ScanState::Scanning { files_done, files_total, records };
-                    }
-                }
-                Ok(ScanEvent::Done {}) => {
-                    done = true;
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.scan_state = ScanState::Idle;
-                    self.scan_rx = None;
-                    self.scan_handle = None;
-                    return;
+        match update {
+            Some(UsageScanUpdate::Running(progress)) if matches!(self.scan_state, ScanState::Scanning { .. }) => {
+                self.scan_state = ScanState::Scanning {
+                    files_done: progress.files_done,
+                    files_total: progress.files_total,
+                    records: progress.records,
+                };
+            }
+            Some(UsageScanUpdate::Complete(report)) => {
+                let completed_agent = self.scan_agent;
+                tracing::info!(changed = report.changed, failed = report.failed, "Native History usage scan complete");
+                self.scan_state = ScanState::Idle;
+                self.scan = None;
+                self.cached_daily = None;
+                self.summaries = self.mgr.db().query_usage(self.app.as_str(), &self.range).unwrap_or_default();
+                self.sync_visible_selection();
+                let active_agent = AgentKind::from(self.app);
+                if self.rescan_pending || completed_agent != active_agent {
+                    self.trigger_incremental_scan();
                 }
             }
-        }
-
-        if done {
-            let completed_app = self.scan_app.clone();
-            tracing::info!("Usage scan complete");
-            self.scan_state = ScanState::Idle;
-            self.scan_rx = None;
-            if let Some(h) = self.scan_handle.take() {
-                let _ = h.join();
+            Some(UsageScanUpdate::Failed(message)) => {
+                tracing::error!("Native History usage scan failed: {}", message);
+                self.scan_state = ScanState::Idle;
+                self.scan = None;
+                if self.rescan_pending {
+                    self.trigger_incremental_scan();
+                }
             }
-            self.cached_daily = None;
-            self.summaries = self.mgr.db().query_usage(&self.app_type, &self.range).unwrap_or_default();
-            self.sync_visible_selection();
-            if self.rescan_pending || completed_app != self.app_type {
-                self.trigger_incremental_scan();
-            }
+            _ => {}
         }
     }
 }
@@ -369,7 +323,7 @@ impl TabContent for UsageTab {
                 }
                 .into();
                 self.cached_daily = None;
-                self.summaries = self.mgr.db().query_usage(&self.app_type, &self.range).unwrap_or_default();
+                self.summaries = self.mgr.db().query_usage(self.app.as_str(), &self.range).unwrap_or_default();
                 self.sync_visible_selection();
             }
             KeyCode::Char('/') => {
@@ -403,13 +357,13 @@ impl UsageTab {
     }
 
     fn get_daily_cached(&mut self, model: &str) -> Vec<(String, i64, i64, i64, i64)> {
-        let key = format!("{}|{}", self.app_type, model);
+        let key = format!("{}|{}", self.app.as_str(), model);
         if let Some((ref k, ref data)) = self.cached_daily {
             if k == &key {
                 return data.clone();
             }
         }
-        let data = self.mgr.db().query_daily_usage(&self.app_type, model).unwrap_or_default();
+        let data = self.mgr.db().query_daily_usage(self.app.as_str(), model).unwrap_or_default();
         self.cached_daily = Some((key, data.clone()));
         data
     }

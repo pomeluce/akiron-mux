@@ -10,4 +10,12 @@ impl Db {
         self.conn().execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)", params![key, value])?;
         Ok(())
     }
+
+    pub fn set_settings(&self, settings: &[(&str, &str)]) -> Result<(), rusqlite::Error> {
+        let transaction = rusqlite::Transaction::new_unchecked(self.conn(), rusqlite::TransactionBehavior::Immediate)?;
+        for (key, value) in settings {
+            transaction.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)", params![key, value])?;
+        }
+        transaction.commit()
+    }
 }

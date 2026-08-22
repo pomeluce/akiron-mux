@@ -12,6 +12,7 @@ import { TerminalView } from './terminal-view';
 
 interface WorkspaceShellProps {
   backendAddress: string;
+  backendKey: string;
   sessions: SessionInfo[];
   active?: SessionInfo;
   activeId: string | null;
@@ -157,6 +158,7 @@ export function WorkspaceShell(props: WorkspaceShellProps) {
                 <TerminalView
                   key={session.id}
                   backendAddress={props.backendAddress}
+                  backendKey={props.backendKey}
                   session={session}
                   active={session.id === props.activeId}
                   focusRequest={props.terminalFocusRequest.sessionId === session.id ? props.terminalFocusRequest.sequence : 0}

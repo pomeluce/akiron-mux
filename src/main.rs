@@ -80,23 +80,26 @@ fn pre_tui_import() {
     }
 
     // Always run import — incremental (mtime-based) on subsequent launches
-    let result = ccswitch::core::import::import_claude_sessions_with_progress(&db, |files_done, files_total, imported| {
+    let result = ccswitch::core::native_history::NativeHistoryIngestion::new(&db).refresh_sessions(ccswitch::agent::AgentKind::Claude, |progress| {
         if is_first_launch {
-            let pct = if files_total > 0 {
-                (files_done as f64 / files_total as f64 * 100.0) as usize
+            let pct = if progress.files_total > 0 {
+                (progress.files_done as f64 / progress.files_total as f64 * 100.0) as usize
             } else {
                 0
             };
             let bar_len = (pct / 4).min(25);
             let bar = format!("{}{}", "█".repeat(bar_len), "░".repeat(25usize.saturating_sub(bar_len)));
-            eprint!("\r  [{}] {:>3}%  {}/{} files  {} sessions imported", bar, pct, files_done, files_total, imported);
+            eprint!(
+                "\r  [{}] {:>3}%  {}/{} files  {} sessions imported",
+                bar, pct, progress.files_done, progress.files_total, progress.records
+            );
             std::io::Write::flush(&mut std::io::stderr()).ok();
         }
     });
 
     if is_first_launch {
         match result {
-            Ok(n) => eprintln!("\n\n✅ Imported {} sessions. Launching AkironMux...\n", n),
+            Ok(report) => eprintln!("\n\n✅ Imported {} sessions. Launching AkironMux...\n", report.changed),
             Err(e) => eprintln!("\n\n⚠️  Import finished with errors: {}\n", e),
         }
     } else if let Err(e) = result {

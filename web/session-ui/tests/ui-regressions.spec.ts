@@ -58,6 +58,41 @@ async function dragRowTo(page: Page, source: ReturnType<Page['locator']>, target
   await page.mouse.up();
 }
 
+test('Backend Profile refresh ignores stale results and never overlaps within one generation', async ({ page }) => {
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    const { BackendProfileRefreshLoop } = await import('/src/features/backends/backend-profile-lifecycle.ts');
+    type Resolve = (value: {
+      type: 'applied';
+      state: { profiles: never[]; activeProfileId: string };
+    }) => void;
+    const calls: string[] = [];
+    const published: string[] = [];
+    const resolvers: Resolve[] = [];
+    const loop = new BackendProfileRefreshLoop(5, intent => {
+      calls.push(intent.type === 'refresh' ? intent.profileId : intent.type);
+      return new Promise(resolve => resolvers.push(resolve as Resolve));
+    });
+    const outcome = (activeProfileId: string) => ({ type: 'applied' as const, state: { profiles: [] as never[], activeProfileId } });
+
+    loop.start('first', value => published.push(value.state.activeProfileId));
+    await new Promise(resolve => window.setTimeout(resolve, 10));
+    const firstDidNotOverlap = calls.join(',') === 'first';
+
+    loop.start('second', value => published.push(value.state.activeProfileId));
+    await new Promise(resolve => window.setTimeout(resolve, 0));
+    resolvers[0](outcome('stale-first'));
+    resolvers[1](outcome('second'));
+    await new Promise(resolve => window.setTimeout(resolve, 2));
+    loop.stop();
+    return { calls, published, firstDidNotOverlap };
+  });
+
+  expect(result.firstDidNotOverlap).toBe(true);
+  expect(result.calls.slice(0, 2)).toEqual(['first', 'second']);
+  expect(result.published).toEqual(['second']);
+});
+
 const workspace = {
   general_root: '/home/test/workbench',
   projects: [
@@ -123,16 +158,26 @@ async function mockBackend(page: Page) {
         super();
         this.url = String(url);
         sockets.set(this.url, this);
+        (window as unknown as { __akmuxSocketEvents: Array<{ url: string; kind: string }> }).__akmuxSocketEvents.push({ url: this.url, kind: 'connect' });
         window.setTimeout(() => {
+          if (this.readyState !== MockWebSocket.CONNECTING) return;
           this.readyState = MockWebSocket.OPEN;
           this.dispatchEvent(new Event('open'));
           const prefix = this.url.includes('session-claude') ? 'claude' : this.url.includes('secondary') ? 'codex-secondary' : 'codex';
           const replayApproval = (window as unknown as { __akmuxReplayApprovalOnConnect: boolean }).__akmuxReplayApprovalOnConnect && prefix === 'codex';
           const deliverBootstrap = () => {
+            if (this.readyState !== MockWebSocket.OPEN) return;
+            const sessionId = prefix === 'claude' ? 'session-claude' : prefix === 'codex-secondary' ? 'session-codex-secondary' : 'session-codex';
+            this.dispatchEvent(
+              new MessageEvent('message', {
+                data: JSON.stringify({ type: 'lease', lease: { version: 1, controller_device_name: 'Desktop' }, can_write: true }),
+              }),
+            );
+            this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'lease-recovery', credential: `credential-${sessionId}` }) }));
+            this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'replay', replace: false }) }));
             const output = `${replayApproval ? '\x1b]9;approval requested\x07' : ''}${Array.from({ length: 200 }, (_, index) => `${prefix} history line ${index + 1}\r\n`).join('')}`;
             (window as unknown as { __akmuxSocketEvents: Array<{ url: string; kind: string }> }).__akmuxSocketEvents.push({ url: this.url, kind: 'output' });
             this.dispatchEvent(new MessageEvent('message', { data: new TextEncoder().encode(output).buffer }));
-            const sessionId = prefix === 'claude' ? 'session-claude' : prefix === 'codex-secondary' ? 'session-codex-secondary' : 'session-codex';
             this.dispatchEvent(
               new MessageEvent('message', {
                 data: JSON.stringify({
@@ -158,7 +203,10 @@ async function mockBackend(page: Page) {
       }
 
       send(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
-        if (typeof data !== 'string') return;
+        if (typeof data !== 'string') {
+          (window as unknown as { __akmuxSocketEvents: Array<{ url: string; kind: string }> }).__akmuxSocketEvents.push({ url: this.url, kind: 'input' });
+          return;
+        }
         try {
           const message = JSON.parse(data) as { type?: string; rows?: number; cols?: number };
           if (message.type !== 'resize') return;
@@ -177,6 +225,7 @@ async function mockBackend(page: Page) {
       }
 
       close() {
+        if (this.readyState === MockWebSocket.CLOSED) return;
         this.readyState = MockWebSocket.CLOSED;
         this.dispatchEvent(new Event('close'));
       }
@@ -195,6 +244,31 @@ async function mockBackend(page: Page) {
       __akmuxEmitAttention: (sessionId: string, kind: 'input' | 'completed', occurredAtMs?: number) => {
         const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
         socket?.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'attention', kind, occurred_at_ms: occurredAtMs }) }));
+      },
+      __akmuxSetLease: (sessionId: string, canWrite: boolean, version = 2) => {
+        const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
+        socket?.dispatchEvent(
+          new MessageEvent('message', {
+            data: JSON.stringify({
+              type: 'lease',
+              lease: { version, controller_device_name: canWrite ? 'Desktop' : 'Another device' },
+              can_write: canWrite,
+            }),
+          }),
+        );
+      },
+      __akmuxReplaceReplay: (sessionId: string, text: string) => {
+        const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
+        socket?.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'replay', replace: true }) }));
+        socket?.dispatchEvent(new MessageEvent('message', { data: new TextEncoder().encode(text).buffer }));
+      },
+      __akmuxCloseSocket: (sessionId: string) => {
+        const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
+        socket?.close();
+      },
+      __akmuxRevokeSocket: (sessionId: string) => {
+        const socket = [...sockets.entries()].find(([url]) => url.includes(sessionId))?.[1];
+        socket?.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ type: 'authorization-revoked' }) }));
       },
       __akmuxReconnectWithApprovalScrollback: (sessionId: string) => {
         (window as unknown as { __akmuxReplayApprovalOnConnect: boolean }).__akmuxReplayApprovalOnConnect = true;
@@ -403,7 +477,9 @@ test('terminal synchronizes its fitted size before buffered Claude output arrive
     )
     .toEqual(expect.arrayContaining(['resize', 'output']));
   const firstClaudeEvent = await page.evaluate(() =>
-    (window as unknown as { __akmuxSocketEvents: Array<{ url: string; kind: string }> }).__akmuxSocketEvents.find(event => event.url.includes('session-claude'))?.kind,
+    (window as unknown as { __akmuxSocketEvents: Array<{ url: string; kind: string }> }).__akmuxSocketEvents.find(
+      event => event.url.includes('session-claude') && (event.kind === 'resize' || event.kind === 'output'),
+    )?.kind,
   );
   expect(firstClaudeEvent).toBe('resize');
 });
@@ -483,6 +559,7 @@ test('the active session is restored without briefly overwriting its backend key
   await page.locator('[data-session-tab="session-codex-secondary"]').click();
   await page.reload();
   await expect(page.locator('[data-session-tab="session-codex-secondary"]')).toHaveAttribute('data-active', 'true');
+  await expect(page.locator('.terminal-host[aria-hidden="false"] .xterm-helper-textarea')).not.toBeFocused();
 });
 
 test('Ctrl+Tab and Ctrl+Shift+Tab cycle session tabs in both directions', async ({ page }) => {
@@ -528,6 +605,100 @@ test('sidebar resizing does not create Codex attention signals', async ({ page }
   await page.mouse.move(box!.x + 48, box!.y + 100, { steps: 5 });
   await page.mouse.up();
   await expect(page.locator('[data-session-tab="session-codex"] .session-signal')).toHaveCount(0);
+});
+
+test('read-only terminal connections filter input until they obtain control', async ({ page }) => {
+  const input = page.locator('.terminal-host[aria-hidden="false"] .xterm-helper-textarea');
+  await input.focus();
+  await page.evaluate(() => {
+    const setLease = (window as unknown as { __akmuxSetLease: (sessionId: string, canWrite: boolean) => void }).__akmuxSetLease;
+    setLease('session-codex', false);
+  });
+  const inputCount = () =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __akmuxSocketEvents: Array<{ url: string; kind: string }> }).__akmuxSocketEvents.filter(
+          event => event.url.includes('session-codex') && event.kind === 'input',
+        ).length,
+    );
+  const before = await inputCount();
+  await page.keyboard.type('x');
+  await expect.poll(inputCount).toBe(before);
+
+  await page.evaluate(() => {
+    const setLease = (window as unknown as { __akmuxSetLease: (sessionId: string, canWrite: boolean) => void }).__akmuxSetLease;
+    setLease('session-codex', true);
+  });
+  await page.keyboard.type('y');
+  await expect.poll(inputCount).toBe(before + 1);
+});
+
+test('replacement replay clears stale terminal output before rendering the snapshot', async ({ page }) => {
+  const rows = page.locator('.terminal-host[aria-hidden="false"] .xterm-rows');
+  await page.evaluate(() => {
+    const output = (window as unknown as { __akmuxEmitOutput: (sessionId: string, text: string) => void }).__akmuxEmitOutput;
+    output('session-codex', '\r\nBEFORE-REPLACEMENT-REPLAY\r\n');
+  });
+  await expect(rows).toContainText('BEFORE-REPLACEMENT-REPLAY');
+
+  await page.evaluate(() => {
+    const replay = (window as unknown as { __akmuxReplaceReplay: (sessionId: string, text: string) => void }).__akmuxReplaceReplay;
+    replay('session-codex', 'AFTER-REPLACEMENT-REPLAY\r\n');
+  });
+  await expect(rows).toContainText('AFTER-REPLACEMENT-REPLAY');
+  await expect(rows).not.toContainText('BEFORE-REPLACEMENT-REPLAY');
+});
+
+test('terminal reconnects after transport loss but stops after authorization revocation', async ({ page }) => {
+  const connectionCount = () =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __akmuxSocketEvents: Array<{ url: string; kind: string }> }).__akmuxSocketEvents.filter(
+          event => event.url.includes('session-codex') && event.kind === 'connect',
+        ).length,
+    );
+  const initialConnections = await connectionCount();
+  await page.evaluate(() => {
+    const closeSocket = (window as unknown as { __akmuxCloseSocket: (sessionId: string) => void }).__akmuxCloseSocket;
+    closeSocket('session-codex');
+  });
+  await expect(page.locator('.terminal-view-shell[aria-hidden="false"]')).toHaveAttribute('data-connection-phase', 'reconnecting');
+  await expect.poll(connectionCount, { timeout: 3_000 }).toBe(initialConnections + 1);
+  await expect(page.locator('.terminal-view-shell[aria-hidden="false"]')).toHaveAttribute('data-connection-phase', 'open');
+
+  const beforeRevocation = await connectionCount();
+  await page.evaluate(() => {
+    const revokeSocket = (window as unknown as { __akmuxRevokeSocket: (sessionId: string) => void }).__akmuxRevokeSocket;
+    revokeSocket('session-codex');
+  });
+  await expect(page.locator('.terminal-view-shell[aria-hidden="false"]')).toHaveAttribute('data-connection-phase', 'revoked');
+  await page.waitForTimeout(1_500);
+  expect(await connectionCount()).toBe(beforeRevocation);
+});
+
+test('lease recovery credentials are isolated by backend key and migrate from address keys', async ({ page }) => {
+  await expect
+    .poll(() =>
+      page.evaluate(() => [
+        sessionStorage.getItem('akmux.lease-recovery:embedded:session-codex'),
+        sessionStorage.getItem('akmux.lease-recovery:embedded:session-claude'),
+      ]),
+    )
+    .toEqual(['credential-session-codex', 'credential-session-claude']);
+
+  await page.evaluate(() => {
+    sessionStorage.removeItem('akmux.lease-recovery:embedded:session-codex');
+    sessionStorage.setItem('akmux.lease-recovery::session-codex', 'legacy-credential');
+  });
+  await page.reload();
+  await expect
+    .poll(() =>
+      page.evaluate(() => ({
+        legacy: sessionStorage.getItem('akmux.lease-recovery::session-codex'),
+        current: sessionStorage.getItem('akmux.lease-recovery:embedded:session-codex'),
+      })),
+    )
+    .toEqual({ legacy: null, current: 'credential-session-codex' });
 });
 
 test('reconnecting does not treat Codex approval sequences in scrollback as new attention', async ({ page }) => {
@@ -635,6 +806,7 @@ test('an exited session is removed even when Ctrl+C returns a nonzero exit code'
   });
   await expect(page.locator('[data-session-tab="session-codex"]')).toHaveCount(0, { timeout: 2_000 });
   await expect(page.locator('[data-session-tab="session-claude"]')).toHaveAttribute('data-active', 'true');
+  await expect(page.locator('.terminal-host[aria-hidden="false"] .xterm-helper-textarea')).toBeFocused();
 });
 
 test('closing the active session focuses the adjacent session and terminal fits its host', async ({ page }) => {

@@ -1,38 +1,37 @@
 use std::{
-    collections::HashMap,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
     body::Body,
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        DefaultBodyLimit, Extension, Path, Query, Request, State,
-    },
+    extract::{ws::WebSocketUpgrade, DefaultBodyLimit, Extension, Path, Query, Request, State},
     http::{header, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
-use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use url::Url;
 
 use crate::{
     agent::{AgentKind, LaunchMode},
-    core::{config, import},
-    db::{sessions::SessionRecord, Db},
-    session_runtime::{AttentionKind, CreateSession, SessionHandle, SessionInfo, SessionManager, SessionStreamEvent},
+    core::{config, native_history::NativeHistoryIngestion},
+    db::Db,
+    session_runtime::{AttentionKind, CreateSession, SessionInfo, SessionManager},
 };
 
 pub mod admin;
 pub mod control;
 pub mod remote;
+mod terminal_connection;
+mod workspace_organization;
+
+use terminal_connection::{TerminalAccess, TerminalError, TerminalHub};
+use workspace_organization::{HistoryItem, Project, ProjectChanges, SortMode, WorkspaceChanges, WorkspaceError, WorkspaceOrganization, WorkspaceResponse, WorkspaceSettings};
 
 const DEFAULT_PORT: u16 = 17321;
 const INDEX_HTML: &str = include_str!("../../web/session-ui/dist/index.html");
@@ -46,15 +45,13 @@ const MAPLE_MONO_BOLD: &[u8] = include_bytes!("../../web/session-ui/dist/fonts/M
 const MAPLE_MONO_CN: &[u8] = include_bytes!("../../web/session-ui/dist/fonts/MapleMonoNormalNL-NF-CN-Medium.woff2");
 const MAPLE_MONO_LICENSE: &[u8] = include_bytes!("../../web/session-ui/dist/fonts/OFL.txt");
 
-#[derive(Clone)]
 struct AppState {
     manager: SessionManager,
     db: Arc<Mutex<Db>>,
-    workspaces: Arc<Mutex<WorkspaceState>>,
+    workspace: WorkspaceOrganization,
     instance_id: String,
     remote_security: Option<remote::RemoteSecurity>,
-    leases: remote::ControlLeases,
-    remote_websockets: Arc<tokio::sync::Semaphore>,
+    terminals: TerminalHub,
 }
 
 #[derive(Debug, Clone)]
@@ -64,83 +61,6 @@ struct RequestDevice(remote::DeviceIdentity);
 enum RequestAccess {
     Local,
     Remote,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Project {
-    id: String,
-    name: String,
-    path: String,
-    pinned: bool,
-    sort_order: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkspaceDirectory {
-    path: String,
-    pinned: bool,
-    last_opened_ms: i64,
-    #[serde(default)]
-    sort_order: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkspaceState {
-    general_root: String,
-    projects: Vec<Project>,
-    other_directories: Vec<WorkspaceDirectory>,
-    project_sort: SortMode,
-    general_sort: SortMode,
-    other_sort: SortMode,
-    #[serde(default)]
-    directory_sort: HashMap<String, SortMode>,
-    #[serde(default)]
-    session_order: HashMap<String, Vec<String>>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum SortMode {
-    Priority,
-    Recent,
-    Manual,
-}
-
-impl Default for WorkspaceState {
-    fn default() -> Self {
-        Self {
-            general_root: default_general_root().display().to_string(),
-            projects: Vec::new(),
-            other_directories: Vec::new(),
-            project_sort: SortMode::Priority,
-            general_sort: SortMode::Recent,
-            other_sort: SortMode::Recent,
-            directory_sort: std::collections::HashMap::new(),
-            session_order: std::collections::HashMap::new(),
-        }
-    }
-}
-
-fn default_general_root() -> PathBuf {
-    let home = default_working_directory();
-    let workbench = home.join("workbench");
-    if workbench.is_dir() {
-        workbench
-    } else {
-        home
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct HistoryItem {
-    id: String,
-    agent: AgentKind,
-    title: String,
-    cwd: String,
-    start_time: String,
-    end_time: Option<String>,
-    file_mtime: String,
-    message_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,27 +77,6 @@ struct SessionDetails {
     cache_read_tokens: i64,
     cache_creation_tokens: i64,
     message_count: i64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct HistoryDirectory {
-    path: String,
-    available: bool,
-    items: Vec<HistoryItem>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct WorkspaceResponse {
-    general_root: String,
-    projects: Vec<ProjectGroup>,
-    general: Vec<HistoryDirectory>,
-    other: Vec<HistoryDirectory>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProjectGroup {
-    project: Project,
-    history: Vec<HistoryItem>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -236,23 +135,6 @@ struct CreateSessionRequest {
     #[serde(default)]
     resume: bool,
     resume_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-enum ClientControl {
-    Resize {
-        rows: u16,
-        cols: u16,
-    },
-    #[serde(rename = "take-control", alias = "takecontrol")]
-    TakeControl {
-        expected_version: u64,
-    },
-    #[serde(rename = "recover-control", alias = "recovercontrol")]
-    RecoverControl {
-        credential: String,
-    },
 }
 
 #[derive(Debug, Serialize)]
@@ -421,16 +303,17 @@ fn router(manager: SessionManager) -> Router {
 }
 
 fn app_state(manager: SessionManager, db: Db, remote_security: remote::RemoteSecurity) -> anyhow::Result<Arc<AppState>> {
-    let workspace = load_workspace(&db);
     let instance_id = persisted_instance_id(&db)?;
+    let db = Arc::new(Mutex::new(db));
+    let workspace = WorkspaceOrganization::load(Arc::clone(&db)).map_err(anyhow::Error::new)?;
+    let terminals = TerminalHub::new(manager.clone(), Arc::clone(&db), remote_security.clone());
     let state = Arc::new(AppState {
         manager,
-        db: Arc::new(Mutex::new(db)),
-        workspaces: Arc::new(Mutex::new(workspace)),
+        db,
+        workspace,
         instance_id,
         remote_security: Some(remote_security),
-        leases: remote::ControlLeases::default(),
-        remote_websockets: Arc::new(tokio::sync::Semaphore::new(32)),
+        terminals,
     });
     start_title_sync(Arc::clone(&state));
     Ok(state)
@@ -504,7 +387,7 @@ fn start_title_sync(state: Arc<AppState>) {
 fn sync_native_titles(state: &AppState) -> anyhow::Result<()> {
     let records = {
         let db = state.db.lock().map_err(|_| anyhow::anyhow!("Database lock poisoned"))?;
-        import::refresh_session_titles(&db)?;
+        NativeHistoryIngestion::new(&db).refresh_titles()?;
         db.query_all_sessions(None, 2000)?
     };
     for session in state.manager.list() {
@@ -770,7 +653,7 @@ async fn health_with_state(State(state): State<Arc<AppState>>) -> Json<HealthRes
         default_cwd: default_working_directory().display().to_string(),
         instance_id: state.instance_id.clone(),
         api_protocol: "1.0",
-        capabilities: &["device-auth", "ws-ticket", "control-lease", "workspace-v1"],
+        capabilities: &["device-auth", "ws-ticket", "control-lease", "terminal-replay-v1", "workspace-v1"],
     })
 }
 
@@ -779,14 +662,7 @@ async fn issue_ws_ticket(
     Extension(device): Extension<RequestDevice>,
     Json(request): Json<TicketRequest>,
 ) -> Result<Json<TicketResponse>, ApiError> {
-    if state.manager.get(&request.session_id).is_none() {
-        return Err(ApiError::not_found(anyhow::anyhow!("Managed session does not exist")));
-    }
-    let ticket = state
-        .remote_security
-        .as_ref()
-        .ok_or_else(|| ApiError::internal("Remote security is unavailable"))?
-        .issue_ticket(device.0, request.session_id);
+    let ticket = state.terminals.issue_ticket(device.0, request.session_id).map_err(map_terminal_error)?;
     Ok(Json(TicketResponse { ticket, expires_in_seconds: 30 }))
 }
 
@@ -905,19 +781,9 @@ pub(crate) fn is_safe_remote_bind(ip: std::net::IpAddr) -> bool {
 }
 
 fn refresh_native_history(db: &Db) -> anyhow::Result<()> {
-    let _ = import::import_claude_sessions(db)?;
-    let _ = import::import_codex_sessions(db)?;
-    Ok(())
-}
-
-fn load_workspace(db: &Db) -> WorkspaceState {
-    db.get_setting("akironmux.workspace")
-        .and_then(|value| serde_json::from_str(&value).ok())
-        .unwrap_or_default()
-}
-
-fn save_workspace(db: &Db, workspace: &WorkspaceState) -> anyhow::Result<()> {
-    db.set_setting("akironmux.workspace", &serde_json::to_string(workspace)?)?;
+    let ingestion = NativeHistoryIngestion::new(db);
+    ingestion.refresh_sessions(AgentKind::Claude, |_| {})?;
+    ingestion.refresh_sessions(AgentKind::Codex, |_| {})?;
     Ok(())
 }
 
@@ -935,153 +801,8 @@ fn canonical_directory(path: &str) -> anyhow::Result<PathBuf> {
     Ok(canonical)
 }
 
-fn paths_overlap(left: &FsPath, right: &FsPath) -> bool {
-    left == right || left.starts_with(right) || right.starts_with(left)
-}
-
-fn canonicalize_for_comparison(path: &FsPath) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn workspace_response(db: &Db, workspace: &mut WorkspaceState, search: Option<&str>) -> anyhow::Result<WorkspaceResponse> {
-    let records = db.query_all_sessions(search, 2000)?;
-    let mut projects = workspace
-        .projects
-        .iter()
-        .cloned()
-        .map(|project| ProjectGroup { project, history: Vec::new() })
-        .collect::<Vec<_>>();
-    let project_roots = projects
-        .iter()
-        .map(|group| canonicalize_for_comparison(FsPath::new(&group.project.path)))
-        .collect::<Vec<_>>();
-    let mut general: HashMap<String, HistoryDirectory> = HashMap::new();
-    let mut other: HashMap<String, HistoryDirectory> = HashMap::new();
-    let general_root = canonicalize_for_comparison(FsPath::new(&workspace.general_root));
-
-    for (app_type, record) in records {
-        if record.project_path.trim().is_empty() {
-            continue;
-        }
-        let cwd = PathBuf::from(&record.project_path);
-        let item = HistoryItem {
-            id: record.id,
-            agent: if app_type == "claude" { AgentKind::Claude } else { AgentKind::Codex },
-            title: record
-                .title
-                .unwrap_or_else(|| cwd.file_name().and_then(|name| name.to_str()).unwrap_or("Session").to_string()),
-            cwd: record.project_path.clone(),
-            start_time: record.start_time,
-            end_time: record.end_time,
-            file_mtime: record.file_mtime,
-            message_count: record.message_count,
-        };
-        let comparison_cwd = canonicalize_for_comparison(&cwd);
-        let project_index = project_roots.iter().position(|root| comparison_cwd.starts_with(root));
-        if let Some(index) = project_index {
-            projects[index].history.push(item);
-        } else if comparison_cwd == general_root || comparison_cwd.starts_with(&general_root) {
-            let key = cwd.display().to_string();
-            general
-                .entry(key.clone())
-                .or_insert_with(|| HistoryDirectory {
-                    path: key,
-                    available: cwd.is_dir(),
-                    items: Vec::new(),
-                })
-                .items
-                .push(item);
-        } else {
-            let key = cwd.display().to_string();
-            other
-                .entry(key.clone())
-                .or_insert_with(|| HistoryDirectory {
-                    path: key,
-                    available: cwd.is_dir(),
-                    items: Vec::new(),
-                })
-                .items
-                .push(item);
-        }
-    }
-
-    let now = chrono::Utc::now().timestamp_millis();
-    let visible_directories = general.keys().chain(other.keys()).cloned().collect::<Vec<_>>();
-    for path in visible_directories {
-        if workspace.other_directories.iter().all(|directory| directory.path != path) {
-            workspace.other_directories.push(WorkspaceDirectory {
-                path,
-                pinned: false,
-                last_opened_ms: now,
-                sort_order: workspace.other_directories.len() as i64,
-            });
-        }
-    }
-
-    projects.sort_by_key(|group| group.project.sort_order);
-    for group in &mut projects {
-        let scope = format!("project:{}", group.project.id);
-        sort_history(&mut group.history, workspace.project_sort, workspace.session_order.get(&scope));
-    }
-    let mut general = sort_directories(general, &workspace.other_directories);
-    for group in &mut general {
-        let mode = workspace.directory_sort.get(&group.path).copied().unwrap_or(workspace.general_sort);
-        let scope = format!("directory:{}", group.path);
-        sort_history(&mut group.items, mode, workspace.session_order.get(&scope));
-    }
-    let mut other = sort_directories(other, &workspace.other_directories);
-    for group in &mut other {
-        let mode = workspace.directory_sort.get(&group.path).copied().unwrap_or(workspace.other_sort);
-        let scope = format!("directory:{}", group.path);
-        sort_history(&mut group.items, mode, workspace.session_order.get(&scope));
-    }
-    Ok(WorkspaceResponse {
-        general_root: workspace.general_root.clone(),
-        projects,
-        general,
-        other,
-    })
-}
-
-fn sort_history(items: &mut [HistoryItem], mode: SortMode, manual_order: Option<&Vec<String>>) {
-    match mode {
-        SortMode::Priority => items.sort_by_key(|item| (std::cmp::Reverse(item.message_count), std::cmp::Reverse(item.file_mtime.clone()))),
-        SortMode::Recent => items.sort_by_key(|item| std::cmp::Reverse(item.file_mtime.clone())),
-        SortMode::Manual => {
-            let positions = manual_order
-                .map(|order| order.iter().enumerate().map(|(index, id)| (id.as_str(), index)).collect::<HashMap<_, _>>())
-                .unwrap_or_default();
-            items.sort_by_key(|item| {
-                let agent = match item.agent {
-                    AgentKind::Claude => "claude",
-                    AgentKind::Codex => "codex",
-                };
-                positions.get(format!("{agent}:{}", item.id).as_str()).copied().unwrap_or(usize::MAX)
-            });
-        }
-    }
-}
-
-fn sort_directories(groups: HashMap<String, HistoryDirectory>, metadata: &[WorkspaceDirectory]) -> Vec<HistoryDirectory> {
-    let mut values = groups.into_values().collect::<Vec<_>>();
-    values.sort_by(|left, right| {
-        let left_meta = metadata.iter().find(|entry| entry.path == left.path);
-        let right_meta = metadata.iter().find(|entry| entry.path == right.path);
-        left_meta
-            .map(|entry| entry.sort_order)
-            .unwrap_or(i64::MAX)
-            .cmp(&right_meta.map(|entry| entry.sort_order).unwrap_or(i64::MAX))
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    values
-}
-
 async fn workspaces(State(state): State<Arc<AppState>>, Query(query): Query<SearchQuery>) -> Result<Json<WorkspaceResponse>, ApiError> {
-    let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
-    let mut workspace = state.workspaces.lock().map_err(|_| ApiError::internal("Workspace lock poisoned"))?;
-    let response = workspace_response(&db, &mut workspace, query.q.as_deref()).map_err(ApiError::bad_request)?;
-    save_workspace(&db, &workspace).map_err(ApiError::bad_request)?;
-    Ok(Json(response))
+    state.workspace.view(query.q.as_deref()).map(Json).map_err(workspace_api_error)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1090,179 +811,75 @@ struct SearchQuery {
 }
 
 async fn history(State(state): State<Arc<AppState>>, Query(query): Query<SearchQuery>) -> Result<Json<Vec<HistoryItem>>, ApiError> {
-    let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
-    let records = db.query_all_sessions(query.q.as_deref(), 2000).map_err(|error| ApiError::bad_request(error.into()))?;
-    Ok(Json(records.into_iter().map(|(app_type, record)| history_item(app_type, record)).collect()))
-}
-
-fn history_item(app_type: String, record: SessionRecord) -> HistoryItem {
-    let cwd = PathBuf::from(&record.project_path);
-    HistoryItem {
-        id: record.id,
-        agent: if app_type == "claude" { AgentKind::Claude } else { AgentKind::Codex },
-        title: record
-            .title
-            .unwrap_or_else(|| cwd.file_name().and_then(|name| name.to_str()).unwrap_or("Session").to_string()),
-        cwd: record.project_path,
-        start_time: record.start_time,
-        end_time: record.end_time,
-        file_mtime: record.file_mtime,
-        message_count: record.message_count,
-    }
+    state.workspace.history(query.q.as_deref()).map(Json).map_err(workspace_api_error)
 }
 
 async fn refresh_history(State(state): State<Arc<AppState>>) -> Result<Json<WorkspaceResponse>, ApiError> {
-    let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
-    refresh_native_history(&db).map_err(ApiError::bad_request)?;
-    let mut workspace = state.workspaces.lock().map_err(|_| ApiError::internal("Workspace lock poisoned"))?;
-    let response = workspace_response(&db, &mut workspace, None).map_err(ApiError::bad_request)?;
-    save_workspace(&db, &workspace).map_err(ApiError::bad_request)?;
-    Ok(Json(response))
+    {
+        let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
+        refresh_native_history(&db).map_err(ApiError::bad_request)?;
+    }
+    state.workspace.view(None).map(Json).map_err(workspace_api_error)
 }
 
 async fn create_project(State(state): State<Arc<AppState>>, Json(request): Json<ProjectRequest>) -> Result<(StatusCode, Json<Project>), ApiError> {
-    let path = canonical_directory(&request.path).map_err(ApiError::bad_request)?;
-    let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
-    let mut workspace = state.workspaces.lock().map_err(|_| ApiError::internal("Workspace lock poisoned"))?;
-    let general = PathBuf::from(&workspace.general_root);
-    if paths_overlap(&path, &general) || workspace.projects.iter().any(|project| paths_overlap(&path, FsPath::new(&project.path))) {
-        return Err(ApiError::bad_request(anyhow::anyhow!("Project directory overlaps an existing workspace")));
-    }
-    let project = Project {
-        id: format!("project-{}", chrono::Utc::now().timestamp_millis()),
-        name: request
-            .name
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| path.file_name().and_then(|name| name.to_str()).unwrap_or("Project").to_string()),
-        path: path.display().to_string(),
-        pinned: false,
-        sort_order: workspace.projects.len() as i64,
-    };
-    workspace.projects.push(project.clone());
-    save_workspace(&db, &workspace).map_err(ApiError::bad_request)?;
+    let project = state.workspace.create_project(&request.path, request.name).map_err(workspace_api_error)?;
     Ok((StatusCode::CREATED, Json(project)))
 }
 
 async fn update_project(State(state): State<Arc<AppState>>, Path(id): Path<String>, Json(request): Json<ProjectPatch>) -> Result<Json<Project>, ApiError> {
-    let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
-    let mut workspace = state.workspaces.lock().map_err(|_| ApiError::internal("Workspace lock poisoned"))?;
-    let index = workspace
-        .projects
-        .iter()
-        .position(|project| project.id == id)
-        .ok_or_else(|| ApiError::not_found(anyhow::anyhow!("Project does not exist")))?;
-    if let Some(path) = request.path {
-        let path = canonical_directory(&path).map_err(ApiError::bad_request)?;
-        let general = PathBuf::from(&workspace.general_root);
-        if paths_overlap(&path, &general)
-            || workspace
-                .projects
-                .iter()
-                .enumerate()
-                .any(|(other, project)| other != index && paths_overlap(&path, FsPath::new(&project.path)))
-        {
-            return Err(ApiError::bad_request(anyhow::anyhow!("Project directory overlaps an existing workspace")));
-        }
-        workspace.projects[index].path = path.display().to_string();
-    }
-    if let Some(name) = request.name.filter(|name| !name.trim().is_empty()) {
-        workspace.projects[index].name = name.trim().to_string();
-    }
-    if let Some(pinned) = request.pinned {
-        workspace.projects[index].pinned = pinned;
-    }
-    let project = workspace.projects[index].clone();
-    save_workspace(&db, &workspace).map_err(ApiError::bad_request)?;
-    Ok(Json(project))
+    state
+        .workspace
+        .update_project(
+            &id,
+            ProjectChanges {
+                name: request.name,
+                path: request.path,
+                pinned: request.pinned,
+            },
+        )
+        .map(Json)
+        .map_err(workspace_api_error)
 }
 
 async fn delete_project(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
-    let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
-    let mut workspace = state.workspaces.lock().map_err(|_| ApiError::internal("Workspace lock poisoned"))?;
-    let before = workspace.projects.len();
-    workspace.projects.retain(|project| project.id != id);
-    if workspace.projects.len() == before {
-        return Err(ApiError::not_found(anyhow::anyhow!("Project does not exist")));
-    }
-    save_workspace(&db, &workspace).map_err(ApiError::bad_request)?;
+    state.workspace.delete_project(&id).map_err(workspace_api_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn settings(State(state): State<Arc<AppState>>) -> Result<Json<WorkspaceState>, ApiError> {
-    let workspace = state.workspaces.lock().map_err(|_| ApiError::internal("Workspace lock poisoned"))?;
-    Ok(Json(workspace.clone()))
+async fn settings(State(state): State<Arc<AppState>>) -> Result<Json<WorkspaceSettings>, ApiError> {
+    state.workspace.settings().map(Json).map_err(workspace_api_error)
 }
 
-async fn update_settings(State(state): State<Arc<AppState>>, Json(request): Json<WorkspacePatch>) -> Result<Json<WorkspaceState>, ApiError> {
-    let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
-    let mut workspace = state.workspaces.lock().map_err(|_| ApiError::internal("Workspace lock poisoned"))?;
-    if let Some(root) = request.general_root {
-        let root = canonical_directory(&root).map_err(ApiError::bad_request)?;
-        if workspace.projects.iter().any(|project| paths_overlap(&root, FsPath::new(&project.path))) {
-            return Err(ApiError::bad_request(anyhow::anyhow!("General directory overlaps an existing project")));
-        }
-        workspace.general_root = root.display().to_string();
-    }
-    if let Some(sort) = request.project_sort {
-        workspace.project_sort = sort;
-    }
-    if let Some(sort) = request.general_sort {
-        workspace.general_sort = sort;
-    }
-    if let Some(sort) = request.other_sort {
-        workspace.other_sort = sort;
-    }
-    if let Some(directory_sort) = request.directory_sort {
-        if directory_sort.path.len() > 4096 {
-            return Err(ApiError::bad_request(anyhow::anyhow!("Directory path is too long")));
-        }
-        workspace.directory_sort.insert(directory_sort.path, directory_sort.mode);
-    }
-    save_workspace(&db, &workspace).map_err(ApiError::bad_request)?;
-    Ok(Json(workspace.clone()))
+async fn update_settings(State(state): State<Arc<AppState>>, Json(request): Json<WorkspacePatch>) -> Result<Json<WorkspaceSettings>, ApiError> {
+    state
+        .workspace
+        .update_settings(WorkspaceChanges {
+            general_root: request.general_root,
+            project_sort: request.project_sort,
+            general_sort: request.general_sort,
+            other_sort: request.other_sort,
+            directory_sort: request.directory_sort.map(|change| (change.path, change.mode)),
+        })
+        .map(Json)
+        .map_err(workspace_api_error)
 }
 
-async fn reorder_workspace_items(State(state): State<Arc<AppState>>, Json(request): Json<ReorderRequest>) -> Result<Json<WorkspaceState>, ApiError> {
-    if request.ids.len() > 2000 || request.scope.len() > 4096 {
-        return Err(ApiError::bad_request(anyhow::anyhow!("Reorder request is too large")));
-    }
-    let mut seen = std::collections::HashSet::new();
-    if request.ids.iter().any(|id| id.len() > 4096 || !seen.insert(id)) {
-        return Err(ApiError::bad_request(anyhow::anyhow!("Reorder request contains invalid identifiers")));
-    }
+async fn reorder_workspace_items(State(state): State<Arc<AppState>>, Json(request): Json<ReorderRequest>) -> Result<Json<WorkspaceSettings>, ApiError> {
+    let result = match request.kind {
+        ReorderKind::Projects => state.workspace.reorder_projects(request.ids),
+        ReorderKind::Directories => state.workspace.reorder_directories(request.ids),
+        ReorderKind::Sessions => state.workspace.reorder_sessions(request.scope, request.ids),
+    };
+    result.map(Json).map_err(workspace_api_error)
+}
 
-    let db = state.db.lock().map_err(|_| ApiError::internal("Database lock poisoned"))?;
-    let mut workspace = state.workspaces.lock().map_err(|_| ApiError::internal("Workspace lock poisoned"))?;
-    let positions = request.ids.iter().enumerate().map(|(index, id)| (id.as_str(), index as i64)).collect::<HashMap<_, _>>();
-    match request.kind {
-        ReorderKind::Projects => {
-            for project in &mut workspace.projects {
-                if let Some(position) = positions.get(project.id.as_str()) {
-                    project.sort_order = *position;
-                }
-            }
-            workspace.projects.sort_by_key(|project| project.sort_order);
-            for (index, project) in workspace.projects.iter_mut().enumerate() {
-                project.sort_order = index as i64;
-            }
-        }
-        ReorderKind::Directories => {
-            for directory in &mut workspace.other_directories {
-                if let Some(position) = positions.get(directory.path.as_str()) {
-                    directory.sort_order = *position;
-                }
-            }
-            workspace.other_directories.sort_by_key(|directory| directory.sort_order);
-            for (index, directory) in workspace.other_directories.iter_mut().enumerate() {
-                directory.sort_order = index as i64;
-            }
-        }
-        ReorderKind::Sessions => {
-            workspace.session_order.insert(request.scope, request.ids);
-        }
+fn workspace_api_error(error: WorkspaceError) -> ApiError {
+    match error {
+        WorkspaceError::Invalid(error) => ApiError::bad_request(error),
+        WorkspaceError::NotFound(error) => ApiError::not_found(error),
+        WorkspaceError::Unavailable(message) => ApiError::internal(message),
     }
-    save_workspace(&db, &workspace).map_err(ApiError::bad_request)?;
-    Ok(Json(workspace.clone()))
 }
 
 fn default_working_directory() -> PathBuf {
@@ -1330,10 +947,7 @@ async fn create_session(State(state): State<Arc<AppState>>, Json(request): Json<
             .cwd
             .canonicalize()
             .map_err(|error| ApiError::bad_request(anyhow::anyhow!("Cannot open working directory: {error}")))?;
-        let workspace = state.workspaces.lock().map_err(|_| ApiError::internal("Workspace lock poisoned"))?;
-        let general = PathBuf::from(&workspace.general_root);
-        let allowed = cwd.starts_with(&general) || workspace.projects.iter().any(|project| cwd.starts_with(FsPath::new(&project.path)));
-        if !allowed {
+        if !state.workspace.allows_new_session(&cwd).map_err(workspace_api_error)? {
             return Err(ApiError::bad_request(anyhow::anyhow!("New sessions must use the General directory or a Project directory")));
         }
     }
@@ -1458,226 +1072,19 @@ async fn terminal_websocket(
     Extension(access): Extension<RequestAccess>,
     device: Option<Extension<RequestDevice>>,
 ) -> Result<Response, ApiError> {
-    let session = state
-        .manager
-        .get(&id)
-        .ok_or_else(|| ApiError::not_found(anyhow::anyhow!("Managed session does not exist")))?;
-    let device = match access {
-        RequestAccess::Local => device.map(|device| device.0 .0).unwrap_or(remote::DeviceIdentity {
-            token_id: "local".into(),
-            name: "Local client".into(),
-        }),
-        RequestAccess::Remote => {
-            let ticket = query.ticket.as_deref().ok_or_else(|| ApiError::unauthorized("A WebSocket ticket is required"))?;
-            let device = state
-                .remote_security
-                .as_ref()
-                .and_then(|security| security.consume_ticket(ticket, &id))
-                .ok_or_else(|| ApiError::unauthorized("WebSocket ticket is invalid or expired"))?;
-            let active = state
-                .db
-                .lock()
-                .ok()
-                .and_then(|db| db.backend_device_digest(&device.token_id).ok().flatten())
-                .is_some_and(|(record, _)| record.revoked_at_ms.is_none());
-            if !active {
-                return Err(ApiError::unauthorized("Device credential has been revoked"));
-            }
-            device
-        }
+    let access = match access {
+        RequestAccess::Local => TerminalAccess::Local(device.map(|Extension(RequestDevice(device))| device)),
+        RequestAccess::Remote => TerminalAccess::Remote { ticket: query.ticket },
     };
-    let websocket_permit = if access == RequestAccess::Remote {
-        Some(
-            state
-                .remote_websockets
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| ApiError::service_unavailable("Remote WebSocket limit reached"))?,
-        )
-    } else {
-        None
-    };
-    let leases = state.leases.clone();
-    let app_state = state.clone();
-    Ok(ws.on_upgrade(move |socket| terminal_socket(socket, session, leases, id, device, app_state, websocket_permit)))
+    state.terminals.upgrade(ws, id, access).map_err(map_terminal_error)
 }
 
-async fn terminal_socket(
-    socket: WebSocket,
-    session: SessionHandle,
-    leases: remote::ControlLeases,
-    session_id: String,
-    device: remote::DeviceIdentity,
-    state: Arc<AppState>,
-    _websocket_permit: Option<tokio::sync::OwnedSemaphorePermit>,
-) {
-    let connection_id = remote::new_connection_id();
-    let initial_lease = leases.connect(&session_id, &connection_id, &device.name);
-    let mut lease_events = leases.subscribe(&session_id);
-    let (mut sender, mut receiver) = socket.split();
-    let scrollback = session.scrollback();
-    if !scrollback.is_empty() && sender.send(Message::Binary(scrollback)).await.is_err() {
-        return;
+fn map_terminal_error(error: TerminalError) -> ApiError {
+    match error {
+        TerminalError::SessionNotFound => ApiError::not_found(anyhow::anyhow!(error)),
+        TerminalError::Unauthorized(message) => ApiError::unauthorized(message),
+        TerminalError::Capacity => ApiError::service_unavailable(error.to_string()),
     }
-    if send_status(&mut sender, &session.info()).await.is_err() {
-        leases.disconnect(&session_id, &connection_id);
-        return;
-    }
-    if send_lease(&mut sender, &initial_lease.state, leases.can_write(&session_id, &connection_id)).await.is_err() {
-        leases.disconnect(&session_id, &connection_id);
-        return;
-    }
-    if let Some(credential) = initial_lease.recovery_credential.as_deref() {
-        if send_recovery_credential(&mut sender, credential).await.is_err() {
-            leases.disconnect(&session_id, &connection_id);
-            return;
-        }
-    }
-    let mut events = session.subscribe();
-    let mut credential_check = tokio::time::interval(std::time::Duration::from_secs(1));
-    let mut revocations = state
-        .remote_security
-        .as_ref()
-        .map(remote::RemoteSecurity::subscribe_revocations)
-        .expect("remote security is initialized with application state");
-    let mut idle_check = tokio::time::interval(std::time::Duration::from_secs(30));
-    let mut last_client_activity = std::time::Instant::now();
-
-    loop {
-        tokio::select! {
-            incoming = receiver.next() => {
-                last_client_activity = std::time::Instant::now();
-                match incoming {
-                    Some(Ok(Message::Binary(bytes))) => {
-                        if leases.can_write(&session_id, &connection_id) && session.write(bytes.to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(Message::Text(text))) => {
-                        let Ok(control) = serde_json::from_str::<ClientControl>(&text) else {
-                            continue;
-                        };
-                        match control {
-                            ClientControl::Resize { rows, cols } => {
-                                if leases.can_write(&session_id, &connection_id) && session.resize(rows, cols).is_err() {
-                                    break;
-                                }
-                            }
-                            ClientControl::TakeControl { expected_version } => {
-                                let connection = leases.take_control(&session_id, &connection_id, &device.name, expected_version);
-                                if let Some(credential) = connection.recovery_credential.as_deref() {
-                                    if send_recovery_credential(&mut sender, credential).await.is_err() {
-                                        break;
-                                    }
-                                }
-                            }
-                            ClientControl::RecoverControl { credential } => {
-                                let connection = leases.recover_control(&session_id, &connection_id, &device.name, &credential);
-                                if let Some(credential) = connection.recovery_credential.as_deref() {
-                                    if send_recovery_credential(&mut sender, credential).await.is_err() {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                    Some(Ok(Message::Ping(bytes))) => {
-                        if sender.send(Message::Pong(bytes)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(Message::Pong(_))) => {}
-                }
-            }
-            event = events.recv() => {
-                match event {
-                    Ok(SessionStreamEvent::Output(bytes)) => {
-                        if sender.send(Message::Binary(bytes)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(SessionStreamEvent::Status(info)) => {
-                        if send_status(&mut sender, &info).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(SessionStreamEvent::Attention { kind, occurred_at_ms }) => {
-                        let message = serde_json::json!({
-                            "type": "attention",
-                            "kind": kind,
-                            "occurred_at_ms": occurred_at_ms,
-                        })
-                        .to_string();
-                        if sender.send(Message::Text(message)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast_error) => {
-                        if matches!(broadcast_error, tokio::sync::broadcast::error::RecvError::Closed) {
-                            break;
-                        }
-                        let reset = serde_json::json!({ "type": "reset" }).to_string();
-                        if sender.send(Message::Text(reset)).await.is_err()
-                            || sender.send(Message::Binary(session.scrollback())).await.is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
-            }
-            lease = lease_events.recv() => {
-                if let Ok(lease) = lease {
-                    if send_lease(&mut sender, &lease, leases.can_write(&session_id, &connection_id)).await.is_err() {
-                        break;
-                    }
-                }
-            }
-            _ = credential_check.tick(), if device.token_id != "local" => {
-                let active = state
-                    .db
-                    .lock()
-                    .ok()
-                    .and_then(|db| db.backend_device_digest(&device.token_id).ok().flatten())
-                    .is_some_and(|(device, _)| device.revoked_at_ms.is_none());
-                if !active {
-                    let _ = sender.send(Message::Text(serde_json::json!({ "type": "authorization-revoked" }).to_string())).await;
-                    break;
-                }
-            }
-            revoked = revocations.recv(), if device.token_id != "local" => {
-                if revoked.ok().as_deref() == Some(device.token_id.as_str()) {
-                    let _ = sender.send(Message::Text(serde_json::json!({ "type": "authorization-revoked" }).to_string())).await;
-                    break;
-                }
-            }
-            _ = idle_check.tick() => {
-                if last_client_activity.elapsed() > std::time::Duration::from_secs(10 * 60) {
-                    let _ = sender.send(Message::Close(None)).await;
-                    break;
-                }
-            }
-        }
-    }
-    leases.disconnect(&session_id, &connection_id);
-}
-
-async fn send_status(sender: &mut futures_util::stream::SplitSink<WebSocket, Message>, info: &SessionInfo) -> Result<(), axum::Error> {
-    let server_time_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
-    let message = serde_json::json!({ "type": "status", "session": info, "server_time_ms": server_time_ms }).to_string();
-    sender.send(Message::Text(message)).await
-}
-
-async fn send_lease(sender: &mut futures_util::stream::SplitSink<WebSocket, Message>, lease: &remote::LeaseState, can_write: bool) -> Result<(), axum::Error> {
-    sender
-        .send(Message::Text(serde_json::json!({ "type": "lease", "lease": lease, "can_write": can_write }).to_string()))
-        .await
-}
-
-async fn send_recovery_credential(sender: &mut futures_util::stream::SplitSink<WebSocket, Message>, credential: &str) -> Result<(), axum::Error> {
-    sender
-        .send(Message::Text(serde_json::json!({ "type": "lease-recovery", "credential": credential }).to_string()))
-        .await
 }
 
 #[derive(Debug)]
@@ -1823,35 +1230,14 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        app_state, directory_listing, is_local_authority, is_local_origin, remote_router, router, workspace_response, Project, SortMode, WorkspaceDirectory, WorkspaceState,
-    };
-    use crate::db::{sessions::SessionRecord, Db};
+    use super::{app_state, directory_listing, is_local_authority, is_local_origin, remote_router, router};
+    use crate::db::Db;
     use crate::session_runtime::SessionManager;
     use axum::{
-        body::Body,
+        body::{to_bytes, Body},
         http::{header, Request, StatusCode},
     };
     use tower::ServiceExt;
-
-    fn history_record(id: &str, path: &std::path::Path, file_mtime: &str, message_count: i64) -> SessionRecord {
-        SessionRecord {
-            id: id.into(),
-            project_path: path.display().to_string(),
-            profile_id: None,
-            parent_thread_id: None,
-            mode: "local".into(),
-            start_time: file_mtime.into(),
-            end_time: None,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            message_count,
-            title: Some(id.into()),
-            size_bytes: 1,
-            file_mtime: file_mtime.into(),
-            search_text: String::new(),
-        }
-    }
 
     #[test]
     fn accepts_only_loopback_browser_authorities() {
@@ -1900,215 +1286,6 @@ mod tests {
         assert_eq!(listing.path, root.path().canonicalize().unwrap().display().to_string());
     }
 
-    #[test]
-    fn loads_workspace_state_saved_before_scoped_sorting() {
-        let state: WorkspaceState = serde_json::from_value(serde_json::json!({
-            "general_root": "/tmp/workbench",
-            "projects": [],
-            "other_directories": [{ "path": "/tmp/other", "pinned": false, "last_opened_ms": 1 }],
-            "project_sort": "priority",
-            "general_sort": "recent",
-            "other_sort": "manual"
-        }))
-        .unwrap();
-
-        assert_eq!(state.other_directories[0].sort_order, 0);
-        assert!(state.directory_sort.is_empty());
-        assert!(state.session_order.is_empty());
-    }
-
-    #[test]
-    fn keeps_container_order_separate_from_scoped_session_order() {
-        let root = tempfile::tempdir().unwrap();
-        let general_root = root.path().join("general");
-        let general_a = general_root.join("a");
-        let general_b = general_root.join("b");
-        let project_a = root.path().join("project-a");
-        let project_b = root.path().join("project-b");
-        for path in [&general_a, &general_b, &project_a, &project_b] {
-            std::fs::create_dir_all(path).unwrap();
-        }
-
-        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
-        for (id, path, mtime, messages) in [
-            ("project-a-old", project_a.as_path(), "2026-08-15 10:00:00", 1),
-            ("project-a-new", project_a.as_path(), "2026-08-15 12:00:00", 9),
-            ("project-b", project_b.as_path(), "2026-08-15 11:00:00", 3),
-            ("general-a-old", general_a.as_path(), "2026-08-15 09:00:00", 1),
-            ("general-a-new", general_a.as_path(), "2026-08-15 13:00:00", 2),
-            ("general-b-old", general_b.as_path(), "2026-08-15 08:00:00", 1),
-            ("general-b-new", general_b.as_path(), "2026-08-15 14:00:00", 2),
-        ] {
-            db.insert_session(&history_record(id, path, mtime, messages), "claude").unwrap();
-        }
-
-        let mut workspace = WorkspaceState {
-            general_root: general_root.display().to_string(),
-            projects: vec![
-                Project {
-                    id: "project-a".into(),
-                    name: "Project A".into(),
-                    path: project_a.display().to_string(),
-                    pinned: true,
-                    sort_order: 1,
-                },
-                Project {
-                    id: "project-b".into(),
-                    name: "Project B".into(),
-                    path: project_b.display().to_string(),
-                    pinned: false,
-                    sort_order: 0,
-                },
-            ],
-            other_directories: vec![
-                WorkspaceDirectory {
-                    path: general_a.display().to_string(),
-                    pinned: false,
-                    last_opened_ms: 1,
-                    sort_order: 1,
-                },
-                WorkspaceDirectory {
-                    path: general_b.display().to_string(),
-                    pinned: false,
-                    last_opened_ms: 2,
-                    sort_order: 0,
-                },
-            ],
-            project_sort: SortMode::Manual,
-            general_sort: SortMode::Recent,
-            other_sort: SortMode::Recent,
-            directory_sort: std::collections::HashMap::from([(general_a.display().to_string(), SortMode::Manual)]),
-            session_order: std::collections::HashMap::from([
-                ("project:project-a".into(), vec!["claude:project-a-old".into(), "claude:project-a-new".into()]),
-                (
-                    format!("directory:{}", general_a.display()),
-                    vec!["claude:general-a-old".into(), "claude:general-a-new".into()],
-                ),
-            ]),
-        };
-
-        let response = workspace_response(&db, &mut workspace, None).unwrap();
-
-        assert_eq!(
-            response.projects.iter().map(|group| group.project.id.as_str()).collect::<Vec<_>>(),
-            ["project-b", "project-a"]
-        );
-        let project_a_history = &response.projects.iter().find(|group| group.project.id == "project-a").unwrap().history;
-        assert_eq!(
-            project_a_history.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
-            ["project-a-old", "project-a-new"]
-        );
-        assert_eq!(
-            response.general.iter().map(|group| group.path.as_str()).collect::<Vec<_>>(),
-            [general_b.to_str().unwrap(), general_a.to_str().unwrap()]
-        );
-        assert_eq!(
-            response.general[0].items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
-            ["general-b-new", "general-b-old"]
-        );
-        assert_eq!(
-            response.general[1].items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
-            ["general-a-old", "general-a-new"]
-        );
-    }
-
-    #[test]
-    fn gui_workspace_history_hides_codex_children_and_aggregates_messages() {
-        let root = tempfile::tempdir().unwrap();
-        let project = root.path().join("project");
-        let general = root.path().join("general");
-        std::fs::create_dir(&project).unwrap();
-        std::fs::create_dir(&general).unwrap();
-
-        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
-        let mut parent = history_record("parent-session", &project, "2026-08-15 10:00:00", 2);
-        parent.mode = "direct".into();
-        let mut child = history_record("child-session", &project, "2026-08-15 10:01:00", 3);
-        child.mode = "direct".into();
-        child.parent_thread_id = Some(parent.id.clone());
-        db.insert_session(&parent, "codex").unwrap();
-        db.insert_session(&child, "codex").unwrap();
-
-        let mut workspace = WorkspaceState {
-            general_root: general.display().to_string(),
-            projects: vec![Project {
-                id: "project".into(),
-                name: "Project".into(),
-                path: project.display().to_string(),
-                pinned: false,
-                sort_order: 0,
-            }],
-            other_directories: Vec::new(),
-            project_sort: SortMode::Recent,
-            general_sort: SortMode::Recent,
-            other_sort: SortMode::Recent,
-            directory_sort: std::collections::HashMap::new(),
-            session_order: std::collections::HashMap::new(),
-        };
-
-        let response = workspace_response(&db, &mut workspace, None).unwrap();
-        assert_eq!(response.projects[0].history.len(), 1);
-        assert_eq!(response.projects[0].history[0].id, "parent-session");
-        assert_eq!(response.projects[0].history[0].message_count, 5);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn classifies_sessions_opened_through_a_workspace_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let root = tempfile::tempdir().unwrap();
-        let project = root.path().join("project");
-        let project_alias = root.path().join("project-alias");
-        let general = root.path().join("general");
-        std::fs::create_dir(&project).unwrap();
-        std::fs::create_dir(&general).unwrap();
-        symlink(&project, &project_alias).unwrap();
-
-        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
-        db.insert_session(
-            &SessionRecord {
-                id: "claude-through-symlink".into(),
-                project_path: project_alias.display().to_string(),
-                profile_id: None,
-                parent_thread_id: None,
-                mode: "local".into(),
-                start_time: "2026-08-15 10:00:00".into(),
-                end_time: None,
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                message_count: 1,
-                title: Some("Symlink session".into()),
-                size_bytes: 1,
-                file_mtime: "2026-08-15 10:00:00".into(),
-                search_text: String::new(),
-            },
-            "claude",
-        )
-        .unwrap();
-        let mut workspace = WorkspaceState {
-            general_root: general.canonicalize().unwrap().display().to_string(),
-            projects: vec![Project {
-                id: "project-1".into(),
-                name: "Project".into(),
-                path: project.canonicalize().unwrap().display().to_string(),
-                pinned: false,
-                sort_order: 0,
-            }],
-            other_directories: Vec::new(),
-            project_sort: SortMode::Priority,
-            general_sort: SortMode::Recent,
-            other_sort: SortMode::Recent,
-            directory_sort: std::collections::HashMap::new(),
-            session_order: std::collections::HashMap::new(),
-        };
-
-        let response = workspace_response(&db, &mut workspace, None).unwrap();
-
-        assert_eq!(response.projects[0].history.len(), 1);
-        assert_eq!(response.projects[0].history[0].id, "claude-through-symlink");
-    }
-
     #[tokio::test]
     async fn serves_health_to_local_clients() {
         let response = router(SessionManager::new())
@@ -2117,6 +1294,34 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn workspace_settings_route_keeps_its_json_interface() {
+        let response = router(SessionManager::new())
+            .oneshot(Request::builder().uri("/api/settings").header(header::HOST, "127.0.0.1:17321").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let keys = value.as_object().unwrap().keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            [
+                "directory_sort",
+                "general_root",
+                "general_sort",
+                "other_directories",
+                "other_sort",
+                "project_sort",
+                "projects",
+                "session_order",
+            ]
+            .into_iter()
+            .collect()
+        );
     }
 
     #[tokio::test]

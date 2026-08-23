@@ -65,3 +65,19 @@ fn write_startup_marker() {
     };
     let _ = std::fs::write(path, b"ready\n");
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path};
+
+    #[test]
+    fn nsis_installer_uses_the_app_icon_and_supports_program_files() {
+        let desktop_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let config: serde_json::Value = serde_json::from_slice(&fs::read(desktop_dir.join("packager.json")).unwrap()).unwrap();
+        let icon = config["nsis"]["installerIcon"].as_str().expect("NSIS installer icon must be configured");
+
+        assert_eq!(icon, "icons/icon.ico");
+        assert!(desktop_dir.join(icon).is_file());
+        assert_eq!(config["nsis"]["installMode"], "both");
+    }
+}

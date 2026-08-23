@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/crabnebula-dev/cargo-packager/main/bindings/packager/nodejs/schema.json",
   "name": "akiron-mux-desktop",
   "productName": "AkironMux",
-  "version": "1.15.1",
+  "version": "1.15.2",
   "identifier": "dev.akiron.mux",
   "description": "Unified Claude Code and Codex session workspace",
   "homepage": "https://github.com/akiron-ai/akiron-mux",
@@ -45,6 +45,10 @@
   "windows": {
     "allowDowngrades": false,
     "digestAlgorithm": "sha256"
+  },
+  "nsis": {
+    "installerIcon": "icons/icon.ico",
+    "installMode": "both"
   },
   "macos": {
     "minimumSystemVersion": "12.0"

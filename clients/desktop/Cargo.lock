@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "akmux-client-core"
-version = "1.15.1"
+version = "1.15.2"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -173,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "akmux-desktop"
-version = "1.15.1"
+version = "1.15.2"
 dependencies = [
  "akmux-client-core",
  "akmux-desktop-platform",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "akmux-desktop-platform"
-version = "1.15.1"
+version = "1.15.2"
 dependencies = [
  "akmux-client-core",
  "async-channel",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "akmux-terminal"
-version = "1.15.1"
+version = "1.15.2"
 dependencies = [
  "akmux-client-core",
  "alacritty_terminal",

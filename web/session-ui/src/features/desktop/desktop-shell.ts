@@ -1,6 +1,5 @@
-// The installed Desktop Client is GPUI. This bundle is now only the Embedded
-// WebUI served by the daemon, so native-shell behavior must never be enabled.
-export const desktopShell = false;
+export const desktopShell =
+  window.location.protocol === 'tauri:' || window.location.hostname === 'tauri.localhost' || '__TAURI_INTERNALS__' in window;
 
 export function installDesktopInteractionGuards() {
   if (!desktopShell) return;

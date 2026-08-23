@@ -5,23 +5,6 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 fixture_root=$(mktemp -d)
 trap 'rm -rf "$fixture_root"' EXIT
 
-require_workflow_dependency() {
-  local job=$1
-  local dependency=$2
-  awk -v job="$job" -v dependency="$dependency" '
-    $0 == "  " job ":" { in_job = 1; next }
-    in_job && $0 ~ /^  [[:alnum:]_-]+:$/ { exit found ? 0 : 1 }
-    in_job && index($0, dependency) { found = 1 }
-    END { if (in_job) exit found ? 0 : 1 }
-  ' "$repo_root/.github/workflows/release.yml" || {
-    echo "$job must install $dependency" >&2
-    exit 1
-  }
-}
-
-require_workflow_dependency gui-linux libxkbcommon-x11-dev
-require_workflow_dependency gui-linux-arm64-check libxkbcommon-x11-dev
-
 mkdir -p "$fixture_root/bin" "$fixture_root/artifacts/linux" "$fixture_root/artifacts/windows"
 touch "$fixture_root/artifacts/linux/AkironMux-1.12.0-linux-x86_64-cli.tar.gz"
 touch "$fixture_root/artifacts/linux/AkironMux-1.12.0-linux-x86_64-desktop.AppImage"

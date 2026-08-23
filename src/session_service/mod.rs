@@ -563,6 +563,9 @@ fn remote_authority_matches(authority: &str, expected_host: &str, expected_port:
 }
 
 fn remote_origin_matches(origin: &str, public_url: &Url) -> bool {
+    if matches!(origin, "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost") {
+        return true;
+    }
     let Ok(origin) = Url::parse(origin) else {
         return false;
     };
@@ -581,6 +584,9 @@ fn is_local_authority(authority: &str) -> bool {
 }
 
 fn is_local_origin(origin: &str) -> bool {
+    if matches!(origin, "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost") {
+        return true;
+    }
     let Some(authority) = origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) else {
         return false;
     };
@@ -1318,9 +1324,10 @@ mod tests {
             assert!(!is_local_authority(value));
         }
         assert!(is_local_origin("http://127.0.0.1:17321"));
-        assert!(is_local_origin("http://localhost:5173"));
+        assert!(is_local_origin("tauri://localhost"));
+        assert!(is_local_origin("http://tauri.localhost"));
         assert!(!is_local_origin("https://example.com"));
-        assert!(!is_local_origin("https://localhost.example.com"));
+        assert!(!is_local_origin("https://tauri.localhost.example.com"));
     }
 
     #[test]
@@ -1445,7 +1452,7 @@ mod tests {
                     .method("OPTIONS")
                     .uri("/api/settings")
                     .header(header::HOST, "127.0.0.1:17321")
-                    .header(header::ORIGIN, "http://localhost:5173")
+                    .header(header::ORIGIN, "tauri://localhost")
                     .header(header::ACCESS_CONTROL_REQUEST_METHOD, "PATCH")
                     .body(Body::empty())
                     .unwrap(),
@@ -1454,7 +1461,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert_eq!(response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(), "http://localhost:5173");
+        assert_eq!(response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(), "tauri://localhost");
         assert_eq!(response.headers().get(header::ACCESS_CONTROL_ALLOW_HEADERS).unwrap(), "Content-Type");
     }
 

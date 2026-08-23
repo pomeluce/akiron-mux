@@ -215,37 +215,40 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: pnpm/action-setup@v4
         with:
-          toolchain: 1.97.1
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/session-ui/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install GPUI system dependencies
+      - name: Install Tauri system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            clang cmake libayatana-appindicator3-dev libfontconfig1-dev \
-            libgtk-3-dev libvulkan-dev libwayland-dev libx11-dev \
-            libx11-xcb-dev libxdo-dev libxi-dev libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            mesa-vulkan-drivers patchelf pkg-config xvfb
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: Test GPUI desktop
-        working-directory: clients/desktop
-        run: cargo test --locked --workspace --all-targets
+      - name: Install frontend dependencies
+        working-directory: web/session-ui
+        run: pnpm install --frozen-lockfile
 
-      - name: Build Linux desktop packages
-        working-directory: clients/desktop
-        run: |
-          cargo install cargo-packager --version 0.11.8 --locked
-          cargo packager --release --config packager.json --formats deb,appimage
+      - name: Build Linux GUI packages
+        uses: tauri-apps/tauri-action@v0
+        env:
+          CI: true
+        with:
+          projectPath: web/session-ui
+          args: --bundles deb,appimage
 
       - name: Normalize Linux desktop package names
         run: |
           VERSION="${RELEASE_TAG#v}"
           mkdir -p release-assets
-          cp clients/desktop/dist/*.deb \
+          cp web/session-ui/src-tauri/target/release/bundle/deb/*.deb \
             "release-assets/${PRODUCT_NAME}-${VERSION}-linux-x86_64-desktop.deb"
-          cp clients/desktop/dist/*.AppImage \
+          cp web/session-ui/src-tauri/target/release/bundle/appimage/*.AppImage \
             "release-assets/${PRODUCT_NAME}-${VERSION}-linux-x86_64-desktop.AppImage"
 
       - name: Upload Linux GUI packages
@@ -256,25 +259,36 @@ jobs:
           if-no-files-found: error
 
   gui-macos:
-    runs-on: macos-15
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: pnpm/action-setup@v4
         with:
-          toolchain: 1.97.1
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/session-ui/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Test and package macOS desktop
-        working-directory: clients/desktop
-        run: |
-          cargo test --locked --workspace --all-targets
-          cargo install cargo-packager --version 0.11.8 --locked
-          cargo packager --release --config packager.json --formats dmg
+      - name: Install frontend dependencies
+        working-directory: web/session-ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Build macOS GUI package
+        uses: tauri-apps/tauri-action@v0
+        env:
+          CI: true
+        with:
+          projectPath: web/session-ui
+          args: --bundles dmg
 
       - name: Normalize macOS desktop package name
         run: |
           VERSION="${RELEASE_TAG#v}"
           mkdir -p release-assets
-          cp clients/desktop/dist/*.dmg \
+          cp web/session-ui/src-tauri/target/release/bundle/dmg/*.dmg \
             "release-assets/${PRODUCT_NAME}-${VERSION}-macos-arm64-desktop.dmg"
 
       - name: Upload macOS GUI package
@@ -288,26 +302,40 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: pnpm/action-setup@v4
         with:
-          toolchain: 1.97.1
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/session-ui/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        working-directory: web/session-ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend for desktop tests
+        working-directory: web/session-ui
+        run: pnpm build
 
       - name: Test Windows credential integration
-        working-directory: clients/desktop
-        run: cargo test --locked --workspace --all-targets
+        run: cargo test --manifest-path web/session-ui/src-tauri/Cargo.toml --lib backend::tests::windows_credential_adapter_round_trips_without_plaintext_profile_storage
 
-      - name: Build Windows desktop installer
-        working-directory: clients/desktop
-        run: |
-          cargo install cargo-packager --version 0.11.8 --locked
-          cargo packager --release --config packager.json --formats nsis
-        shell: bash
+      - name: Build Windows GUI installer
+        uses: tauri-apps/tauri-action@v0
+        env:
+          CI: true
+        with:
+          projectPath: web/session-ui
+          args: --bundles nsis
 
       - name: Normalize Windows desktop package name
         run: |
           $Version = $env:RELEASE_TAG -replace '^v', ''
           New-Item -ItemType Directory -Path release-assets -Force
-          Copy-Item "clients/desktop/dist/*-setup.exe" -Destination "release-assets/$env:PRODUCT_NAME-$Version-windows-x86_64-desktop-setup.exe"
+          Copy-Item "web/session-ui/src-tauri/target/release/bundle/nsis/*-setup.exe" -Destination "release-assets/$env:PRODUCT_NAME-$Version-windows-x86_64-desktop-setup.exe"
         shell: pwsh
 
       - name: Upload Windows GUI installer
@@ -317,30 +345,8 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
 
-  gui-linux-arm64-check:
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.97.1
-
-      - name: Install GPUI system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            clang cmake libayatana-appindicator3-dev libfontconfig1-dev \
-            libgtk-3-dev libvulkan-dev libwayland-dev libx11-dev \
-            libx11-xcb-dev libxdo-dev libxi-dev libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            mesa-vulkan-drivers pkg-config
-
-      - name: Compile GPUI desktop on Linux arm64
-        working-directory: clients/desktop
-        run: cargo check --locked --workspace --all-targets
-
   publish:
-    needs: [linux, macos, windows, gui-linux, gui-macos, gui-windows, gui-linux-arm64-check]
+    needs: [linux, macos, windows, gui-linux, gui-macos, gui-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

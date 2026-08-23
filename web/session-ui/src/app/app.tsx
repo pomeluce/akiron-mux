@@ -163,6 +163,7 @@ export function App() {
       <div className="app-background flex h-full flex-col">
         <header
           className="acrylic-shell relative z-20 flex h-9 shrink-0 items-center pl-2"
+          data-tauri-drag-region={desktopShell ? '' : undefined}
           onDoubleClick={event => {
             if (desktopShell && !(event.target as HTMLElement).closest('button')) {
               void toggleDesktopMaximize();
@@ -205,7 +206,7 @@ export function App() {
               </DropdownMenuContent>
             </DropdownMenu>
           )}
-          <span className="ml-auto hidden items-center gap-2 px-2 text-[11px] text-muted-foreground sm:flex">
+          <span className="ml-auto hidden items-center gap-2 px-2 text-[11px] text-muted-foreground sm:flex" data-tauri-drag-region={desktopShell ? '' : undefined}>
             <span className={`size-1.5 rounded-full ${workspaces.connected ? 'bg-emerald-500' : 'bg-destructive'}`} />
             {t(workspaces.connected ? 'connected' : 'disconnected')}
           </span>

@@ -176,14 +176,14 @@ sessions. An unreachable selected backend remains selected and shows a recoverab
 error; the client never silently falls back to Local.
 
 Non-secret profile metadata, ordering, and the active profile are client-owned.
-Installed clients persist them through the framework-neutral Rust client state store. Device
+Installed clients persist them through a Tauri-native configuration store. Device
 credentials are stored separately in the operating-system credential store. A
 credential-store failure permits an in-memory connection for the current process
 only and must never fall back to `localStorage` or a plaintext configuration file.
 
 The native Backend Profile Lifecycle is the authority for pairing, Backend
 Instance ID confirmation, capability validation, activation, refresh, and
-revocation ordering. Native views submit typed intents and receive typed
+revocation ordering. WebView callers submit typed intents and receive typed
 outcomes for identity confirmation, authentication requirements, offline
 selection, and revocation warnings; expected lifecycle states are not encoded in
 error strings. Identity confirmation uses an opaque, single-use native challenge
@@ -684,7 +684,7 @@ not Acrylic. Its meaning is consistent across native backdrops:
 On Windows 11 the native material is Mica. Windows 10 falls back to Acrylic.
 The native material follows AkironMux's resolved light or dark theme rather than
 the Windows system theme, including when the user overrides the application theme.
-Switching the application theme updates both GPUI color tokens and
+Switching the application theme updates both WebUI color tokens and
 `MicaLight`/`MicaDark` or the corresponding Acrylic tint.
 
 The desktop native-appearance layer owns resolved appearance state, platform
@@ -692,7 +692,7 @@ application, and restoration after window events. Windows-specific DWM messages
 and backdrop APIs remain inside its Windows adapter; other platforms use the
 same application seam without compiling Windows implementation details.
 
-The GPUI application surface interpolates from an application tint to transparent. The
+The WebView overlay interpolates from an application tint to transparent. The
 dark tint uses a deeper neutral black so increasing transparency does not produce
 a pale or washed-out dark shell. The light tint uses a neutral light gray. The
 terminal stays opaque so ANSI and truecolor output remains stable. Floating
@@ -700,7 +700,7 @@ dialogs retain a lightly translucent, more opaque surface for legibility.
 
 ### 7.3 Installed-client credential handling
 
-Remote device credentials never enter browser storage or the non-secret client preferences file. Desktop clients use
+Remote device credentials never enter WebView `localStorage`. Desktop clients use
 the operating-system credential manager; Android uses hardware-backed Keystore
 where available, and iOS later uses Keychain. Frontend state stores only a
 credential reference. Secrets are masked, excluded from logs and error objects,
@@ -722,9 +722,7 @@ stable release keystore through repository secrets; the keystore has an offline
 backup because losing it prevents seamless upgrades. Google Play distribution
 and iOS are later phases.
 
-The Android application is a future native client of a Remote backend. Its GUI
-framework is selected when Android implementation begins, independently of the
-GPUI desktop workspace. It does not
+The Android application is a Tauri mobile client of a Remote backend. It does not
 contain or launch `akmux-sessiond`. First launch offers QR scan, manual HTTPS URL
 and Token entry, and pairing-text import from the clipboard. Camera permission is
 requested only after the user chooses scan. Successful manual Token import stores
@@ -804,8 +802,7 @@ Home Manager installs the AkironMux session service unit when configured. The
 persisted TUI setting remains authoritative: unless Session backend is enabled,
 the service exits without binding port 17321.
 
-The standalone desktop package uses GPUI and GPUI Component in a dedicated Rust
-workspace and remains separate from
+The standalone desktop package uses Tauri 2 and remains separate from
 `akmux-sessiond`. Windows x64 is distributed as an NSIS installer. The desktop
 application contains the built-in `http://127.0.0.1:17321` Local profile and can
 store multiple authenticated Remote profiles.
@@ -823,7 +820,7 @@ settings surface includes:
 - background material and material transparency
 - theme and language preferences
 
-On Windows 11, Mica is applied by the native GPUI window behind one shared
+On Windows 11, Mica is applied by the native Tauri window behind one shared
 translucent application background; Windows 10 uses Acrylic as a compatibility
 fallback. The material follows the application's resolved theme. The
 desktop window uses an application-rendered title bar with connection status and
@@ -831,10 +828,11 @@ minimize, maximize/restore, and close controls. The sidebar can be resized from
 its right edge, persists its width locally, and is capped at one third of the
 window width.
 
-The future Android package is separately signed and contains no daemon binary.
-Mobile and desktop assets derive from the same offline application icon source.
-Android safe-area, notification, camera, deep-link, credential-store, and
-screen-capture capabilities remain isolated from the GPUI desktop platform adapters.
+The Android package is a separately signed Tauri application and contains no
+daemon binary. Mobile and desktop assets derive from the same offline application
+icon source. Platform-specific Tauri configuration separates desktop window
+effects and title-bar permissions from Android safe-area, notification, camera,
+deep-link, credential-store, and screen-capture capabilities.
 
 ## 12. Delivery Plan
 
@@ -887,7 +885,7 @@ each security boundary can be tested and rolled back.
 
 ### Phase 6: standalone desktop frontend
 
-- GPUI and GPUI Component separately packaged AkironMux desktop application
+- Tauri-based separately packaged AkironMux desktop application
 - Windows x64 NSIS test package built independently from `akmux-sessiond`
 - configurable backend address and connection diagnostics
 - per-machine NSIS installation and shared transparent application icons
@@ -917,7 +915,7 @@ each security boundary can be tested and rolled back.
 ### Phase 9: multi-backend installed clients
 
 - Local and Remote backend profile model with one active backend
-- framework-neutral Rust non-secret profile persistence and legacy loopback migration
+- Tauri-native non-secret profile persistence and legacy loopback migration
 - Windows credential storage with temporary in-memory fallback only
 - active-backend selector, connection testing, identity pinning, and re-authentication
 - profile-scoped active-session/navigation state and reconnect without UI reload
@@ -925,7 +923,7 @@ each security boundary can be tested and rolled back.
 
 ### Phase 10: Android client
 
-- Android project, platform configuration, capabilities, and Keystore storage
+- Tauri Android project, platform configuration, capabilities, and Keystore storage
 - QR/deep-link, manual, and clipboard pairing flows
 - terminal-first portrait and landscape UI with safe-area and keyboard handling
 - mobile terminal shortcut toolbar, IME, selection, paste, and network recovery
@@ -1063,11 +1061,11 @@ Remote security tests must additionally cover:
 - protocol-major rejection, capability downgrade, and backend instance-ID changes
 
 Installed-client tests use fake credential-store adapters to verify that Remote
-Tokens never enter browser persistence, non-secret client state, or error output. Integration tests exercise
+Tokens never enter WebView persistence or error output. Integration tests exercise
 the platform credential implementation where CI supports it.
 
-Android validation includes narrow touch-enabled browser tests plus native Android
-smoke builds after the mobile framework is selected. Release acceptance also requires physical Android 10+ device checks
+Android validation includes narrow touch-enabled browser tests plus Tauri Android
+smoke builds. Release acceptance also requires physical Android 10+ device checks
 for QR and deep links, Keystore persistence, portrait and landscape safe areas,
 software keyboard and Chinese IME behavior, terminal shortcuts, selection and
 paste, Wi-Fi/cellular reconnection, notification limitations, and application exit.

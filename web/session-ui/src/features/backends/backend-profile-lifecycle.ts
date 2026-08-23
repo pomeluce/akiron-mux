@@ -1,8 +1,7 @@
-import { invoke } from '@tauri-apps/api/core';
 import type { BackendLifecycleOutcome, BackendProfileIntent } from '@/types';
 
-export function applyBackendProfileIntent(intent: BackendProfileIntent) {
-  return invoke<BackendLifecycleOutcome>('apply_backend_profile_intent', { intent });
+export function applyBackendProfileIntent(_intent: BackendProfileIntent): Promise<BackendLifecycleOutcome> {
+  return Promise.reject(new Error('Backend Profiles are available in the installed GPUI Desktop Client.'));
 }
 
 type RefreshResult = BackendLifecycleOutcome | null;

@@ -124,6 +124,16 @@ _Avoid_: Workspace
 
 ## Backend Connections
 
+**Desktop Client**:
+The installed desktop application that connects to a Session Backend and presents
+the live-session workspace.
+_Avoid_: GUI, Embedded WebUI
+
+**Embedded WebUI**:
+The browser-based live-session workspace served by the Session Backend's Local
+listener. It is not an installed client.
+_Avoid_: Desktop Client, GUI
+
 **Session Backend**:
 The host service that owns Managed Sessions and exposes them to AkironMux
 clients.

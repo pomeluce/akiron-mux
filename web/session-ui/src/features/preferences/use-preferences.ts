@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { desktopShell } from '@/features/desktop/desktop-shell';
 import { initialLocale } from '@/shared/lib/i18n';
 import type { ClientPreferences, CloseBehavior, Locale, ThemeMode } from '@/types';
@@ -77,9 +76,6 @@ export function usePreferences() {
     document.documentElement.dataset.desktopShell = String(desktopShell);
     document.documentElement.style.setProperty('--acrylic-transparency', `${preferences.acrylicStrength}%`);
     document.documentElement.style.setProperty('--material-tint-opacity', `${materialTintOpacity(preferences.acrylicStrength)}%`);
-    if (desktopShell) {
-      void invoke('sync_native_backdrop', { dark: resolvedTheme === 'dark', materialTransparency: preferences.acrylicStrength }).catch(() => undefined);
-    }
   }, [preferences, resolvedTheme]);
 
   const persist = (next: ClientPreferences) => {

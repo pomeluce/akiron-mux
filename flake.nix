@@ -27,14 +27,16 @@
           overlays = [ (import rust-overlay) ];
           pkgs = import nixpkgs { inherit system overlays; };
           rust = pkgs.rust-bin.stable.latest.default;
-          rustWindows = pkgs.rust-bin.stable.latest.default.override {
-            targets = [ "x86_64-pc-windows-msvc" ];
-          };
+          rustGpui = pkgs.rust-bin.stable."1.97.1".default;
           rustPlatform = pkgs.makeRustPlatform {
             cargo = rust;
             rustc = rust;
           };
-          version = "1.14.9";
+          gpuiRustPlatform = pkgs.makeRustPlatform {
+            cargo = rustGpui;
+            rustc = rustGpui;
+          };
+          version = "1.15.0";
           tuiPackage = rustPlatform.buildRustPackage {
             pname = "akiron-mux";
             inherit version;
@@ -69,44 +71,54 @@
             '';
             meta.mainProgram = "akmux";
           };
-          desktopPackage = rustPlatform.buildRustPackage {
+          desktopPackage = gpuiRustPlatform.buildRustPackage {
             pname = "akiron-mux-desktop";
             inherit version;
-            src = ./web/session-ui;
-            cargoRoot = "src-tauri";
-            buildAndTestSubdir = "src-tauri";
-            cargoLock.lockFile = ./web/session-ui/src-tauri/Cargo.lock;
-            pnpmDeps = pkgs.fetchPnpmDeps {
-              pname = "akiron-mux-webui";
-              inherit version;
-              src = ./web/session-ui;
-              pnpm = pkgs.pnpm_11;
-              fetcherVersion = 4;
-              hash = "sha256-+i24p9ck8FZBkuENOFSCMkuMMpmRbPmo5hmzJrAhs3g=";
+            src = ./.;
+            cargoRoot = "clients/desktop";
+            buildAndTestSubdir = "clients/desktop";
+            cargoLock = {
+              lockFile = ./clients/desktop/Cargo.lock;
+              outputHashes = {
+                "gpui-0.2.2" = "sha256-vkIk+OynReSoCKJPSFSP8XaBP5EZ/+j58gmzQiQbUb0=";
+                "gpui-component-0.5.2" = "sha256-3cBLoT3GNHOiNrNMx22ibjLJQwB++2Rfy1oQS3QqASM=";
+                "wasm_thread-0.3.3" = "sha256-+lRLCIk0S6Y5ORYjDKsYYHia2FtoSoh+rWkQh7mnPBE=";
+                "xim-ctext-0.3.0" = "sha256-pRT4Sz1JU9ros47/7pmIW9kosWOGMOItcnNd+VrvnpE=";
+                "zed-font-kit-0.14.1-zed" = "sha256-KXygi0olNQi5yM8eaJVykNDtbPMDjT+cWPBF8UrtXR4=";
+                "zed-reqwest-0.12.15-zed" = "sha256-p4SiUrOrbTlk/3bBrzN/mq/t+1Gzy2ot4nso6w6S+F8=";
+                "zed-scap-0.0.8-zed" = "sha256-BihiQHlal/eRsktyf0GI3aSWsUCW7WcICMsC2Xvb7kw=";
+              };
             };
+            cargoBuildFlags = [ "-p" "akmux-desktop" ];
+            cargoTestFlags = [ "-p" "akmux-desktop" ];
             nativeBuildInputs = [
-              pkgs.nodejs
               pkgs.pkg-config
-              pkgs.pnpmConfigHook
-              pkgs.pnpm_11
+              pkgs.clang
+              pkgs.cmake
               pkgs.wrapGAppsHook3
             ];
             buildInputs = [
-              pkgs.glib-networking
-              pkgs.libsoup_3
+              pkgs.fontconfig
+              pkgs.freetype
+              pkgs.libxkbcommon
+              pkgs.wayland
+              pkgs.vulkan-loader
+              pkgs.libx11
+              pkgs.libxcursor
+              pkgs.libxi
+              pkgs.libxcb
+              pkgs.gtk3
+              pkgs.libayatana-appindicator
+              pkgs.xdotool
               pkgs.openssl
-              pkgs.webkitgtk_4_1
             ];
-            preBuild = ''
-              pnpm build
-            '';
             postInstall = ''
-              install -Dm644 public/akiron.svg \
+              install -Dm644 web/session-ui/public/akiron.svg \
                 $out/share/icons/hicolor/scalable/apps/akiron-mux.svg
               install -Dm644 ${./assets/akiron-mux.desktop} \
                 $out/share/applications/akiron-mux.desktop
             '';
-            meta.mainProgram = "akiron-mux";
+            meta.mainProgram = "akmux-desktop";
           };
           guiPackage = pkgs.symlinkJoin {
             name = "akiron-mux-${version}-with-gui";
@@ -144,40 +156,53 @@
             '';
           };
 
-          devShells.gui = pkgs.mkShell {
-            name = "akironmux-gui-dev";
-            buildInputs = [
-              rustWindows
+          devShells.gpui = pkgs.mkShell {
+            name = "akironmux-gpui-dev";
+            packages = [
+              rustGpui
               pkgs.cargo
-              pkgs.cargo-tauri
-              pkgs.cargo-xwin
-              pkgs.nodejs
-              pkgs.pnpm_11
+              pkgs.rust-analyzer
+              pkgs.clippy
+              pkgs.rustfmt
               pkgs.pkg-config
-              pkgs.glib
-              pkgs.gtk3
-              pkgs.webkitgtk_4_1
-              pkgs.libsoup_3
-              pkgs.cairo
-              pkgs.pango
-              pkgs.gdk-pixbuf
-              pkgs.atk
-              pkgs.openssl
-              pkgs.librsvg
-              pkgs.dpkg
-              pkgs.patchelf
-              pkgs.nsis
               pkgs.clang
-              pkgs.llvmPackages.llvm
-              pkgs.llvmPackages.lld
+              pkgs.cmake
+              pkgs.fontconfig
+              pkgs.freetype
+              pkgs.libxkbcommon
+              pkgs.wayland
+              pkgs.vulkan-loader
+              pkgs.libx11
+              pkgs.libxcursor
+              pkgs.libxi
+              pkgs.libxcb
+              pkgs.gtk3
+              pkgs.libayatana-appindicator
+              pkgs.xdotool
+              pkgs.openssl
+            ];
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.fontconfig
+              pkgs.freetype
+              pkgs.libxkbcommon
+              pkgs.wayland
+              pkgs.vulkan-loader
+              pkgs.libx11
+              pkgs.libxcursor
+              pkgs.libxi
+              pkgs.libxcb
+              pkgs.gtk3
+              pkgs.libayatana-appindicator
+              pkgs.xdotool
             ];
             shellHook = ''
-              echo "AkironMux GUI dev shell"
-              echo "  cd web/session-ui"
-              echo "  pnpm desktop:dev"
-              echo "  pnpm desktop:build"
+              echo "AkironMux GPUI desktop dev shell"
+              echo "  cd clients/desktop"
+              echo "  cargo check --locked --workspace --all-targets"
+              echo "  cargo run --locked -p akmux-desktop"
             '';
           };
+
         };
 
       flake =

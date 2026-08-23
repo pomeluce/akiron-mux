@@ -2,7 +2,7 @@
 Type=Application
 Name=AkironMux
 Comment=Unified Claude Code and Codex session workspace
-Exec=akiron-mux
+Exec=akmux-desktop
 Icon=akiron-mux
 Terminal=false
 Categories=Development;

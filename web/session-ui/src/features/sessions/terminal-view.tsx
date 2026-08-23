@@ -1,9 +1,7 @@
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Terminal } from '@xterm/xterm';
-import { openUrl } from '@tauri-apps/plugin-opener';
 import { useEffect, useRef, useState } from 'react';
-import { desktopShell } from '@/features/desktop/desktop-shell';
 import type { MessageKey } from '@/shared/lib/i18n';
 import { Button } from '@/shared/ui/button';
 import { cn } from '@/shared/lib/utils';
@@ -30,10 +28,6 @@ function openExternalUrl(value: string) {
     return;
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
-  if (desktopShell) {
-    void openUrl(url.toString()).catch(() => undefined);
-    return;
-  }
   window.open(url.toString(), '_blank', 'noopener,noreferrer');
 }
 

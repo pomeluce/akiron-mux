@@ -1,4 +1,3 @@
-import { invoke } from '@tauri-apps/api/core';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { desktopShell } from '@/features/desktop/desktop-shell';
 import type { BackendHealth, BackendIdentityConfirmation, BackendLifecycleOutcome, BackendProfile, BackendProfileState } from '@/types';
@@ -12,7 +11,7 @@ const fallback: BackendProfileState = {
 
 export function useBackends() {
   const [state, setState] = useState(fallback);
-  const [loading, setLoading] = useState(desktopShell);
+  const loading = false;
   const [identityConfirmation, setIdentityConfirmation] = useState<BackendIdentityConfirmation | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'ready' | 'offline' | 'authenticationRequired'>('ready');
   const [refreshRevision, setRefreshRevision] = useState(0);
@@ -43,31 +42,6 @@ export function useBackends() {
     [publish],
   );
 
-  useEffect(() => {
-    if (!desktopShell) return;
-    void invoke<BackendProfileState>('list_backend_profiles')
-      .then(async next => {
-        const legacy = localStorage.getItem('akironmux-backend-address');
-        if (legacy) {
-          try {
-            const url = new URL(legacy);
-            if (url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === '::1' || url.hostname === 'localhost')) {
-              const local = next.profiles.find(profile => profile.id === 'local');
-              if (local && local.address !== legacy) {
-                const outcome = await applyBackendProfileIntent({ type: 'save', profile: { ...local, address: legacy } });
-                next = outcome.state;
-              }
-            }
-          } catch {
-            // Invalid legacy values are discarded instead of entering native profile storage.
-          }
-          localStorage.removeItem('akironmux-backend-address');
-        }
-        setState(next);
-      })
-      .finally(() => setLoading(false));
-  }, []);
-
   const active = state.profiles.find(profile => profile.id === state.activeProfileId) || state.profiles[0];
   useEffect(() => configureDesktopBackend(!loading ? active || null : null), [active, loading]);
 
@@ -92,7 +66,11 @@ export function useBackends() {
       connectionStatus,
       identityConfirmation,
       select: (profileId: string) => apply({ type: 'select', profileId }),
-      test: (profile: BackendProfile) => invoke<BackendHealth>('test_backend_profile', { profile }),
+      test: async (profile: BackendProfile) => {
+        const response = await fetch(`${profile.address.replace(/\/$/, '')}/api/health`);
+        if (!response.ok) throw new Error(`Backend health check failed (${response.status})`);
+        return response.json() as Promise<BackendHealth>;
+      },
       save: (profile: BackendProfile, pairingLink = '') => apply({ type: 'save', profile, pairingLink }),
       confirmIdentity: async (challengeId: string) => {
         const outcome = await apply({ type: 'confirmIdentity', challengeId });

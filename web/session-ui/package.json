@@ -1,7 +1,7 @@
 {
   "name": "akiron-mux-webui",
   "private": true,
-  "version": "1.15.3",
+  "version": "1.15.4",
   "packageManager": "pnpm@11.20.0",
   "type": "module",
   "scripts": {
@@ -38,7 +38,7 @@
     "@vitejs/plugin-react": "^6.0.5",
     "playwright": "1.61.1",
     "tailwindcss": "^4.3.3",
-    "typescript": "^7.0.2",
+    "typescript": "^6.0.3",
     "vite": "^8.2.1"
   }
 }

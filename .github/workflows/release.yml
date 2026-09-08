@@ -3,14 +3,23 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to rebuild and publish
+        description: Release tag to prepare or publish
         required: true
+        type: string
+      phase:
+        description: Prepare assets first, then publish the exact prepared run
+        required: true
+        default: prepare
+        type: choice
+        options:
+          - prepare
+          - publish
+      candidate_run_id:
+        description: Prepare workflow run ID (required when publishing)
+        required: false
         type: string
 
 env:
@@ -22,10 +31,12 @@ env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
   linux:
+    if: inputs.phase == 'prepare'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -83,6 +94,7 @@ jobs:
           if-no-files-found: error
 
   macos:
+    if: inputs.phase == 'prepare'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -122,52 +134,8 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
 
-      - name: Update Homebrew formula
-        env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          VERSION="${{ env.RELEASE_TAG }}"
-          VERSION="${VERSION#v}"
-          TARBALL="${PRODUCT_NAME}-${VERSION}-macos-arm64-cli.tar.gz"
-          TARBALL_PATH="release-assets/${TARBALL}"
-          SHA256=$(shasum -a 256 "$TARBALL_PATH" | cut -d ' ' -f 1)
-
-          git clone "https://${HOMEBREW_TAP_TOKEN}@github.com/pomeluce/homebrew-ccswitch.git" homebrew-tap
-          cd homebrew-tap
-
-          mkdir -p Formula
-          cat > Formula/akiron-mux.rb << 'RUBYEOF'
-          class AkironMux < Formula
-            desc "Unified Claude Code and Codex configuration manager"
-            homepage "https://github.com/${{ github.repository }}"
-            url "URL_PLACEHOLDER"
-            sha256 "SHA_PLACEHOLDER"
-            license "GPL-3.0"
-            version "VERSION_PLACEHOLDER"
-
-            def install
-              bin.install "akmux"
-              bin.install "akmux-sessiond"
-            end
-
-            test do
-              system "#{bin}/akmux", "--version"
-            end
-          end
-          RUBYEOF
-
-          sed -i '' "s|URL_PLACEHOLDER|https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/${TARBALL}|" Formula/akiron-mux.rb
-          sed -i '' "s|SHA_PLACEHOLDER|${SHA256}|" Formula/akiron-mux.rb
-          sed -i '' "s|VERSION_PLACEHOLDER|${VERSION}|" Formula/akiron-mux.rb
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/akiron-mux.rb
-          git commit -m "chore: update AkironMux formula for ${{ env.RELEASE_TAG }}" || true
-          git pull --rebase || true
-          git push
-
   windows:
+    if: inputs.phase == 'prepare'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -212,6 +180,7 @@ jobs:
           if-no-files-found: error
 
   gui-linux:
+    if: inputs.phase == 'prepare'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -259,6 +228,7 @@ jobs:
           if-no-files-found: error
 
   gui-macos:
+    if: inputs.phase == 'prepare'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -299,6 +269,7 @@ jobs:
           if-no-files-found: error
 
   gui-windows:
+    if: inputs.phase == 'prepare'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -345,7 +316,8 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
 
-  publish:
+  prepare:
+    if: inputs.phase == 'prepare'
     needs: [linux, macos, windows, gui-linux, gui-macos, gui-windows]
     runs-on: ubuntu-latest
     steps:
@@ -353,8 +325,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Test release publishing
-        run: bash tests/release_publish_test.sh
+      - name: Test release tooling
+        run: |
+          bash tests/release_publish_test.sh
+          bash tests/release_candidate_test.sh
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -364,6 +338,54 @@ jobs:
 
       - name: List artifacts
         run: find artifacts -maxdepth 2 -type f -print
+
+      - name: Prepare immutable release candidate
+        run: bash scripts/prepare-release-candidate.sh "${{ env.RELEASE_TAG }}" artifacts release-candidate
+
+      - name: Upload release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: AkironMux-${{ env.RELEASE_TAG }}-release-candidate
+          path: release-candidate
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Explain next step
+        run: |
+          echo "Copy release-candidate/nix/release-assets.nix into the repository."
+          echo "Commit that metadata, create $RELEASE_TAG on the commit, then run the publish phase with run ID $GITHUB_RUN_ID."
+
+  publish:
+    if: inputs.phase == 'publish'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate publish inputs
+        run: |
+          test -n "${{ inputs.candidate_run_id }}"
+          test "$(git describe --tags --exact-match HEAD)" = "${{ env.RELEASE_TAG }}"
+
+      - name: Test release tooling
+        run: |
+          bash tests/release_publish_test.sh
+          bash tests/release_candidate_test.sh
+
+      - name: Download prepared release candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: AkironMux-${{ env.RELEASE_TAG }}-release-candidate
+          path: release-candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id }}
+
+      - name: Verify candidate checksums and Nix metadata
+        run: |
+          cmp nix/release-assets.nix release-candidate/nix/release-assets.nix
+          cd release-candidate/assets
+          sha256sum -c ../SHA256SUMS
 
       - name: Generate changelog
         uses: orhun/git-cliff-action@v4
@@ -376,4 +398,48 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/publish-release.sh "${{ env.RELEASE_TAG }}" CHANGELOG.md artifacts
+        run: bash scripts/publish-release.sh "${{ env.RELEASE_TAG }}" CHANGELOG.md release-candidate/assets
+
+      - name: Update Homebrew formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          TARBALL="${PRODUCT_NAME}-${VERSION}-macos-arm64-cli.tar.gz"
+          TARBALL_PATH="release-candidate/assets/${TARBALL}"
+          SHA256=$(sha256sum "$TARBALL_PATH" | cut -d ' ' -f 1)
+
+          git clone "https://${HOMEBREW_TAP_TOKEN}@github.com/pomeluce/homebrew-ccswitch.git" homebrew-tap
+          cd homebrew-tap
+
+          mkdir -p Formula
+          cat > Formula/akiron-mux.rb << 'RUBYEOF'
+          class AkironMux < Formula
+            desc "Unified Claude Code and Codex configuration manager"
+            homepage "https://github.com/${{ github.repository }}"
+            url "URL_PLACEHOLDER"
+            sha256 "SHA_PLACEHOLDER"
+            license "GPL-3.0"
+            version "VERSION_PLACEHOLDER"
+
+            def install
+              bin.install "akmux"
+              bin.install "akmux-sessiond"
+            end
+
+            test do
+              system "#{bin}/akmux", "--version"
+            end
+          end
+          RUBYEOF
+
+          sed -i "s|URL_PLACEHOLDER|https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/${TARBALL}|" Formula/akiron-mux.rb
+          sed -i "s|SHA_PLACEHOLDER|${SHA256}|" Formula/akiron-mux.rb
+          sed -i "s|VERSION_PLACEHOLDER|${VERSION}|" Formula/akiron-mux.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/akiron-mux.rb
+          git commit -m "chore: update AkironMux formula for ${{ env.RELEASE_TAG }}" || true
+          git pull --rebase
+          git push

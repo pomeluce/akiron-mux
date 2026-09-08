@@ -21,13 +21,15 @@
 
 ### NixOS
 
+Nix 安装直接使用 GitHub Release 中经过固定 SHA-256 校验的预编译包，不会在本机编译 Rust 或 WebUI。目前该安装方式仅支持 `x86_64-linux`。
+
 #### Home Manager（推荐，按用户配置）
 
 在 `home.nix` 中：
 
 ```nix
 {
-  inputs.akironMux.url = "github:your/akiron-mux";
+  inputs.akironMux.url = "github:pomeluce/akiron-mux";
 
   homeConfigurations = {
     your-user = home-manager.lib.homeManagerConfiguration {
@@ -93,7 +95,7 @@ Home Manager 会自动：
 
 ```nix
 {
-  inputs.akironMux.url = "github:your/akiron-mux";
+  inputs.akironMux.url = "github:pomeluce/akiron-mux";
 
   outputs = { nixpkgs, akironMux, ... }: {
     nixosConfigurations.your-host = nixpkgs.lib.nixosSystem {
@@ -131,10 +133,10 @@ NixOS 模块将配置写入 `/etc/akmux/defaults.toml`，并安装二进制包�
 
 ```bash
 # 临时启动
-nix run github:your/akiron-mux
+nix run github:pomeluce/akiron-mux
 
 # 安装到 profile
-nix profile install github:your/akiron-mux
+nix profile install github:pomeluce/akiron-mux
 ```
 
 ### Homebrew（macOS）
@@ -158,24 +160,26 @@ cargo install --git https://github.com/pomeluce/akiron-mux
 
 ```bash
 # Debian/Ubuntu
-curl -LO https://github.com/pomeluce/akiron-mux/releases/latest/download/akiron-mux_<version>_amd64.deb
-sudo dpkg -i akiron-mux_*.deb
+VERSION=1.15.4
+curl -LO "https://github.com/pomeluce/akiron-mux/releases/download/v${VERSION}/AkironMux-${VERSION}-linux-x86_64-cli.deb"
+sudo dpkg -i "AkironMux-${VERSION}-linux-x86_64-cli.deb"
 
 # Fedora/RHEL
-curl -LO https://github.com/pomeluce/akiron-mux/releases/latest/download/akiron-mux-<version>.x86_64.rpm
-sudo rpm -i akiron-mux-*.rpm
+curl -LO "https://github.com/pomeluce/akiron-mux/releases/download/v${VERSION}/AkironMux-${VERSION}-linux-x86_64-cli.rpm"
+sudo rpm -i "AkironMux-${VERSION}-linux-x86_64-cli.rpm"
 
 # 通用 tar.gz
-curl -LO https://github.com/pomeluce/akiron-mux/releases/latest/download/akmux_<version>_linux-x86_64.tar.gz
-tar -xzf akmux_*.tar.gz
+curl -LO "https://github.com/pomeluce/akiron-mux/releases/download/v${VERSION}/AkironMux-${VERSION}-linux-x86_64-cli.tar.gz"
+tar -xzf "AkironMux-${VERSION}-linux-x86_64-cli.tar.gz"
 sudo mv akmux akmux-sessiond /usr/local/bin/
 ```
 
 ### 预编译包（macOS 手动）
 
 ```bash
-curl -LO https://github.com/pomeluce/akiron-mux/releases/latest/download/akmux_<version>_darwin-arm64.tar.gz
-tar -xzf akmux_*.tar.gz
+VERSION=1.15.4
+curl -LO "https://github.com/pomeluce/akiron-mux/releases/download/v${VERSION}/AkironMux-${VERSION}-macos-arm64-cli.tar.gz"
+tar -xzf "AkironMux-${VERSION}-macos-arm64-cli.tar.gz"
 chmod +x akmux akmux-sessiond
 sudo mv akmux akmux-sessiond /usr/local/bin/
 ```
@@ -543,9 +547,18 @@ nix develop    # 进入开发环境（Rust 工具链）
 cargo build    # 构建
 cargo test     # 测试
 cargo run --bin akmux  # 启动 TUI
-nix build .#tui        # 仅构建 TUI/CLI
-nix build .#gui        # 构建 TUI/CLI + 桌面 GUI
+nix build .#tui        # 封装 Release 中的 TUI/CLI
+nix build .#gui        # 封装 Release 中的 TUI/CLI + 桌面 GUI
 ```
+
+### 发布
+
+Release 工作流分为两个阶段，以保证 Tag 中记录的 hash 与最终发布文件完全一致：
+
+1. 在 GitHub Actions 中以目标 Tag 名运行 `prepare`，下载生成的 release candidate，并将其中的 `nix/release-assets.nix` 提交到仓库。
+2. 在该提交上创建并推送 Tag，再以 prepare run ID 运行 `publish`。publish 只会发布第一阶段保存的原始文件。
+
+已发布的同名资产不可覆盖；内容变化时必须升级版本并创建新 Tag。
 
 ## License
 

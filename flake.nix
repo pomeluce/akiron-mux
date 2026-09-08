@@ -30,35 +30,35 @@
           rustWindows = pkgs.rust-bin.stable.latest.default.override {
             targets = [ "x86_64-pc-windows-msvc" ];
           };
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = rust;
-            rustc = rust;
-          };
-          version = "1.15.4";
-          tuiPackage = rustPlatform.buildRustPackage {
+          releaseAssets = import ./nix/release-assets.nix;
+          version = releaseAssets.version;
+          releaseBaseUrl = "https://github.com/pomeluce/akiron-mux/releases/download/v${version}";
+          systemAssets = releaseAssets.systems.${system};
+          tuiPackage = pkgs.stdenv.mkDerivation {
             pname = "akiron-mux";
             inherit version;
-            src = ./.;
-            pnpmRoot = "web/session-ui";
-            pnpmDeps = pkgs.fetchPnpmDeps {
-              pname = "akiron-mux-webui";
-              inherit version;
-              src = ./web/session-ui;
-              pnpm = pkgs.pnpm_11;
-              fetcherVersion = 4;
-              hash = "sha256-bfyNpp8Xw7/XEeWYl8/OtlMTGeQf2lN5mDI8sw5zS3M=";
+            src = pkgs.fetchurl {
+              url = "${releaseBaseUrl}/${systemAssets.cli.fileName}";
+              inherit (systemAssets.cli) sha256;
             };
-            cargoLock.lockFile = ./Cargo.lock;
             nativeBuildInputs = [
+              pkgs.autoPatchelfHook
               pkgs.installShellFiles
-              pkgs.nodejs
-              pkgs.pnpmConfigHook
-              pkgs.pnpm_11
             ];
-            preBuild = ''
-              (cd web/session-ui && pnpm build)
+            buildInputs = [ pkgs.stdenv.cc.cc.lib ];
+            dontUnpack = true;
+            dontBuild = true;
+            installPhase = ''
+              runHook preInstall
+              tar -xzf "$src"
+              install -Dm755 akmux "$out/bin/akmux"
+              install -Dm755 akmux-sessiond "$out/bin/akmux-sessiond"
+              install -Dm644 README.md "$out/share/doc/akiron-mux/README.md"
+              install -Dm644 LICENSE "$out/share/doc/akiron-mux/LICENSE"
+              runHook postInstall
             '';
             postInstall = ''
+              autoPatchelf "$out/bin"
               installShellCompletion --zsh --name _akmux \
                 <($out/bin/akmux completions zsh)
               installShellCompletion --bash --cmd akmux \
@@ -67,47 +67,60 @@
                 <($out/bin/akmux completions fish)
               installManPage --name akmux.1 <($out/bin/akmux man)
             '';
-            meta.mainProgram = "akmux";
+            doInstallCheck = true;
+            installCheckPhase = ''
+              "$out/bin/akmux" --version
+              test -x "$out/bin/akmux-sessiond"
+            '';
+            meta = {
+              mainProgram = "akmux";
+              sourceProvenance = [ pkgs.lib.sourceTypes.binaryNativeCode ];
+            };
           };
-          desktopPackage = rustPlatform.buildRustPackage {
+          desktopPackage = pkgs.stdenv.mkDerivation {
             pname = "akiron-mux-desktop";
             inherit version;
-            src = ./web/session-ui;
-            cargoRoot = "src-tauri";
-            buildAndTestSubdir = "src-tauri";
-            cargoLock.lockFile = ./web/session-ui/src-tauri/Cargo.lock;
-            pnpmDeps = pkgs.fetchPnpmDeps {
-              pname = "akiron-mux-webui";
-              inherit version;
-              src = ./web/session-ui;
-              pnpm = pkgs.pnpm_11;
-              fetcherVersion = 4;
-              hash = "sha256-bfyNpp8Xw7/XEeWYl8/OtlMTGeQf2lN5mDI8sw5zS3M=";
+            src = pkgs.fetchurl {
+              url = "${releaseBaseUrl}/${systemAssets.desktop.fileName}";
+              inherit (systemAssets.desktop) sha256;
             };
             nativeBuildInputs = [
-              pkgs.nodejs
-              pkgs.pkg-config
-              pkgs.pnpmConfigHook
-              pkgs.pnpm_11
+              pkgs.autoPatchelfHook
+              pkgs.dpkg
               pkgs.wrapGAppsHook3
             ];
             buildInputs = [
+              pkgs.cairo
+              pkgs.dbus
+              pkgs.gdk-pixbuf
+              pkgs.glib
               pkgs.glib-networking
+              pkgs.gtk3
               pkgs.libayatana-appindicator
               pkgs.libsoup_3
               pkgs.openssl
+              pkgs.stdenv.cc.cc.lib
               pkgs.webkitgtk_4_1
             ];
-            preBuild = ''
-              pnpm build
+            runtimeDependencies = [ pkgs.libayatana-appindicator ];
+            dontUnpack = true;
+            dontBuild = true;
+            installPhase = ''
+              runHook preInstall
+              dpkg-deb -x "$src" .
+              mkdir -p "$out"
+              cp -R usr/. "$out/"
+              runHook postInstall
             '';
-            postInstall = ''
-              install -Dm644 public/akiron.svg \
-                $out/share/icons/hicolor/scalable/apps/akiron-mux.svg
-              install -Dm644 ${./assets/akiron-mux.desktop} \
-                $out/share/applications/akiron-mux.desktop
+            doInstallCheck = true;
+            installCheckPhase = ''
+              test -x "$out/bin/akiron-mux"
+              test -f "$out/share/applications/AkironMux.desktop"
             '';
-            meta.mainProgram = "akiron-mux";
+            meta = {
+              mainProgram = "akiron-mux";
+              sourceProvenance = [ pkgs.lib.sourceTypes.binaryNativeCode ];
+            };
           };
           guiPackage = pkgs.symlinkJoin {
             name = "akiron-mux-${version}-with-gui";
@@ -119,7 +132,7 @@
           };
         in
         {
-          packages = {
+          packages = pkgs.lib.optionalAttrs (system == "x86_64-linux") {
             default = tuiPackage;
             tui = tuiPackage;
             desktop = desktopPackage;
@@ -184,6 +197,12 @@
 
       flake =
         let
+          packageFor =
+            system: name:
+            if builtins.hasAttr system self.packages && builtins.hasAttr name self.packages.${system} then
+              self.packages.${system}.${name}
+            else
+              throw "AkironMux release packages currently support only x86_64-linux";
           mkDefaultsType =
             lib: pkgs:
             let
@@ -340,9 +359,9 @@
               format = pkgs.formats.toml { };
               package =
                 if cfg.gui then
-                  self.packages.${pkgs.stdenv.hostPlatform.system}.gui
+                  packageFor pkgs.stdenv.hostPlatform.system "gui"
                 else
-                  self.packages.${pkgs.stdenv.hostPlatform.system}.tui;
+                  packageFor pkgs.stdenv.hostPlatform.system "tui";
             in
             {
               imports = [ (lib.mkRenamedOptionModule [ "services" "ccswitch" ] [ "services" "akmux" ]) ];
@@ -378,9 +397,9 @@
               cfg = config.programs.akmux;
               package =
                 if cfg.gui then
-                  self.packages.${pkgs.stdenv.hostPlatform.system}.gui
+                  packageFor pkgs.stdenv.hostPlatform.system "gui"
                 else
-                  self.packages.${pkgs.stdenv.hostPlatform.system}.tui;
+                  packageFor pkgs.stdenv.hostPlatform.system "tui";
             in
             {
               imports = [ (lib.mkRenamedOptionModule [ "programs" "ccswitch" ] [ "programs" "akmux" ]) ];

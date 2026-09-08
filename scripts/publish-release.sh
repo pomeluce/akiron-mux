@@ -47,10 +47,35 @@ for release_asset in "${release_assets[@]}"; do
 done
 
 if gh release view "$release_tag" >/dev/null 2>&1; then
-  gh release upload "$release_tag" "${release_assets[@]}" --clobber
-else
-  gh release create "$release_tag" \
-    --title "$release_tag" \
-    --notes-file "$notes_file" \
-    "${release_assets[@]}"
+  existing_assets_directory=$(mktemp -d)
+  trap 'rm -rf "$existing_assets_directory"' EXIT
+  gh release download "$release_tag" --dir "$existing_assets_directory"
+
+  for release_asset in "${release_assets[@]}"; do
+    asset_name=$(basename "$release_asset")
+    existing_asset="$existing_assets_directory/$asset_name"
+    if [[ ! -f "$existing_asset" ]]; then
+      echo "existing release is missing asset: $asset_name" >&2
+      exit 1
+    fi
+    if ! cmp -s "$release_asset" "$existing_asset"; then
+      echo "existing release asset differs and cannot be overwritten: $asset_name" >&2
+      exit 1
+    fi
+  done
+
+  mapfile -t existing_asset_names < <(find "$existing_assets_directory" -type f -printf '%f\n' | sort)
+  mapfile -t release_asset_names < <(printf '%s\n' "${release_assets[@]##*/}" | sort)
+  if [[ "${existing_asset_names[*]}" != "${release_asset_names[*]}" ]]; then
+    echo "existing release contains a different asset set and cannot be overwritten" >&2
+    exit 1
+  fi
+
+  echo "release $release_tag already contains the same immutable assets"
+  exit 0
 fi
+
+gh release create "$release_tag" \
+  --title "$release_tag" \
+  --notes-file "$notes_file" \
+  "${release_assets[@]}"

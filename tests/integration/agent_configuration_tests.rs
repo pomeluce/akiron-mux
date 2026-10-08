@@ -24,6 +24,119 @@ fn codex_configuration<'a>(mgr: &'a ConfigManager, config_path: &std::path::Path
 }
 
 #[test]
+fn codex_switch_keeps_internal_metadata_out_of_native_config() {
+    let dir = tempdir().unwrap();
+    let mgr = ConfigManager::new(&dir.path().join("akmux.db"), Some(&dir.path().join("missing-defaults.toml"))).unwrap();
+    let config_path = dir.path().join("codex/config.toml");
+    let auth_path = dir.path().join("codex/auth.json");
+    let configuration = codex_configuration(&mgr, &config_path, &auth_path);
+    configuration.save_provider(AppType::Codex, &user_claude_provider()).unwrap();
+    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    fs::write(
+        &config_path,
+        "# preserve native settings\nmodel = \"gpt-test\"\n[akmux.last_switch]\nsource = \"old-provider\"\n",
+    )
+    .unwrap();
+
+    configuration.apply_codex_provider("user-provider").unwrap();
+
+    let text = fs::read_to_string(&config_path).unwrap();
+    let config: toml::Value = toml::from_str(&text).unwrap();
+    assert!(config.get("akmux").is_none(), "Codex warns that the top-level akmux field is ignored");
+    assert!(config.get("ccswitch").is_none());
+    assert!(text.contains("# preserve native settings"));
+    assert_eq!(config["model"].as_str(), Some("gpt-test"));
+    assert_eq!(config["model_provider"].as_str(), Some("akmux"));
+    let state: serde_json::Value = serde_json::from_str(&fs::read_to_string(dir.path().join("codex/akmux/last-switch.json")).unwrap()).unwrap();
+    assert_eq!(state["source"], "user-provider");
+    mgr.set_setting("active_codex_provider", "stale-provider").unwrap();
+    configuration.reconcile().unwrap();
+    assert_eq!(mgr.get_setting("active_codex_provider").as_deref(), Some("user-provider"));
+}
+
+#[test]
+fn codex_reconcile_migrates_legacy_switch_metadata() {
+    for namespace in ["akmux", "ccswitch"] {
+        let dir = tempdir().unwrap();
+        let mgr = ConfigManager::new(&dir.path().join("akmux.db"), Some(&dir.path().join("missing-defaults.toml"))).unwrap();
+        let config_path = dir.path().join("config.toml");
+        let auth_path = dir.path().join("auth.json");
+        let configuration = codex_configuration(&mgr, &config_path, &auth_path);
+        configuration.save_provider(AppType::Codex, &user_claude_provider()).unwrap();
+        fs::write(
+            &config_path,
+            format!("# preserved\nmodel_provider = \"akmux\"\nmodel = \"old-model\"\n[model_providers.akmux]\nname = \"User Provider\"\nbase_url = \"https://api.example.com\"\n[{namespace}.last_switch]\nsource = \"user-provider\"\nmodel = \"old-model\"\nat = \"2026-01-01 12:00:00\"\n"),
+        ).unwrap();
+
+        configuration.reconcile().unwrap();
+
+        let text = fs::read_to_string(&config_path).unwrap();
+        let config: toml::Value = toml::from_str(&text).unwrap();
+        assert!(config.get(namespace).is_none());
+        assert!(text.contains("# preserved"));
+        let state: serde_json::Value = serde_json::from_str(&fs::read_to_string(dir.path().join("akmux/last-switch.json")).unwrap()).unwrap();
+        assert_eq!(state["source"], "user-provider");
+        assert_eq!(state["model"], "old-model");
+        assert_eq!(state["at"], "2026-01-01 12:00:00");
+        assert_eq!(mgr.get_setting("active_codex_provider").as_deref(), Some("user-provider"));
+        assert_eq!(mgr.get_setting("active_codex_model").as_deref(), Some("old-model"));
+        configuration.reconcile().unwrap();
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), text);
+    }
+}
+
+#[test]
+fn codex_reconcile_does_not_use_stale_metadata_after_native_provider_change() {
+    let dir = tempdir().unwrap();
+    let mgr = ConfigManager::new(&dir.path().join("akmux.db"), Some(&dir.path().join("missing-defaults.toml"))).unwrap();
+    let config_path = dir.path().join("config.toml");
+    let auth_path = dir.path().join("auth.json");
+    let configuration = codex_configuration(&mgr, &config_path, &auth_path);
+    configuration.save_provider(AppType::Codex, &user_claude_provider()).unwrap();
+    configuration.apply_codex_provider("user-provider").unwrap();
+    let mut config: toml_edit::DocumentMut = fs::read_to_string(&config_path).unwrap().parse().unwrap();
+    config["model_provider"] = toml_edit::value("openai");
+    fs::write(&config_path, config.to_string()).unwrap();
+
+    configuration.reconcile().unwrap();
+
+    assert_eq!(mgr.get_setting("active_codex_provider").as_deref(), Some(OFFICIAL_CODEX_PROVIDER_ID));
+}
+
+#[test]
+fn failed_codex_switch_restores_metadata_and_native_files() {
+    let dir = tempdir().unwrap();
+    let mgr = ConfigManager::new(&dir.path().join("akmux.db"), Some(&dir.path().join("missing-defaults.toml"))).unwrap();
+    let config_path = dir.path().join("config.toml");
+    let auth_path = dir.path().join("auth.json");
+    let state_path = dir.path().join("akmux/last-switch.json");
+    let configuration = codex_configuration(&mgr, &config_path, &auth_path);
+    configuration.save_provider(AppType::Codex, &user_claude_provider()).unwrap();
+    configuration.apply_codex_provider("user-provider").unwrap();
+    let config_before = fs::read(&config_path).unwrap();
+    let auth_before = fs::read(&auth_path).unwrap();
+    let state_before = fs::read(&state_path).unwrap();
+    Db::open(&dir.path().join("akmux.db"))
+        .unwrap()
+        .conn()
+        .execute_batch("CREATE TRIGGER reject_codex_switch BEFORE INSERT ON settings WHEN NEW.key = 'active_codex_provider' BEGIN SELECT RAISE(ABORT, 'test write failure'); END;")
+        .unwrap();
+
+    assert!(configuration.apply_codex_provider(OFFICIAL_CODEX_PROVIDER_ID).is_err());
+
+    assert_eq!(fs::read(&config_path).unwrap(), config_before);
+    assert_eq!(fs::read(&auth_path).unwrap(), auth_before);
+    assert_eq!(fs::read(&state_path).unwrap(), state_before);
+    assert!(!dir.path().join("auth_akmux.json").exists());
+    assert_eq!(mgr.get_setting("active_codex_provider").as_deref(), Some("user-provider"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(&state_path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+}
+
+#[test]
 fn test_switch_local_writes_settings_json() {
     let dir = tempdir().unwrap();
     let defaults_path = dir.path().join("defaults.toml");
@@ -249,7 +362,9 @@ fn switching_between_official_and_third_party_codex_preserves_separate_auth_file
         official_config["model_providers"]["akmux"]["base_url"].as_str(),
         Some("https://chatgpt.com/backend-api/codex")
     );
-    assert_eq!(official_config["akmux"]["last_switch"]["source"].as_str(), Some(OFFICIAL_CODEX_PROVIDER_ID));
+    assert!(official_config.get("akmux").is_none());
+    let state: serde_json::Value = serde_json::from_str(&fs::read_to_string(codex_dir.join("akmux/last-switch.json")).unwrap()).unwrap();
+    assert_eq!(state["source"], OFFICIAL_CODEX_PROVIDER_ID);
     assert_eq!(fs::read_to_string(&auth_path).unwrap(), official_auth);
     let akmux_auth: serde_json::Value = serde_json::from_str(&fs::read_to_string(codex_dir.join("auth_akmux.json")).unwrap()).unwrap();
     assert_eq!(akmux_auth["OPENAI_API_KEY"], "sk-third-party");
@@ -397,7 +512,7 @@ source = "legacy-provider"
     let config_text = fs::read_to_string(&config_path).unwrap();
     assert!(config_text.contains("# keep this comment"));
     assert!(!config_text.contains("\n[akmux]\n"));
-    assert!(config_text.contains("[akmux.last_switch]"));
+    assert!(!config_text.contains("[akmux.last_switch]"));
     assert!(!config_text.contains("[ccswitch.last_switch]"));
     let config: toml::Value = toml::from_str(&config_text).unwrap();
     assert_eq!(config["model"].as_str(), Some("gpt-test"));
@@ -410,7 +525,8 @@ source = "legacy-provider"
     assert!(config["model_providers"].get("openai").is_none());
     assert!(config["model_providers"].get("ccs").is_none());
     assert_eq!(config["model_providers"]["codex-proxy"]["base_url"].as_str(), Some("https://legacy.example.com/v1"));
-    assert_eq!(config["akmux"]["last_switch"]["source"].as_str(), Some("codex-proxy"));
+    let state: serde_json::Value = serde_json::from_str(&fs::read_to_string(dir.path().join("akmux/last-switch.json")).unwrap()).unwrap();
+    assert_eq!(state["source"], "codex-proxy");
 
     let auth: serde_json::Value = serde_json::from_str(&fs::read_to_string(&auth_path).unwrap()).unwrap();
     assert_eq!(auth["OPENAI_API_KEY"], "sk-codex");

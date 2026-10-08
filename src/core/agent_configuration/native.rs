@@ -1,3 +1,4 @@
+use super::codex_switch::{self, CodexSwitch};
 use crate::core::codex_catalog::{default_catalog_path, write_catalog};
 use crate::core::config::ConfigManager;
 use crate::core::env::{resolve_api_key, resolve_codex_api_key, ApiKeyUnavailable};
@@ -180,10 +181,9 @@ pub(super) fn apply_codex_model(mgr: &ConfigManager, provider_id: &str, model_sl
         toml_edit::DocumentMut::new()
     };
     let previously_third_party = uses_third_party_codex_provider(&config);
-    let previous_managed_model = managed_last_switch(&config)
-        .and_then(|table| table.get("model"))
-        .and_then(toml_edit::Item::as_str)
-        .map(str::to_owned);
+    let previous_managed_model = codex_switch::read(&config_path, &config)?
+        .filter(|state| state.matches_config(&config))
+        .and_then(|state| state.model);
     if let Some(model) = selected_model {
         let all_providers = mgr.list_providers_for(AppType::Codex)?;
         write_catalog(&catalog_path, &all_providers)?;
@@ -202,18 +202,26 @@ pub(super) fn apply_codex_model(mgr: &ConfigManager, provider_id: &str, model_sl
         config.as_table_mut().remove("model_reasoning_effort");
     }
 
-    configure_managed_codex_provider(&mut config, &provider, selected_model)?;
+    configure_managed_codex_provider(&mut config, &provider)?;
+    let state = CodexSwitch::new(
+        &config,
+        provider.id.clone(),
+        selected_model.map(|model| model.slug.clone()),
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+    );
+    codex_switch::remove_legacy(&mut config);
     if official {
         restore_official_codex_auth(&auth_path, previously_third_party)?;
     } else {
         activate_akmux_codex_auth(&auth_path, auth_token.as_deref().expect("non-official provider resolved a token"), previously_third_party)?;
     }
     write_private_file(&config_path, config.to_string().as_bytes())?;
+    state.write(&config_path)?;
 
     Ok(provider)
 }
 
-fn configure_managed_codex_provider(config: &mut toml_edit::DocumentMut, provider: &Provider, selected_model: Option<&crate::core::models::CodexModel>) -> Result<()> {
+fn configure_managed_codex_provider(config: &mut toml_edit::DocumentMut, provider: &Provider) -> Result<()> {
     config["model_provider"] = toml_edit::value(CODEX_MANAGED_PROVIDER_ID);
     if config.as_table().get("model_providers").is_some_and(|item| !item.is_table()) {
         anyhow::bail!("Codex config.toml 'model_providers' must be a table");
@@ -243,34 +251,6 @@ fn configure_managed_codex_provider(config: &mut toml_edit::DocumentMut, provide
     provider_table.insert("wire_api", toml_edit::value("responses"));
     provider_table.insert("requires_openai_auth", toml_edit::value(true));
 
-    if config.as_table().get("akmux").is_some_and(|item| !item.is_table()) {
-        anyhow::bail!("Codex config.toml 'akmux' must be a table");
-    }
-    if config.as_table().get("akmux").is_none() {
-        config.as_table_mut().insert("akmux", toml_edit::Item::Table(toml_edit::Table::new()));
-    }
-    let akmux = config["akmux"].as_table_mut().expect("table created above");
-    if akmux.get("last_switch").is_some_and(|item| !item.is_table()) {
-        anyhow::bail!("Codex config.toml 'akmux.last_switch' must be a table");
-    }
-    if akmux.get("last_switch").is_none() {
-        akmux.insert("last_switch", toml_edit::Item::Table(toml_edit::Table::new()));
-    }
-    let last_switch = akmux
-        .get_mut("last_switch")
-        .and_then(toml_edit::Item::as_table_mut)
-        .expect("last_switch table created above");
-    last_switch.insert("source", toml_edit::value(&provider.id));
-    if let Some(model) = selected_model {
-        last_switch.insert("model", toml_edit::value(&model.slug));
-    } else {
-        last_switch.remove("model");
-    }
-    last_switch.insert("at", toml_edit::value(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()));
-    if akmux.iter().all(|(key, item)| key == "last_switch" && item.is_table()) {
-        akmux.set_implicit(true);
-    }
-    clear_legacy_last_switch(config);
     Ok(())
 }
 
@@ -278,13 +258,6 @@ fn uses_third_party_codex_provider(config: &toml_edit::DocumentMut) -> bool {
     let provider = config.get("model_provider").and_then(toml_edit::Item::as_str);
     if !provider.is_some_and(is_managed_codex_provider_id) {
         return false;
-    }
-    let source = managed_last_switch(config).and_then(|table| table.get("source")).and_then(toml_edit::Item::as_str);
-    if source == Some(OFFICIAL_CODEX_PROVIDER_ID) {
-        return false;
-    }
-    if source.is_some() {
-        return true;
     }
     let Some(provider_table) = config
         .get("model_providers")
@@ -300,16 +273,6 @@ fn uses_third_party_codex_provider(config: &toml_edit::DocumentMut) -> bool {
 
 fn is_managed_codex_provider_id(provider: &str) -> bool {
     provider == CODEX_MANAGED_PROVIDER_ID || LEGACY_CODEX_MANAGED_PROVIDER_IDS.contains(&provider)
-}
-
-fn clear_legacy_last_switch(config: &mut toml_edit::DocumentMut) {
-    let remove_legacy = config.as_table_mut().get_mut("ccswitch").and_then(toml_edit::Item::as_table_mut).is_some_and(|legacy| {
-        legacy.remove("last_switch");
-        legacy.is_empty()
-    });
-    if remove_legacy {
-        config.as_table_mut().remove("ccswitch");
-    }
 }
 
 fn activate_akmux_codex_auth(auth_path: &Path, token: &str, previously_third_party: bool) -> Result<()> {
@@ -328,17 +291,6 @@ fn restore_official_codex_auth(auth_path: &Path, previously_third_party: bool) -
         move_private_file(&official_backup, auth_path)?;
     }
     Ok(())
-}
-
-fn managed_last_switch(config: &toml_edit::DocumentMut) -> Option<&toml_edit::Table> {
-    ["akmux", "ccswitch"].into_iter().find_map(|namespace| {
-        config
-            .as_table()
-            .get(namespace)
-            .and_then(toml_edit::Item::as_table)
-            .and_then(|table| table.get("last_switch"))
-            .and_then(toml_edit::Item::as_table)
-    })
 }
 
 fn move_private_file(source: &Path, destination: &Path) -> Result<()> {

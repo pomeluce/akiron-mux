@@ -1,3 +1,4 @@
+mod codex_switch;
 mod native;
 mod reconcile;
 
@@ -40,6 +41,7 @@ impl AgentConfigPaths {
             self.codex_auth.with_file_name("auth_openai.json"),
             self.codex_auth.with_file_name("auth_akmux.json"),
             self.codex_catalog(),
+            codex_switch::state_path(&self.codex_config),
         ]
     }
 }
@@ -96,7 +98,13 @@ impl<'a> AgentConfiguration<'a> {
         if let Err(error) = reconcile::reconcile_claude(self.mgr, &self.paths.claude_settings) {
             failures.push(format!("Claude: {error:#}"));
         }
-        if let Err(error) = reconcile::reconcile_codex(self.mgr, &self.paths.codex_config) {
+        let state_path = codex_switch::state_path(&self.paths.codex_config);
+        let migration = self.native_transaction("Migrate Codex switch metadata", [self.paths.codex_config.as_path(), state_path.as_path()], |_| {
+            codex_switch::migrate(&self.paths.codex_config)
+        });
+        if let Err(error) = migration {
+            failures.push(format!("Codex: {error:#}"));
+        } else if let Err(error) = reconcile::reconcile_codex(self.mgr, &self.paths.codex_config) {
             failures.push(format!("Codex: {error:#}"));
         }
         if let Err(error) = self.rebuild_codex_catalog_if_present() {

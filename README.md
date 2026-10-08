@@ -507,11 +507,9 @@ name = "Codex Proxy"
 base_url = "https://api.example.com/v1"
 wire_api = "responses"
 requires_openai_auth = true
-
-[akmux.last_switch]
-source = "codex-proxy"
-at = "2026-01-01 12:00:00"
 ```
+
+AkironMux 的内部切换记录保存在 `~/.codex/akmux/last-switch.json`，不会向 Codex 的 `config.toml` 添加非官方配置项。启动 AkironMux 或再次切换 Codex Provider 时，会自动迁移旧的 `[akmux.last_switch]` / `[ccswitch.last_switch]` 记录，以消除新版 Codex 的 unknown configuration warning。
 
 切换到第三方 Provider 时，当前官方 `auth.json` 会移动到 `auth_openai.json`，然后创建只包含第三方 Key 的 `auth.json`：
 

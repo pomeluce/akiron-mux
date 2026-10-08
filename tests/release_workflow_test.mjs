@@ -1,50 +1,35 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import vm from 'node:vm';
 
 const workflow = fs.readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
 const jobs = Object.fromEntries([...workflow.matchAll(/^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:\n|$(?![\s\S]))/gm)].map(match => [match[1], match[2]]));
 const buildJobs = ['linux', 'macos', 'windows', 'gui-linux', 'gui-macos', 'gui-windows'];
 
-function runs(job, event, phase, prepare = 'success', validated = 'success') {
-  const expression = jobs[job]?.match(/^    if: (.*)$/m)?.[1];
-  assert.ok(expression, `${job} must have an explicit condition`);
-  return vm.runInNewContext(expression, {
-    github: { event_name: event },
-    inputs: { phase },
-    needs: { validate: { result: validated }, prepare: { result: prepare }, publish: { result: 'success' } },
-    always: () => true,
-  });
-}
-
 assert.match(workflow, /^on:\n  push:\n    tags:\n      - ['"]v\*['"]/m, 'pushing a version tag must trigger Release');
-assert.match(workflow, /default: release/, 'manual dispatch must release by default');
+assert.doesNotMatch(workflow, /candidate_run_id|inputs\.phase|release-candidate/, 'release must not require phase or candidate orchestration');
+assert.ok(!jobs.prepare, 'build and publish must be one continuous run');
+assert.ok(!fs.existsSync(new URL('../.github/workflows/release-ssh.yml', import.meta.url)), 'remove the obsolete SSH trigger workflow');
 assert.match(workflow, /group: release-/, 'same-tag runs must be serialized');
 assert.match(jobs.validate, /scripts\/validate-release\.mjs/, 'validate the tag before building');
 
 for (const job of buildJobs) {
-  assert.equal(runs(job, 'push', ''), true, `${job} must build on tag pushes without inputs`);
-  assert.equal(runs(job, 'workflow_dispatch', 'release'), true);
-  assert.equal(runs(job, 'workflow_dispatch', 'prepare'), true);
-  assert.equal(runs(job, 'workflow_dispatch', 'publish'), false);
+  assert.doesNotMatch(jobs[job], /^    if:/m, `${job} must build on both tag pushes and manual dispatch without phase inputs`);
   assert.match(jobs[job], /needs: validate/);
   assert.match(jobs[job], /ref: \$\{\{ needs\.validate\.outputs\.source_sha \}\}/, 'build the requested tag, not the dispatch branch');
 }
 
-assert.equal(runs('publish', 'push', ''), true);
-assert.equal(runs('publish', 'workflow_dispatch', 'release'), true);
-assert.equal(runs('publish', 'workflow_dispatch', 'prepare'), false);
-assert.equal(runs('publish', 'workflow_dispatch', 'publish', 'skipped'), true, 'explicit publish must survive skipped build jobs');
-assert.equal(runs('publish', 'push', '', 'failure'), false, 'failed builds must never publish');
-assert.equal(runs('publish', 'push', '', 'skipped'), false);
-assert.equal(runs('publish', 'push', '', 'success', 'failure'), false);
-assert.match(jobs.publish, /needs: \[validate, prepare\]/);
-assert.match(jobs.publish, /source-commit/, 'bind prepared artifacts to the tag commit');
-assert.match(jobs.publish, /inputs\.candidate_run_id \|\| github\.run_id/, 'use this run unless publishing a stored candidate');
+const dependencies = jobs.publish.match(/^    needs: \[([^\]]+)\]/m)?.[1].split(',').map(name => name.trim());
+assert.deepEqual(dependencies, ['validate', ...buildJobs], 'publish must wait for every successful build and source validation');
+assert.doesNotMatch(jobs.publish, /^    if:/m, 'retain the default success gate: failed or skipped builds must block publication');
+assert.match(jobs.publish, /actions\/download-artifact@/);
+assert.match(jobs.publish, /scripts\/release-metadata\.mjs generate/);
+assert.doesNotMatch(jobs.publish, /run-id:|actions\/upload-artifact@/, 'publish this run directly without an intermediate candidate upload');
 assert.doesNotMatch(jobs.publish, /cmp nix\/release-assets\.nix/, 'a new tag cannot already contain hashes of not-yet-built assets');
-assert.match(jobs['sync-nix'], /needs: \[validate, prepare, publish\]/);
+assert.match(jobs['sync-nix'], /needs: publish/);
+assert.match(jobs['sync-nix'], /gh release download/, 'sync checksums against the actual published files');
 assert.match(jobs['sync-nix'], /github\.event\.repository\.default_branch/);
 assert.match(jobs['sync-nix'], /add-paths: nix\/release-assets\.nix/, 'the metadata PR must not include unrelated files');
-assert.match(jobs['sync-nix'], /scripts\/sync-release-metadata\.mjs/);
+assert.match(jobs['sync-nix'], /scripts\/release-metadata\.mjs sync/);
+assert.match(jobs.homebrew, /needs: publish/, 'Homebrew failure must not gate publication or Nix synchronization');
 
 console.log('Release tag trigger and job routing regression tests passed.');

@@ -551,19 +551,11 @@ nix build .#gui        # 封装 Release 中的 TUI/CLI + 桌面 GUI
 
 ### 发布
 
-推送 `vMAJOR.MINOR.PATCH` Tag 后，Release 工作流自动检出该 Tag 的提交，构建各平台产物、生成校验清单并发布 GitHub Release。源码中的 CLI、WebUI 和桌面端版本必须与 Tag 一致。
+推送 `vMAJOR.MINOR.PATCH` Tag 后，Release 工作流自动校验版本、检出该 Tag 的固定提交，并行构建各平台 CLI 和桌面端，再直接汇总产物、生成 Nix 校验清单并发布 GitHub Release。源码中的 CLI、WebUI 和桌面端版本必须与 Tag 一致；任何构建失败都会阻止发布。
 
-已存在但尚未发布的 Tag 可以补发：在 GitHub Actions 的 Release 工作流中选择默认分支，填写目标 Tag，使用默认的 `release` 阶段。构建仍使用目标 Tag 的源码，不需要删除或移动 Tag。也可以选择 `prepare` 仅保存候选产物，再以相同 Tag 和 candidate run ID 执行 `publish`；发布会校验候选产物的源码提交与 SHA-256。
+已存在但尚未发布的 Tag 可以在 GitHub Actions 的 Release 工作流中选择默认分支并填写目标 Tag 补发。构建仍使用目标 Tag 的源码，不需要删除或移动 Tag；没有独立的 prepare/publish 阶段、候选 run ID 或专用触发分支。正常推送新 Tag 使用 SSH Git 认证即可，无需本机 GitHub CLI 登录。
 
-如果本机只使用 SSH Git 认证，可以将包含最新触发工作流的提交推送到专用分支，通过 GitHub Actions 内置令牌启动默认分支上的 Release 工作流，无需本机 GitHub CLI 登录：
-
-```bash
-git push origin HEAD:refs/heads/release-trigger/v1.15.5
-```
-
-分支名必须是 `release-trigger/vMAJOR.MINOR.PATCH`，对应 Tag 必须已存在。触发分支只负责请求发布，构建源码仍来自该 Tag；重复推送完全相同的提交不会产生新的 push 事件。
-
-Release 同时附带 `AkironMux-<version>-nix-release-assets.nix`。发布成功后，工作流会创建仅更新 `nix/release-assets.nix` 的 PR，合并后，跟踪默认分支的 Nix 安装将使用新版二进制。Tag 保持原始源码提交，因此 Tag 内的 Nix 清单可能仍指向上一版；要使用新版二进制，flake 应指向已同步清单的提交。同步 PR 需要仓库开启 Settings → Actions → General → Allow GitHub Actions to create and approve pull requests。
+Release 同时附带 `AkironMux-<version>-nix-release-assets.nix`。发布后的独立任务下载已发布的 Linux CLI、桌面包和清单，重新计算 SHA-256 并验证一致后，创建仅更新 `nix/release-assets.nix` 的 PR；合并后，跟踪默认分支的 Nix 安装将使用新版二进制。Nix 同步和 Homebrew 更新互不阻塞，也不会撤回已成功发布的 Release。Tag 保持原始源码提交，因此 Tag 内的 Nix 清单可能仍指向上一版；要使用新版二进制，flake 应指向已同步清单的提交。同步 PR 需要仓库开启 Settings → Actions → General → Allow GitHub Actions to create and approve pull requests。
 
 已发布的同名资产不可覆盖；内容变化时必须升级版本并创建新 Tag。
 

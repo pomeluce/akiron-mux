@@ -12,10 +12,10 @@ const write = (name, content) => {
   fs.mkdirSync(path.dirname(path.join(root, name)), { recursive: true });
   fs.writeFileSync(path.join(root, name), content);
 };
-function validate(tag, phase = 'release', runId = '') {
+function validate(tag) {
   return spawnSync(process.execPath, [script], {
     cwd: root,
-    env: { ...process.env, RELEASE_TAG: tag, RELEASE_PHASE: phase, CANDIDATE_RUN_ID: runId, GITHUB_OUTPUT: path.join(root, 'output') },
+    env: { ...process.env, RELEASE_TAG: tag, GITHUB_OUTPUT: path.join(root, 'output') },
     encoding: 'utf8',
   });
 }
@@ -35,23 +35,11 @@ try {
   git('commit', '-m', 'test: advance release fixture', '-m', 'Ensure dispatch validates tag versions instead of branch versions.');
   git('tag', 'v3.0.0');
 
-  for (const phase of ['release', 'prepare', 'publish']) {
-    const result = validate('v2.0.0', phase, phase === 'publish' ? '123' : '');
-    assert.equal(result.status, 0, result.stderr);
-  }
+  const result = validate('v2.0.0');
+  assert.equal(result.status, 0, result.stderr);
   assert.ok(fs.readFileSync(path.join(root, 'output'), 'utf8').includes(`source_sha=${sha}\n`));
-  for (const [tag, phase, runId] of [
-    ['v2.0.0', 'publish', ''],
-    ['v2.0.0', 'publish', '../123'],
-    ['v2.0.0', 'release', '123'],
-    ['v2.0.0', 'prepare', '123'],
-    ['v2.0.0', 'unknown', ''],
-    ['v2.0.1', 'release', ''],
-    ['v3.0.0', 'release', ''],
-    ['main', 'release', ''],
-    ['v2.0.0;echo invalid', 'release', ''],
-  ]) {
-    assert.notEqual(validate(tag, phase, runId).status, 0, `${tag}/${phase}/${runId} must be rejected`);
+  for (const tag of ['v2.0.1', 'v3.0.0', 'main', 'v2.0.0;echo invalid']) {
+    assert.notEqual(validate(tag).status, 0, `${tag} must be rejected`);
   }
   console.log('Release tag source and version validation regression tests passed.');
 } finally {

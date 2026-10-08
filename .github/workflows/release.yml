@@ -54,6 +54,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Test release trigger routing
+        run: |
+          node tests/release_workflow_test.mjs
+          node tests/release_ssh_trigger_test.mjs
       - name: Validate release tag and source versions
         id: tag
         env:

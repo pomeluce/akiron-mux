@@ -3,18 +3,22 @@
 name: Release
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to prepare or publish
+        description: Existing release tag to build or publish
         required: true
         type: string
       phase:
-        description: Prepare assets first, then publish the exact prepared run
+        description: Build and release, or prepare/publish a stored candidate
         required: true
-        default: prepare
+        default: release
         type: choice
         options:
+          - release
           - prepare
           - publish
       candidate_run_id:
@@ -34,12 +38,37 @@ permissions:
   actions: read
   contents: write
 
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.tag.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate release tag and source versions
+        id: tag
+        env:
+          RELEASE_PHASE: ${{ inputs.phase || 'release' }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: node scripts/validate-release.mjs
+
   linux:
-    if: inputs.phase == 'prepare'
+    needs: validate
+    if: inputs.phase != 'publish'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
       - uses: pnpm/action-setup@v4
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -94,10 +123,13 @@ jobs:
           if-no-files-found: error
 
   macos:
-    if: inputs.phase == 'prepare'
+    needs: validate
+    if: inputs.phase != 'publish'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
       - uses: pnpm/action-setup@v4
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -135,10 +167,13 @@ jobs:
           if-no-files-found: error
 
   windows:
-    if: inputs.phase == 'prepare'
+    needs: validate
+    if: inputs.phase != 'publish'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
       - uses: pnpm/action-setup@v4
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -180,10 +215,13 @@ jobs:
           if-no-files-found: error
 
   gui-linux:
-    if: inputs.phase == 'prepare'
+    needs: validate
+    if: inputs.phase != 'publish'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
       - uses: pnpm/action-setup@v4
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -228,10 +266,13 @@ jobs:
           if-no-files-found: error
 
   gui-macos:
-    if: inputs.phase == 'prepare'
+    needs: validate
+    if: inputs.phase != 'publish'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
       - uses: pnpm/action-setup@v4
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -269,10 +310,13 @@ jobs:
           if-no-files-found: error
 
   gui-windows:
-    if: inputs.phase == 'prepare'
+    needs: validate
+    if: inputs.phase != 'publish'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
       - uses: pnpm/action-setup@v4
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -317,8 +361,8 @@ jobs:
           if-no-files-found: error
 
   prepare:
-    if: inputs.phase == 'prepare'
-    needs: [linux, macos, windows, gui-linux, gui-macos, gui-windows]
+    if: inputs.phase != 'publish'
+    needs: [validate, linux, macos, windows, gui-linux, gui-macos, gui-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -327,6 +371,8 @@ jobs:
 
       - name: Test release tooling
         run: |
+          node tests/release_workflow_test.mjs
+          node tests/release_validation_test.mjs
           bash tests/release_publish_test.sh
           bash tests/release_candidate_test.sh
 
@@ -340,6 +386,8 @@ jobs:
         run: find artifacts -maxdepth 2 -type f -print
 
       - name: Prepare immutable release candidate
+        env:
+          SOURCE_COMMIT: ${{ needs.validate.outputs.source_sha }}
         run: bash scripts/prepare-release-candidate.sh "${{ env.RELEASE_TAG }}" artifacts release-candidate
 
       - name: Upload release candidate
@@ -350,28 +398,36 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Explain next step
+      - name: Explain prepared candidate
+        if: inputs.phase == 'prepare'
         run: |
-          echo "Copy release-candidate/nix/release-assets.nix into the repository."
-          echo "Commit that metadata, create $RELEASE_TAG on the commit, then run the publish phase with run ID $GITHUB_RUN_ID."
+          echo "Run the publish phase for $RELEASE_TAG with candidate run ID $GITHUB_RUN_ID."
+          echo "The tag stays immutable; Nix metadata is synchronized after publication."
 
   publish:
-    if: inputs.phase == 'publish'
+    needs: [validate, prepare]
+    if: always() && needs.validate.result == 'success' && ((inputs.phase == 'publish' && needs.prepare.result == 'skipped') || ((github.event_name == 'push' || inputs.phase == 'release') && needs.prepare.result == 'success'))
     runs-on: ubuntu-latest
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Validate publish inputs
-        run: |
-          test -n "${{ inputs.candidate_run_id }}"
-          test "$(git describe --tags --exact-match HEAD)" = "${{ env.RELEASE_TAG }}"
+          ref: ${{ needs.validate.outputs.source_sha }}
+      - uses: actions/checkout@v4
+        with:
+          path: release-tools
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Test release tooling
         run: |
-          bash tests/release_publish_test.sh
-          bash tests/release_candidate_test.sh
+          node release-tools/tests/release_workflow_test.mjs
+          node release-tools/tests/release_validation_test.mjs
+          bash release-tools/tests/release_publish_test.sh
+          bash release-tools/tests/release_candidate_test.sh
 
       - name: Download prepared release candidate
         uses: actions/download-artifact@v4
@@ -379,13 +435,15 @@ jobs:
           name: AkironMux-${{ env.RELEASE_TAG }}-release-candidate
           path: release-candidate
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.candidate_run_id }}
+          run-id: ${{ inputs.candidate_run_id || github.run_id }}
 
-      - name: Verify candidate checksums and Nix metadata
+      - name: Verify candidate source, checksums, and Nix metadata
+        env:
+          SOURCE_COMMIT: ${{ needs.validate.outputs.source_sha }}
         run: |
-          cmp nix/release-assets.nix release-candidate/nix/release-assets.nix
-          cd release-candidate/assets
-          sha256sum -c ../SHA256SUMS
+          test "$(cat release-candidate/source-commit)" = "$SOURCE_COMMIT"
+          (cd release-candidate/assets && sha256sum -c ../SHA256SUMS)
+          node release-tools/scripts/sync-release-metadata.mjs "$RELEASE_TAG" release-candidate verified-release-assets.nix
 
       - name: Generate changelog
         uses: orhun/git-cliff-action@v4
@@ -398,9 +456,10 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/publish-release.sh "${{ env.RELEASE_TAG }}" CHANGELOG.md release-candidate/assets
+        run: bash release-tools/scripts/publish-release.sh "$RELEASE_TAG" CHANGELOG.md release-candidate/assets
 
       - name: Update Homebrew formula
+        if: env.HOMEBREW_TAP_TOKEN != ''
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
@@ -440,6 +499,50 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/akiron-mux.rb
-          git commit -m "chore: update AkironMux formula for ${{ env.RELEASE_TAG }}" || true
+          git commit -m "chore: update AkironMux formula for $RELEASE_TAG" -m "Use the checksum of the immutable published macOS CLI archive." || true
           git pull --rebase
           git push
+
+  sync-nix:
+    needs: [validate, prepare, publish]
+    if: always() && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/checkout@v4
+        with:
+          path: release-tools
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download published candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: AkironMux-${{ env.RELEASE_TAG }}-release-candidate
+          path: release-candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id || github.run_id }}
+      - name: Update Nix release metadata
+        id: metadata
+        run: node release-tools/scripts/sync-release-metadata.mjs "$RELEASE_TAG" release-candidate
+      - name: Propose verified Nix release metadata
+        if: steps.metadata.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          add-paths: nix/release-assets.nix
+          branch: release/nix-${{ env.RELEASE_TAG }}
+          title: 'chore(nix): use release assets for ${{ env.RELEASE_TAG }}'
+          commit-message: |
+            chore(nix): use release assets for ${{ env.RELEASE_TAG }}
+
+            Pin the filenames and SHA-256 checksums of the immutable published CLI and desktop assets.
+          body: |
+            Synchronize Nix installation with the published ${{ env.RELEASE_TAG }} binaries.
+            The checksums were verified against the exact release candidate used for publication.
+            The source tag remains unchanged; merge this PR to update installations tracking the default branch.

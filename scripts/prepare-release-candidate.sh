@@ -11,8 +11,13 @@ artifacts_directory=$2
 candidate_directory=$3
 release_version=${release_tag#v}
 
-if [[ "$release_tag" != "v$release_version" || -z "$release_version" ]]; then
-  echo "release tag must start with v: $release_tag" >&2
+if [[ ! "${SOURCE_COMMIT:-}" =~ ^[a-f0-9]{40}$ ]]; then
+  echo "SOURCE_COMMIT must identify the release tag commit" >&2
+  exit 1
+fi
+
+if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "release tag must be vMAJOR.MINOR.PATCH: $release_tag" >&2
   exit 1
 fi
 if [[ ! -d "$artifacts_directory" ]]; then
@@ -35,14 +40,10 @@ if [[ -z "$cli_path" || -z "$desktop_path" ]]; then
 fi
 
 mkdir -p "$candidate_directory/assets" "$candidate_directory/nix"
+printf '%s\n' "$SOURCE_COMMIT" >"$candidate_directory/source-commit"
 while IFS= read -r -d '' artifact; do
   install -Dm644 "$artifact" "$candidate_directory/assets/$(basename "$artifact")"
 done < <(find "$artifacts_directory" -type f -print0)
-
-(
-  cd "$candidate_directory/assets"
-  sha256sum ./* >../SHA256SUMS
-)
 
 cli_hash=$(sha256sum "$cli_path" | cut -d ' ' -f 1)
 desktop_hash=$(sha256sum "$desktop_path" | cut -d ' ' -f 1)
@@ -63,5 +64,12 @@ printf '%s\n' \
   '  };' \
   '}' \
   >"$candidate_directory/nix/release-assets.nix"
+
+install -m644 "$candidate_directory/nix/release-assets.nix" \
+  "$candidate_directory/assets/AkironMux-${release_version}-nix-release-assets.nix"
+(
+  cd "$candidate_directory/assets"
+  sha256sum ./* >../SHA256SUMS
+)
 
 echo "release candidate prepared in: $candidate_directory"

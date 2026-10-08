@@ -9,6 +9,7 @@ mkdir -p "$fixture_root/bin" "$fixture_root/artifacts/linux" "$fixture_root/arti
 touch "$fixture_root/artifacts/linux/AkironMux-1.12.0-linux-x86_64-cli.tar.gz"
 touch "$fixture_root/artifacts/linux/AkironMux-1.12.0-linux-x86_64-desktop.AppImage"
 touch "$fixture_root/artifacts/windows/AkironMux-1.12.0-windows-x86_64-desktop-setup.exe"
+touch "$fixture_root/artifacts/linux/AkironMux-1.12.0-nix-release-assets.nix"
 printf 'Release notes\n' >"$fixture_root/CHANGELOG.md"
 
 cat >"$fixture_root/bin/gh" <<'EOF'
@@ -53,9 +54,11 @@ FAKE_RELEASE_EXISTS=false bash "$repo_root/scripts/publish-release.sh" \
   "$fixture_root/artifacts"
 
 grep -q '^release create ' "$GH_CALL_LOG"
+grep -q -- '--verify-tag' "$GH_CALL_LOG"
 grep -q 'AkironMux-1.12.0-linux-x86_64-cli.tar.gz' "$GH_CALL_LOG"
 grep -q 'AkironMux-1.12.0-linux-x86_64-desktop.AppImage' "$GH_CALL_LOG"
 grep -q 'AkironMux-1.12.0-windows-x86_64-desktop-setup.exe' "$GH_CALL_LOG"
+grep -q 'AkironMux-1.12.0-nix-release-assets.nix' "$GH_CALL_LOG"
 
 : >"$GH_CALL_LOG"
 mkdir -p "$fixture_root/existing-assets"

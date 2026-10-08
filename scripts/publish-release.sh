@@ -38,7 +38,8 @@ for release_asset in "${release_assets[@]}"; do
       "${asset_prefix}macos-arm64-cli.tar.gz" | \
       "${asset_prefix}macos-arm64-desktop.dmg" | \
       "${asset_prefix}windows-x86_64-cli.zip" | \
-      "${asset_prefix}windows-x86_64-desktop-setup.exe") ;;
+      "${asset_prefix}windows-x86_64-desktop-setup.exe" | \
+      "${asset_prefix}nix-release-assets.nix") ;;
     *)
       echo "unexpected release asset name: $asset_name" >&2
       exit 1
@@ -76,6 +77,7 @@ if gh release view "$release_tag" >/dev/null 2>&1; then
 fi
 
 gh release create "$release_tag" \
+  --verify-tag \
   --title "$release_tag" \
   --notes-file "$notes_file" \
   "${release_assets[@]}"
